@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog version="2">
+    <disk>
+        <filename>fd13-floppy.img</filename>
+        <name>FreeDOS 1.3 Boot Floppy</name>
+        <type>floppy</type>
+        <description>FreeDOS 1.3 boot floppy (1.44MB). Boot and install to hard disk.</description>
+        <size>1474560</size>
+        <license>GPL</license>
+        <sha256></sha256>
+        <defaultDrive>0</defaultDrive>
+    </disk>
+    <disk>
+        <filename>fd12-floppy.img</filename>
+        <name>FreeDOS 1.2 Boot Floppy</name>
+        <type>floppy</type>
+        <description>FreeDOS 1.2 boot floppy (1.44MB). Compatible with 8088 CPU.</description>
+        <size>1474560</size>
+        <license>GPL</license>
+        <sha256></sha256>
+        <defaultDrive>0</defaultDrive>
+    </disk>
+    <disk>
+        <filename>msdos622-boot.img</filename>
+        <name>MS-DOS 6.22 Boot Floppy</name>
+        <type>floppy</type>
+        <description>MS-DOS 6.22 setup disk 1 (1.44MB). Requires additional disks for full install.</description>
+        <size>1474560</size>
+        <license>Proprietary</license>
+        <sha256></sha256>
+        <defaultDrive>0</defaultDrive>
+    </disk>
+    <disk>
+        <filename>fd13-full.iso</filename>
+        <name>FreeDOS 1.3 Full CD</name>
+        <type>iso</type>
+        <description>FreeDOS 1.3 full install CD-ROM image with all packages.</description>
+        <size>652214272</size>
+        <license>GPL</license>
+        <sha256></sha256>
+        <defaultDrive>224</defaultDrive>
+    </disk>
+    <disk>
+        <filename>fd13-lite.iso</filename>
+        <name>FreeDOS 1.3 Lite CD</name>
+        <type>iso</type>
+        <description>FreeDOS 1.3 lite CD-ROM image with base system only.</description>
+        <size>167772160</size>
+        <license>GPL</license>
+        <sha256></sha256>
+        <defaultDrive>224</defaultDrive>
+    </disk>
+</catalog>

@@ -20,7 +20,8 @@ public:
 
   // Segment register indices
   enum SegIndex {
-    seg_ES = 0, seg_CS = 1, seg_SS = 2, seg_DS = 3
+    seg_ES = 0, seg_CS = 1, seg_SS = 2, seg_DS = 3,
+    seg_FS = 4, seg_GS = 5
   };
 
   // FLAGS bit positions
@@ -39,8 +40,8 @@ public:
   // General-purpose registers (AX, CX, DX, BX, SP, BP, SI, DI)
   emu88_uint16 regs[8];
 
-  // Segment registers (ES, CS, SS, DS)
-  emu88_uint16 sregs[4];
+  // Segment registers (ES, CS, SS, DS, FS, GS)
+  emu88_uint16 sregs[6];
 
   // Instruction pointer
   emu88_uint16 ip;
@@ -188,10 +189,10 @@ private:
   void execute_alu_r16_rm16(emu88_uint8 op);
   void execute_alu_al_imm8(emu88_uint8 op);
   void execute_alu_ax_imm16(emu88_uint8 op);
-  void execute_grp1_rm8(emu88_uint8 modrm, emu88_uint8 imm);
-  void execute_grp1_rm16(emu88_uint8 modrm, emu88_uint16 imm);
-  void execute_grp2_rm8(emu88_uint8 modrm, emu88_uint8 count);
-  void execute_grp2_rm16(emu88_uint8 modrm, emu88_uint8 count);
+  void execute_grp1_rm8(const modrm_result &mr, emu88_uint8 imm);
+  void execute_grp1_rm16(const modrm_result &mr, emu88_uint16 imm);
+  void execute_grp2_rm8(const modrm_result &mr, emu88_uint8 count);
+  void execute_grp2_rm16(const modrm_result &mr, emu88_uint8 count);
   void execute_grp3_rm8(emu88_uint8 modrm);
   void execute_grp3_rm16(emu88_uint8 modrm);
   void execute_grp4_rm8(emu88_uint8 modrm);

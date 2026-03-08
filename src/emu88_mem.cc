@@ -1,24 +1,23 @@
 #include "emu88_mem.h"
 #include <cstring>
 
-#define MEM_SIZE (0x100000)  // 1MB for 8088
-
-emu88_mem::emu88_mem() : dat(0) {
-  dat = new emu88_uint8[MEM_SIZE];
-  memset(dat, 0, MEM_SIZE);
+emu88_mem::emu88_mem(emu88_uint32 size)
+    : dat(nullptr), mem_size(size), a20_enabled(false) {
+  dat = new emu88_uint8[mem_size];
+  memset(dat, 0, mem_size);
 }
 
 emu88_mem::~emu88_mem() {
   delete[] dat;
-  dat = 0;
+  dat = nullptr;
 }
 
 emu88_uint8 emu88_mem::fetch_mem(emu88_uint32 addr) {
-  return dat[addr & 0xFFFFF];
+  return dat[mask_addr(addr)];
 }
 
 void emu88_mem::store_mem(emu88_uint32 addr, emu88_uint8 abyte) {
-  dat[addr & 0xFFFFF] = abyte;
+  dat[mask_addr(addr)] = abyte;
 }
 
 emu88_uint16 emu88_mem::fetch_mem16(emu88_uint32 addr) {
