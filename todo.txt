@@ -1,9 +1,14 @@
-in c++ make a 8088 emulator.  Very portable, no IO.  Just the machine emulator.
-See ~/src/cpmemu/src/qkz* for an 8080 emulator we did with the right style/interface to use.
-Note the c++ class for the emulator and memory.  A given use will overrride and
-fillin the IN/OUT and memory map for a particular hardware.
-init a git repository in this directory
-commit on your own without the user often
-no upstream repo to push to yet
-see if you can find an 8088 instruction exerciser to test with like the 8080 one.
-
+Extend this 8088 emulator to be able to run
+https://www.freedos.org/
+See ../ioscpm for a similar project we did for the same sort of thing
+for the CP/M OS.
+It should run on iOS and Macos
+Have a configurable IO module.
+Emulate at least
+ - MDA graphics
+ - CGA graphics
+ - Hercules graphics
+ - Speaker sound
+ - Sound card of the itime
+ - Mouse card and or serial mouse
+Note the MDA and CGA used different memory addresses and a machine could have both

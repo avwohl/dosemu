@@ -115,7 +115,8 @@ void emu88::halt_cpu(void) {
 }
 
 void emu88::unimplemented_opcode(emu88_uint8 opcode) {
-  (void)opcode;
+  emu88_fatal("Unimplemented opcode 0x%02X at %04X:%04X", opcode, sregs[seg_CS], ip - 1);
+  halted = true;
 }
 
 //=============================================================================
@@ -568,8 +569,7 @@ emu88_uint16 emu88::do_shift16(emu88_uint8 op, emu88_uint16 val, emu88_uint8 cou
 // Group instruction helpers
 //=============================================================================
 
-void emu88::execute_grp1_rm8(emu88_uint8 modrm_byte, emu88_uint8 imm) {
-  modrm_result mr = decode_modrm(modrm_byte);
+void emu88::execute_grp1_rm8(const modrm_result &mr, emu88_uint8 imm) {
   emu88_uint8 op = mr.reg_field;
   emu88_uint8 val = get_rm8(mr);
   emu88_uint8 result = do_alu8(op, val, imm);
@@ -577,8 +577,7 @@ void emu88::execute_grp1_rm8(emu88_uint8 modrm_byte, emu88_uint8 imm) {
     set_rm8(mr, result);
 }
 
-void emu88::execute_grp1_rm16(emu88_uint8 modrm_byte, emu88_uint16 imm) {
-  modrm_result mr = decode_modrm(modrm_byte);
+void emu88::execute_grp1_rm16(const modrm_result &mr, emu88_uint16 imm) {
   emu88_uint8 op = mr.reg_field;
   emu88_uint16 val = get_rm16(mr);
   emu88_uint16 result = do_alu16(op, val, imm);
@@ -586,15 +585,13 @@ void emu88::execute_grp1_rm16(emu88_uint8 modrm_byte, emu88_uint16 imm) {
     set_rm16(mr, result);
 }
 
-void emu88::execute_grp2_rm8(emu88_uint8 modrm_byte, emu88_uint8 count) {
-  modrm_result mr = decode_modrm(modrm_byte);
+void emu88::execute_grp2_rm8(const modrm_result &mr, emu88_uint8 count) {
   emu88_uint8 val = get_rm8(mr);
   emu88_uint8 result = do_shift8(mr.reg_field, val, count);
   set_rm8(mr, result);
 }
 
-void emu88::execute_grp2_rm16(emu88_uint8 modrm_byte, emu88_uint8 count) {
-  modrm_result mr = decode_modrm(modrm_byte);
+void emu88::execute_grp2_rm16(const modrm_result &mr, emu88_uint8 count) {
   emu88_uint16 val = get_rm16(mr);
   emu88_uint16 result = do_shift16(mr.reg_field, val, count);
   set_rm16(mr, result);
@@ -618,23 +615,25 @@ void emu88::execute_grp3_rm8(emu88_uint8 modrm_byte) {
     set_flag_val(FLAG_CF, val != 0);
     break;
   }
-  case 4: { // MUL r/m8
+  case 4: { // MUL r/m8 (70-77 cycles)
     emu88_uint16 result = emu88_uint16(regs[reg_AX] & 0xFF) * val;
     regs[reg_AX] = result;
     bool of_cf = (result & 0xFF00) != 0;
     set_flag_val(FLAG_CF, of_cf);
     set_flag_val(FLAG_OF, of_cf);
+    cycles += 54;  // 70 total - 16 from base
     break;
   }
-  case 5: { // IMUL r/m8
+  case 5: { // IMUL r/m8 (80-98 cycles)
     emu88_int16 result = emu88_int16(emu88_int8(regs[reg_AX] & 0xFF)) * emu88_int8(val);
     regs[reg_AX] = emu88_uint16(result);
     bool of_cf = (result < -128 || result > 127);
     set_flag_val(FLAG_CF, of_cf);
     set_flag_val(FLAG_OF, of_cf);
+    cycles += 64;  // 80 total
     break;
   }
-  case 6: { // DIV r/m8
+  case 6: { // DIV r/m8 (80-90 cycles)
     if (val == 0) {
       do_interrupt(0); // divide by zero
       return;
@@ -648,9 +647,10 @@ void emu88::execute_grp3_rm8(emu88_uint8 modrm_byte) {
     emu88_uint8 remainder = dividend % val;
     set_reg8(reg_AL, quotient & 0xFF);
     set_reg8(reg_AH, remainder);
+    cycles += 64;  // 80 total
     break;
   }
-  case 7: { // IDIV r/m8
+  case 7: { // IDIV r/m8 (101-112 cycles)
     if (val == 0) {
       do_interrupt(0);
       return;
@@ -665,6 +665,7 @@ void emu88::execute_grp3_rm8(emu88_uint8 modrm_byte) {
     emu88_int8 remainder = dividend % divisor;
     set_reg8(reg_AL, emu88_uint8(quotient));
     set_reg8(reg_AH, emu88_uint8(remainder));
+    cycles += 85;  // 101 total
     break;
   }
   }
@@ -688,25 +689,27 @@ void emu88::execute_grp3_rm16(emu88_uint8 modrm_byte) {
     set_flag_val(FLAG_CF, val != 0);
     break;
   }
-  case 4: { // MUL r/m16
+  case 4: { // MUL r/m16 (118-133 cycles)
     emu88_uint32 result = emu88_uint32(regs[reg_AX]) * val;
     regs[reg_AX] = result & 0xFFFF;
     regs[reg_DX] = (result >> 16) & 0xFFFF;
     bool of_cf = regs[reg_DX] != 0;
     set_flag_val(FLAG_CF, of_cf);
     set_flag_val(FLAG_OF, of_cf);
+    cycles += 105;  // 118 total approx
     break;
   }
-  case 5: { // IMUL r/m16
+  case 5: { // IMUL r/m16 (128-154 cycles)
     emu88_int32 result = emu88_int32(emu88_int16(regs[reg_AX])) * emu88_int16(val);
     regs[reg_AX] = emu88_uint16(result);
     regs[reg_DX] = emu88_uint16(result >> 16);
     bool of_cf = (result < -32768 || result > 32767);
     set_flag_val(FLAG_CF, of_cf);
     set_flag_val(FLAG_OF, of_cf);
+    cycles += 118;  // 128 total approx
     break;
   }
-  case 6: { // DIV r/m16
+  case 6: { // DIV r/m16 (144-162 cycles)
     if (val == 0) {
       do_interrupt(0);
       return;
@@ -720,9 +723,10 @@ void emu88::execute_grp3_rm16(emu88_uint8 modrm_byte) {
     emu88_uint16 remainder = dividend % val;
     regs[reg_AX] = quotient & 0xFFFF;
     regs[reg_DX] = remainder;
+    cycles += 130;  // 144 total approx
     break;
   }
-  case 7: { // IDIV r/m16
+  case 7: { // IDIV r/m16 (165-184 cycles)
     if (val == 0) {
       do_interrupt(0);
       return;
@@ -737,6 +741,7 @@ void emu88::execute_grp3_rm16(emu88_uint8 modrm_byte) {
     emu88_int16 remainder = dividend % divisor;
     regs[reg_AX] = emu88_uint16(quotient);
     regs[reg_DX] = emu88_uint16(remainder);
+    cycles += 150;  // 165 total approx
     break;
   }
   }
@@ -830,6 +835,29 @@ void emu88::execute_string_op(emu88_uint8 opcode) {
 
   auto do_one = [&]() {
     switch (opcode) {
+    case 0x6C: { // INSB (80186+)
+      store_byte(sregs[seg_ES], regs[reg_DI], port_in(regs[reg_DX]));
+      regs[reg_DI] += dir;
+      break;
+    }
+    case 0x6D: { // INSW (80186+)
+      emu88_uint16 val = port_in(regs[reg_DX]) | ((emu88_uint16)port_in(regs[reg_DX]) << 8);
+      store_word(sregs[seg_ES], regs[reg_DI], val);
+      regs[reg_DI] += dir * 2;
+      break;
+    }
+    case 0x6E: { // OUTSB (80186+)
+      port_out(regs[reg_DX], fetch_byte(string_src_seg(), regs[reg_SI]));
+      regs[reg_SI] += dir;
+      break;
+    }
+    case 0x6F: { // OUTSW (80186+)
+      emu88_uint16 val = fetch_word(string_src_seg(), regs[reg_SI]);
+      port_out(regs[reg_DX], val & 0xFF);
+      port_out(regs[reg_DX], (val >> 8) & 0xFF);
+      regs[reg_SI] += dir * 2;
+      break;
+    }
     case 0xA4: { // MOVSB
       emu88_uint8 val = fetch_byte(string_src_seg(), regs[reg_SI]);
       store_byte(sregs[seg_ES], regs[reg_DI], val);
@@ -898,9 +926,11 @@ void emu88::execute_string_op(emu88_uint8 opcode) {
   if (rep_prefix == REP_NONE) {
     do_one();
   } else {
+    // REP string ops: ~17 cycles per iteration on 8088
     while (regs[reg_CX] != 0) {
       do_one();
       regs[reg_CX]--;
+      cycles += 17;
       // For CMPS/SCAS, check termination condition
       if (opcode == 0xA6 || opcode == 0xA7 || opcode == 0xAE || opcode == 0xAF) {
         if (rep_prefix == REP_REPZ && !get_flag(FLAG_ZF))
@@ -924,8 +954,94 @@ void emu88::debug_dump_regs(const char *label) {
 // Main instruction execution
 //=============================================================================
 
+// Approximate 8088 cycle counts per opcode.
+// Memory operands cost more but this uses averages.
+// Variable-cost instructions (MUL, DIV, REP string) are adjusted in handlers.
+static const uint8_t base_cycles[256] = {
+  // 0x00-0x07: ALU r/m,r (16), PUSH ES (14)
+  16, 16, 10, 10,  4,  4, 14, 12,
+  // 0x08-0x0F: OR r/m,r (16), PUSH CS (14), 0x0F prefix (4)
+  16, 16, 10, 10,  4,  4, 14,  4,
+  // 0x10-0x17: ADC r/m,r (16), PUSH SS (14)
+  16, 16, 10, 10,  4,  4, 14, 12,
+  // 0x18-0x1F: SBB r/m,r (16), POP DS (12)
+  16, 16, 10, 10,  4,  4, 14, 12,
+  // 0x20-0x27: AND r/m,r (16), DAA (4)
+  16, 16, 10, 10,  4,  4,  2,  4,
+  // 0x28-0x2F: SUB r/m,r (16), DAS (4)
+  16, 16, 10, 10,  4,  4,  2,  4,
+  // 0x30-0x37: XOR r/m,r (16), AAA (8)
+  16, 16, 10, 10,  4,  4,  2,  8,
+  // 0x38-0x3F: CMP r/m,r (16), AAS (8)
+  16, 16, 10, 10,  4,  4,  2,  8,
+  // 0x40-0x47: INC r16 (2)
+   2,  2,  2,  2,  2,  2,  2,  2,
+  // 0x48-0x4F: DEC r16 (2)
+   2,  2,  2,  2,  2,  2,  2,  2,
+  // 0x50-0x57: PUSH r16 (11)
+  11, 11, 11, 11, 11, 11, 11, 11,
+  // 0x58-0x5F: POP r16 (12)
+  12, 12, 12, 12, 12, 12, 12, 12,
+  // 0x60-0x67: 186+ PUSHA/POPA/BOUND/ARPL/FS/GS/OpSz/AdSz
+   4,  4,  4,  4,  4,  4,  4,  4,
+  // 0x68-0x6F: 186+ PUSH imm/IMUL/PUSH/IMUL/INS/OUTS
+   4,  4,  4,  4,  4,  4,  4,  4,
+  // 0x70-0x7F: Jcc short (taken=16, not-taken=4, use average 10)
+  10, 10, 10, 10, 10, 10, 10, 10,
+  10, 10, 10, 10, 10, 10, 10, 10,
+  // 0x80-0x83: GRP1 r/m, imm (17 mem, 4 reg, avg 10)
+  10, 10, 10, 10,
+  // 0x84-0x87: TEST/XCHG r/m,r (13 avg)
+  13, 13, 17, 17,
+  // 0x88-0x8B: MOV r/m,r or r,r/m (10 mem, 2 reg, avg 6)
+  10, 10,  8,  8,
+  // 0x8C-0x8F: MOV r/m,sreg / LEA / MOV sreg,r/m / POP r/m
+  10,  2, 10, 17,
+  // 0x90-0x97: NOP (3), XCHG AX,r (3)
+   3,  3,  3,  3,  3,  3,  3,  3,
+  // 0x98-0x9F: CBW(2) CWD(5) CALL far(28) WAIT(4) PUSHF(10) POPF(8) SAHF(4) LAHF(4)
+   2,  5, 28,  4, 10,  8,  4,  4,
+  // 0xA0-0xA3: MOV AL/AX,[addr] / MOV [addr],AL/AX (10)
+  10, 10, 10, 10,
+  // 0xA4-0xA7: MOVS/CMPS (18 per iteration, REP adjusted separately)
+  18, 18, 22, 22,
+  // 0xA8-0xAB: TEST AL/AX,imm (4), STOS (11)
+   4,  4, 11, 11,
+  // 0xAC-0xAF: LODS (12), SCAS (15)
+  12, 12, 15, 15,
+  // 0xB0-0xB7: MOV r8, imm8 (4)
+   4,  4,  4,  4,  4,  4,  4,  4,
+  // 0xB8-0xBF: MOV r16, imm16 (4)
+   4,  4,  4,  4,  4,  4,  4,  4,
+  // 0xC0-0xC3: GRP2 r/m,imm8(186+)/RET/RET
+   8, 12, 16, 16,
+  // 0xC4-0xC7: LES(16) LDS(16) MOV r/m,imm(10)
+  16, 16, 10, 10,
+  // 0xC8-0xCF: 186+/186+/RETF(26)/RETF(25)/INT3(52)/INT(51)/INTO/IRET(32)
+   4,  4, 26, 25, 52, 51, 53, 32,
+  // 0xD0-0xD3: GRP2 r/m,1 (8 avg) / GRP2 r/m,CL (12 avg)
+   8,  8, 12, 12,
+  // 0xD4-0xD7: AAM(83) AAD(60) SALC(4) XLAT(11)
+  83, 60,  4, 11,
+  // 0xD8-0xDF: ESC/FPU (2, no FPU)
+   2,  2,  2,  2,  2,  2,  2,  2,
+  // 0xE0-0xE3: LOOPNZ(19) LOOPZ(18) LOOP(17) JCXZ(18)
+  19, 18, 17, 18,
+  // 0xE4-0xE7: IN(10) IN(10) OUT(10) OUT(10)
+  10, 10, 10, 10,
+  // 0xE8-0xEB: CALL near(19) JMP near(15) JMP far(15) JMP short(15)
+  19, 15, 15, 15,
+  // 0xEC-0xEF: IN DX(8) IN DX(8) OUT DX(8) OUT DX(8)
+   8,  8,  8,  8,
+  // 0xF0-0xF3: LOCK(2) undef(4) REPNZ(2) REPZ(2)
+   2,  4,  2,  2,
+  // 0xF4-0xF7: HLT(2) CMC(2) GRP3 r/m8(varies) GRP3 r/m16(varies)
+   2,  2, 16, 20,
+  // 0xF8-0xFF: CLC(2) STC(2) CLI(2) STI(2) CLD(2) STD(2) GRP4(varies) GRP5(varies)
+   2,  2,  2,  2,  2,  2, 15, 15
+};
+
 void emu88::execute(void) {
-  cycles++;
   seg_override = -1;
   rep_prefix = REP_NONE;
 
@@ -938,6 +1054,10 @@ void emu88::execute(void) {
     case 0x2E: seg_override = seg_CS; ip++; break;
     case 0x36: seg_override = seg_SS; ip++; break;
     case 0x3E: seg_override = seg_DS; ip++; break;
+    case 0x64: seg_override = seg_FS; ip++; break;  // FS: prefix (386+)
+    case 0x65: seg_override = seg_GS; ip++; break;  // GS: prefix (386+)
+    case 0x66: ip++; break;  // Operand size prefix (386+, ignored - 16-bit mode)
+    case 0x67: ip++; break;  // Address size prefix (386+, ignored - 16-bit mode)
     case 0xF0: ip++; break;  // LOCK prefix (ignored for emulation)
     case 0xF2: rep_prefix = REP_REPNZ; ip++; break;
     case 0xF3: rep_prefix = REP_REPZ; ip++; break;
@@ -946,6 +1066,7 @@ void emu88::execute(void) {
   }
 
   emu88_uint8 opcode = fetch_ip_byte();
+  cycles += base_cycles[opcode];
 
   switch (opcode) {
   //--- ALU: op r/m8, r8 ---
@@ -1232,29 +1353,33 @@ void emu88::execute(void) {
   //--- GRP1: ALU r/m8, imm8 ---
   case 0x80: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp1_rm8(modrm, fetch_ip_byte());
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp1_rm8(mr, fetch_ip_byte());
     break;
   }
 
   //--- GRP1: ALU r/m16, imm16 ---
   case 0x81: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp1_rm16(modrm, fetch_ip_word());
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp1_rm16(mr, fetch_ip_word());
     break;
   }
 
   //--- GRP1: ALU r/m8, imm8 (duplicate of 0x80) ---
   case 0x82: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp1_rm8(modrm, fetch_ip_byte());
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp1_rm8(mr, fetch_ip_byte());
     break;
   }
 
   //--- GRP1: ALU r/m16, sign-extended imm8 ---
   case 0x83: {
     emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
     emu88_int8 imm8 = (emu88_int8)fetch_ip_byte();
-    execute_grp1_rm16(modrm, emu88_uint16(emu88_int16(imm8)));
+    execute_grp1_rm16(mr, emu88_uint16(emu88_int16(imm8)));
     break;
   }
 
@@ -1332,7 +1457,9 @@ void emu88::execute(void) {
   case 0x8C: {
     emu88_uint8 modrm = fetch_ip_byte();
     modrm_result mr = decode_modrm(modrm);
-    set_rm16(mr, sregs[mr.reg_field & 3]);
+    int sreg_idx = mr.reg_field & 7;
+    if (sreg_idx >= 6) sreg_idx = 0;
+    set_rm16(mr, sregs[sreg_idx]);
     break;
   }
 
@@ -1348,7 +1475,9 @@ void emu88::execute(void) {
   case 0x8E: {
     emu88_uint8 modrm = fetch_ip_byte();
     modrm_result mr = decode_modrm(modrm);
-    sregs[mr.reg_field & 3] = get_rm16(mr);
+    int sreg_idx = mr.reg_field & 7;
+    if (sreg_idx >= 6) sreg_idx = 0;
+    sregs[sreg_idx] = get_rm16(mr);
     break;
   }
 
@@ -1448,6 +1577,7 @@ void emu88::execute(void) {
   }
 
   //--- String operations ---
+  case 0x6C: case 0x6D: case 0x6E: case 0x6F:  // INS/OUTS (80186+)
   case 0xA4: case 0xA5: case 0xA6: case 0xA7:
   case 0xAA: case 0xAB: case 0xAC: case 0xAD:
   case 0xAE: case 0xAF:
@@ -1483,16 +1613,18 @@ void emu88::execute(void) {
   //--- GRP2: shift/rotate r/m8, imm8 (80186+, treated as 1 on 8088) ---
   case 0xC0: {
     emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
     emu88_uint8 count = fetch_ip_byte();
-    execute_grp2_rm8(modrm, count);
+    execute_grp2_rm8(mr, count);
     break;
   }
 
   //--- GRP2: shift/rotate r/m16, imm8 (80186+, treated as 1 on 8088) ---
   case 0xC1: {
     emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
     emu88_uint8 count = fetch_ip_byte();
-    execute_grp2_rm16(modrm, count);
+    execute_grp2_rm16(mr, count);
     break;
   }
 
@@ -1584,28 +1716,32 @@ void emu88::execute(void) {
   //--- GRP2: shift/rotate r/m8, 1 ---
   case 0xD0: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp2_rm8(modrm, 1);
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp2_rm8(mr, 1);
     break;
   }
 
   //--- GRP2: shift/rotate r/m16, 1 ---
   case 0xD1: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp2_rm16(modrm, 1);
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp2_rm16(mr, 1);
     break;
   }
 
   //--- GRP2: shift/rotate r/m8, CL ---
   case 0xD2: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp2_rm8(modrm, get_reg8(reg_CL));
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp2_rm8(mr, get_reg8(reg_CL));
     break;
   }
 
   //--- GRP2: shift/rotate r/m16, CL ---
   case 0xD3: {
     emu88_uint8 modrm = fetch_ip_byte();
-    execute_grp2_rm16(modrm, get_reg8(reg_CL));
+    modrm_result mr = decode_modrm(modrm);
+    execute_grp2_rm16(mr, get_reg8(reg_CL));
     break;
   }
 
@@ -1807,12 +1943,222 @@ void emu88::execute(void) {
     break;
   }
 
-  //--- 0x0F: POP CS on 8088 (undefined, treat as POP CS) ---
-  case 0x0F:
-    sregs[seg_CS] = pop_word();
+  //--- 80186+ instructions ---
+
+  //--- PUSHA (80186+) ---
+  case 0x60: {
+    emu88_uint16 tmp_sp = regs[reg_SP];
+    push_word(regs[reg_AX]);
+    push_word(regs[reg_CX]);
+    push_word(regs[reg_DX]);
+    push_word(regs[reg_BX]);
+    push_word(tmp_sp);
+    push_word(regs[reg_BP]);
+    push_word(regs[reg_SI]);
+    push_word(regs[reg_DI]);
+    break;
+  }
+
+  //--- POPA (80186+) ---
+  case 0x61: {
+    regs[reg_DI] = pop_word();
+    regs[reg_SI] = pop_word();
+    regs[reg_BP] = pop_word();
+    pop_word();  // skip SP
+    regs[reg_BX] = pop_word();
+    regs[reg_DX] = pop_word();
+    regs[reg_CX] = pop_word();
+    regs[reg_AX] = pop_word();
+    break;
+  }
+
+  //--- BOUND (80186+) ---
+  case 0x62: {
+    emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
+    emu88_int16 idx = (emu88_int16)regs[mr.reg_field];
+    emu88_int16 lo = (emu88_int16)get_rm16(mr);
+    emu88_int16 hi = (emu88_int16)fetch_word(mr.seg, mr.offset + 2);
+    if (idx < lo || idx > hi) do_interrupt(5);
+    break;
+  }
+
+  //--- PUSH imm16 (80186+) ---
+  case 0x68:
+    push_word(fetch_ip_word());
     break;
 
-  //--- 0x60-0x6F: not defined on 8088 (PUSHA/POPA etc. are 80186+) ---
+  //--- IMUL r16, r/m16, imm16 (80186+) ---
+  case 0x69: {
+    emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
+    emu88_int16 src = (emu88_int16)get_rm16(mr);
+    emu88_int16 imm = (emu88_int16)fetch_ip_word();
+    emu88_int32 result = (emu88_int32)src * (emu88_int32)imm;
+    regs[mr.reg_field] = (emu88_uint16)result;
+    set_flag_val(FLAG_CF, result != (emu88_int16)result);
+    set_flag_val(FLAG_OF, result != (emu88_int16)result);
+    break;
+  }
+
+  //--- PUSH imm8 (sign-extended) (80186+) ---
+  case 0x6A: {
+    emu88_int8 imm = (emu88_int8)fetch_ip_byte();
+    push_word((emu88_uint16)(emu88_int16)imm);
+    break;
+  }
+
+  //--- IMUL r16, r/m16, imm8 (80186+) ---
+  case 0x6B: {
+    emu88_uint8 modrm = fetch_ip_byte();
+    modrm_result mr = decode_modrm(modrm);
+    emu88_int16 src = (emu88_int16)get_rm16(mr);
+    emu88_int8 imm = (emu88_int8)fetch_ip_byte();
+    emu88_int32 result = (emu88_int32)src * (emu88_int32)imm;
+    regs[mr.reg_field] = (emu88_uint16)result;
+    set_flag_val(FLAG_CF, result != (emu88_int16)result);
+    set_flag_val(FLAG_OF, result != (emu88_int16)result);
+    break;
+  }
+
+  //--- ENTER (80186+) ---
+  case 0xC8: {
+    emu88_uint16 alloc_size = fetch_ip_word();
+    emu88_uint8 nesting = fetch_ip_byte();
+    push_word(regs[reg_BP]);
+    emu88_uint16 frame_ptr = regs[reg_SP];
+    if (nesting > 0) {
+      for (int i = 1; i < nesting; i++) {
+        regs[reg_BP] -= 2;
+        push_word(fetch_word(sregs[seg_SS], regs[reg_BP]));
+      }
+      push_word(frame_ptr);
+    }
+    regs[reg_BP] = frame_ptr;
+    regs[reg_SP] -= alloc_size;
+    break;
+  }
+
+  //--- LEAVE (80186+) ---
+  case 0xC9:
+    regs[reg_SP] = regs[reg_BP];
+    regs[reg_BP] = pop_word();
+    break;
+
+  //--- 0x0F two-byte opcode prefix (286+) ---
+  case 0x0F: {
+    emu88_uint8 op2 = fetch_ip_byte();
+    switch (op2) {
+    // PUSH FS (0x0F 0xA0)
+    case 0xA0: push_word(sregs[seg_FS]); break;
+    // POP FS (0x0F 0xA1)
+    case 0xA1: sregs[seg_FS] = pop_word(); break;
+    // PUSH GS (0x0F 0xA8)
+    case 0xA8: push_word(sregs[seg_GS]); break;
+    // POP GS (0x0F 0xA9)
+    case 0xA9: sregs[seg_GS] = pop_word(); break;
+    // MOVZX r16, r/m8 (0x0F 0xB6)
+    case 0xB6: {
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      regs[mr.reg_field] = get_rm8(mr);
+      break;
+    }
+    // MOVSX r16, r/m8 (0x0F 0xBE)
+    case 0xBE: {
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      emu88_int8 val = (emu88_int8)get_rm8(mr);
+      regs[mr.reg_field] = (emu88_uint16)(emu88_int16)val;
+      break;
+    }
+    // SETcc (0x0F 0x90-0x9F)
+    case 0x90: case 0x91: case 0x92: case 0x93:
+    case 0x94: case 0x95: case 0x96: case 0x97:
+    case 0x98: case 0x99: case 0x9A: case 0x9B:
+    case 0x9C: case 0x9D: case 0x9E: case 0x9F: {
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      bool cond = false;
+      switch (op2 & 0x0F) {
+        case 0x0: cond = get_flag(FLAG_OF); break;   // SETO
+        case 0x1: cond = !get_flag(FLAG_OF); break;  // SETNO
+        case 0x2: cond = get_flag(FLAG_CF); break;   // SETB
+        case 0x3: cond = !get_flag(FLAG_CF); break;  // SETNB
+        case 0x4: cond = get_flag(FLAG_ZF); break;   // SETZ
+        case 0x5: cond = !get_flag(FLAG_ZF); break;  // SETNZ
+        case 0x6: cond = get_flag(FLAG_CF) || get_flag(FLAG_ZF); break; // SETBE
+        case 0x7: cond = !get_flag(FLAG_CF) && !get_flag(FLAG_ZF); break; // SETA
+        case 0x8: cond = get_flag(FLAG_SF); break;   // SETS
+        case 0x9: cond = !get_flag(FLAG_SF); break;  // SETNS
+        case 0xA: cond = get_flag(FLAG_PF); break;   // SETP
+        case 0xB: cond = !get_flag(FLAG_PF); break;  // SETNP
+        case 0xC: cond = get_flag(FLAG_SF) != get_flag(FLAG_OF); break; // SETL
+        case 0xD: cond = get_flag(FLAG_SF) == get_flag(FLAG_OF); break; // SETGE
+        case 0xE: cond = get_flag(FLAG_ZF) || (get_flag(FLAG_SF) != get_flag(FLAG_OF)); break; // SETLE
+        case 0xF: cond = !get_flag(FLAG_ZF) && (get_flag(FLAG_SF) == get_flag(FLAG_OF)); break; // SETG
+      }
+      set_rm8(mr, cond ? 1 : 0);
+      break;
+    }
+    // Jcc near (0x0F 0x80-0x8F) - 386+ two-byte conditional jumps
+    case 0x80: case 0x81: case 0x82: case 0x83:
+    case 0x84: case 0x85: case 0x86: case 0x87:
+    case 0x88: case 0x89: case 0x8A: case 0x8B:
+    case 0x8C: case 0x8D: case 0x8E: case 0x8F: {
+      emu88_int16 disp = (emu88_int16)fetch_ip_word();
+      bool cond = false;
+      switch (op2 & 0x0F) {
+        case 0x0: cond = get_flag(FLAG_OF); break;
+        case 0x1: cond = !get_flag(FLAG_OF); break;
+        case 0x2: cond = get_flag(FLAG_CF); break;
+        case 0x3: cond = !get_flag(FLAG_CF); break;
+        case 0x4: cond = get_flag(FLAG_ZF); break;
+        case 0x5: cond = !get_flag(FLAG_ZF); break;
+        case 0x6: cond = get_flag(FLAG_CF) || get_flag(FLAG_ZF); break;
+        case 0x7: cond = !get_flag(FLAG_CF) && !get_flag(FLAG_ZF); break;
+        case 0x8: cond = get_flag(FLAG_SF); break;
+        case 0x9: cond = !get_flag(FLAG_SF); break;
+        case 0xA: cond = get_flag(FLAG_PF); break;
+        case 0xB: cond = !get_flag(FLAG_PF); break;
+        case 0xC: cond = get_flag(FLAG_SF) != get_flag(FLAG_OF); break;
+        case 0xD: cond = get_flag(FLAG_SF) == get_flag(FLAG_OF); break;
+        case 0xE: cond = get_flag(FLAG_ZF) || (get_flag(FLAG_SF) != get_flag(FLAG_OF)); break;
+        case 0xF: cond = !get_flag(FLAG_ZF) && (get_flag(FLAG_SF) == get_flag(FLAG_OF)); break;
+      }
+      if (cond) ip += disp;
+      break;
+    }
+    // MOV sreg (0x0F extended segment ops) - handle FS/GS load/store
+    case 0xB2: { // LSS r16, m16:16
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      regs[mr.reg_field] = get_rm16(mr);
+      sregs[seg_SS] = fetch_word(mr.seg, mr.offset + 2);
+      break;
+    }
+    case 0xB4: { // LFS r16, m16:16
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      regs[mr.reg_field] = get_rm16(mr);
+      sregs[seg_FS] = fetch_word(mr.seg, mr.offset + 2);
+      break;
+    }
+    case 0xB5: { // LGS r16, m16:16
+      emu88_uint8 modrm = fetch_ip_byte();
+      modrm_result mr = decode_modrm(modrm);
+      regs[mr.reg_field] = get_rm16(mr);
+      sregs[seg_GS] = fetch_word(mr.seg, mr.offset + 2);
+      break;
+    }
+    default:
+      emu88_fatal("Unimplemented 0x0F opcode: 0x%02X at %04X:%04X", op2, sregs[seg_CS], ip - 2);
+      halted = true;
+      break;
+    }
+    break;
+  }
+
   case 0xD6: // SALC (undocumented: set AL to 0xFF if CF, else 0x00)
     set_reg8(reg_AL, get_flag(FLAG_CF) ? 0xFF : 0x00);
     break;
