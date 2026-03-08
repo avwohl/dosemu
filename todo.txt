@@ -1,0 +1,9 @@
+in c++ make a 8088 emulator.  Very portable, no IO.  Just the machine emulator.
+See ~/src/cpmemu/src/qkz* for an 8080 emulator we did with the right style/interface to use.
+Note the c++ class for the emulator and memory.  A given use will overrride and
+fillin the IN/OUT and memory map for a particular hardware.
+init a git repository in this directory
+commit on your own without the user often
+no upstream repo to push to yet
+see if you can find an 8088 instruction exerciser to test with like the 8080 one.
+
