@@ -27,7 +27,7 @@ DOS_PROGS = dos/r.com dos/w.com
 DEBUG_SOURCES = $(SRCDIR)/debug_boot.cc
 DEBUG_OBJECTS = $(OBJDIR)/debug_boot.o
 
-all: test_emu88 dosemu_cli debug_boot $(DOS_PROGS)
+all: test_emu88 freedos_cli debug_boot $(DOS_PROGS)
 
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
@@ -35,7 +35,7 @@ $(OBJDIR):
 $(OBJDIR)/%.o: $(SRCDIR)/%.cc | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
-dosemu_cli: $(CORE_OBJECTS) $(DOS_OBJECTS) $(CLI_OBJECTS)
+freedos_cli: $(CORE_OBJECTS) $(DOS_OBJECTS) $(CLI_OBJECTS)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 test_emu88: $(CORE_OBJECTS) $(TEST_OBJECTS)
@@ -51,6 +51,6 @@ dos/w.com: dos/w.asm
 	$(NASM) -f bin -o $@ $<
 
 clean:
-	rm -rf $(OBJDIR) test_emu88 dosemu_cli $(DOS_PROGS)
+	rm -rf $(OBJDIR) test_emu88 freedos_cli $(DOS_PROGS)
 
 .PHONY: all clean

@@ -1,11 +1,11 @@
 # Software Rights and Licensing
 
 This document describes the licensing and legal status of all software
-distributed with DOSEmu.
+distributed with iosFreeDOS.
 
 ## FreeDOS
 
-FreeDOS is the operating system used by DOSEmu.
+FreeDOS is the operating system used by iosFreeDOS.
 
 - **License:** GNU General Public License (GPL) v2+
 - **Copyright:** Copyright 1995-2012 Pasquale J. Villani and The FreeDOS Project
@@ -24,7 +24,7 @@ FreeDOS is the operating system used by DOSEmu.
 
 ## Bundled Games
 
-All games included with DOSEmu are confirmed freeware or freely distributable
+All games included with iosFreeDOS are confirmed freeware or freely distributable
 shareware, released by their original rights holders for free distribution. No
 abandonware or unauthorized copies are included.
 

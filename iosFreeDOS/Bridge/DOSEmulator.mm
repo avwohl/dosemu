@@ -251,7 +251,7 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _emulatorQueue = dispatch_queue_create("com.dosemu.emulator", DISPATCH_QUEUE_SERIAL);
+        _emulatorQueue = dispatch_queue_create("com.iosFreeDOS.emulator", DISPATCH_QUEUE_SERIAL);
         _shouldRun = NO;
         _controlifyMode = DOSControlifyOff;
     }

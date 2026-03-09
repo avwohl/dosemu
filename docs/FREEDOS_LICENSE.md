@@ -2,7 +2,7 @@
 
 ## Emulator License
 
-The DOSEmu emulator source code is licensed under the **GNU General Public License v3.0** (GPLv3).
+The iosFreeDOS emulator source code is licensed under the **GNU General Public License v3.0** (GPLv3).
 
 ## FreeDOS License
 

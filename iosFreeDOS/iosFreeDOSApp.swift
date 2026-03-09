@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct DOSEmuApp: App {
+struct iosFreeDOSApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

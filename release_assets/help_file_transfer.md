@@ -31,8 +31,8 @@ Host files are in the app's container:
 
 Open Finder, press Cmd+Shift+G, and paste that path.
 
-**Command Line (dosemu_cli):**
-Host paths are relative to the directory where you launched `dosemu_cli`. Absolute paths also work.
+**Command Line (freedos_cli):**
+Host paths are relative to the directory where you launched `freedos_cli`. Absolute paths also work.
 
 ## Tips
 
