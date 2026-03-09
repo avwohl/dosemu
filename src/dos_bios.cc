@@ -1441,6 +1441,15 @@ void dos_machine::bios_int_e0h() {
 void dos_machine::bios_int2fh() {
   uint16_t ax = regs[reg_AX];
 
+  if (ax == 0x1680) {
+    // Release Current VM Time Slice — standard DOS idle API.
+    // Programs call this to declare they are idle.  Return AL=0
+    // to indicate support.  Signal idle so the host can yield.
+    set_reg8(reg_AL, 0x00);
+    waiting_for_key = true;
+    return;
+  }
+
   if (ax == 0x4300) {
     // XMS installed check - return AL=80h if extended memory available
     uint32_t ext_kb = 0;
