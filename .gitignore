@@ -1,6 +1,6 @@
 obj/
 test_emu88
-dosemu_cli
+freedos_cli
 *.o
 *~
 .DS_Store
@@ -8,7 +8,7 @@ build/
 debug_boot
 debug_boot.dSYM/
 debug.log
-DOSEmu.xcodeproj/
+iosFreeDOS.xcodeproj/
 Local.xcconfig
 fd/x86*.img
 fd/*_dev.img

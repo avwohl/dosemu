@@ -22,8 +22,8 @@ These are the defaults used by virtually all NE2000 packet drivers.
 Pass the `-net` flag when starting the emulator:
 
 ```bash
-./dosemu_cli -a fd/freedos.img -net
-./dosemu_cli -c fd/freedos_hd.img -boot c -net
+./freedos_cli -a fd/freedos.img -net
+./freedos_cli -c fd/freedos_hd.img -boot c -net
 ```
 
 ### iOS / macOS App
@@ -72,7 +72,7 @@ Create a configuration file (e.g., `C:\MTCP\MTCP.CFG`):
 
 ```
 PACKETINT 0x60
-HOSTNAME  DOSEMU
+HOSTNAME  FREEDOS
 IPADDR    192.168.1.100
 NETMASK   255.255.255.0
 GATEWAY   192.168.1.1

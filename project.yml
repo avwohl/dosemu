@@ -1,4 +1,4 @@
-name: DOSEmu
+name: iosFreeDOS
 options:
   bundleIdPrefix: com.awohl
   deploymentTarget:
@@ -9,11 +9,11 @@ settings:
     CLANG_CXX_LANGUAGE_STANDARD: c++17
     SUPPORTS_MACCATALYST: YES
 targets:
-  DOSEmu:
+  iosFreeDOS:
     type: application
     platform: iOS
     sources:
-      - path: DOSEmu
+      - path: iosFreeDOS
       - path: src
         excludes:
           - main_cli.cc
@@ -24,10 +24,10 @@ targets:
       Release: Config.xcconfig
     settings:
       base:
-        SWIFT_OBJC_BRIDGING_HEADER: DOSEmu/DOSEmu-Bridging-Header.h
+        SWIFT_OBJC_BRIDGING_HEADER: iosFreeDOS/iosFreeDOS-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/src
-          - $(SRCROOT)/DOSEmu/Bridge
+          - $(SRCROOT)/iosFreeDOS/Bridge
         INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight UIInterfaceOrientationPortraitUpsideDown
         INFOPLIST_KEY_UIRequiresFullScreen: NO

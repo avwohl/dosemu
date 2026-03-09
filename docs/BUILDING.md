@@ -1,4 +1,4 @@
-# Building DOSEmu
+# Building iosFreeDOS
 
 ## Prerequisites
 
@@ -19,7 +19,7 @@ make
 
 This produces:
 
-- `dosemu_cli` — command-line emulator
+- `freedos_cli` — command-line emulator
 - `test_emu88` — CPU instruction tests
 - `dos/r.com` — host-to-DOS file transfer utility
 - `dos/w.com` — DOS-to-host file transfer utility
@@ -43,7 +43,7 @@ make clean
 ```bash
 brew install xcodegen
 xcodegen
-open DOSEmu.xcodeproj
+open iosFreeDOS.xcodeproj
 ```
 
 ### After modifying project.yml or adding/removing source files
@@ -55,12 +55,12 @@ xcodegen
 This regenerates the Xcode project from `project.yml`. Always run this after:
 
 - Editing `project.yml`
-- Adding or removing files in `DOSEmu/` or `src/`
+- Adding or removing files in `iosFreeDOS/` or `src/`
 - Changing build settings, deployment target, or entitlements
 
 ### Building from Xcode
 
-1. Open `DOSEmu.xcodeproj`
+1. Open `iosFreeDOS.xcodeproj`
 2. Select your target (iPhone simulator, iPad, or My Mac)
 3. Build and run (Cmd+R)
 
@@ -68,20 +68,20 @@ This regenerates the Xcode project from `project.yml`. Always run this after:
 
 ```bash
 # iOS Simulator
-xcodebuild -project DOSEmu.xcodeproj \
-  -scheme DOSEmu \
+xcodebuild -project iosFreeDOS.xcodeproj \
+  -scheme iosFreeDOS \
   -destination 'platform=iOS Simulator,name=iPhone 16' \
   SYMROOT="$(pwd)/build" build
 
 # macOS (Catalyst)
-xcodebuild -project DOSEmu.xcodeproj \
-  -scheme DOSEmu \
+xcodebuild -project iosFreeDOS.xcodeproj \
+  -scheme iosFreeDOS \
   -destination 'platform=macOS,variant=Mac Catalyst' \
   SYMROOT="$(pwd)/build" build
 ```
 
 Always pass `SYMROOT="$(pwd)/build"` so the build output goes into `build/`
-instead of conflicting with the `DOSEmu/` source directory.
+instead of conflicting with the `iosFreeDOS/` source directory.
 
 ## Hard Disk Image
 

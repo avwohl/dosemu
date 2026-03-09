@@ -34,7 +34,7 @@ Enable or disable the mouse in the Peripherals settings.
 
 ## Disks
 
-DOSEmu supports floppy disks (A: and B:), hard disks (C: and D:), and CD-ROM ISOs.
+iosFreeDOS supports floppy disks (A: and B:), hard disks (C: and D:), and CD-ROM ISOs.
 
 - Use the **Disk Catalog** to download ready-made images
 - Use **Download from URL** to load images from the internet

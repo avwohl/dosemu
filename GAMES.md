@@ -1,6 +1,6 @@
 # Bundled Games - Hardware Notes
 
-All games tested with DOSEmu (386 real-mode CPU, VGA adapter, 507K conventional memory).
+All games tested with iosFreeDOS (386 real-mode CPU, VGA adapter, 507K conventional memory).
 The 386 CPU emulation is **real mode only** -- no protected mode, DPMI, or DOS extenders.
 
 ## Working Games (23)

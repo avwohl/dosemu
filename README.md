@@ -1,4 +1,4 @@
-# DOSEmu
+# iosFreeDOS
 
 An 8088/386 IBM PC emulator for iOS, macOS, and the command line. Runs FreeDOS
 and other DOS-compatible operating systems on your iPhone, iPad, or Mac.
@@ -41,10 +41,10 @@ Software titles. See [GAMES.md](GAMES.md) for the full list of bundled games.
 
 ```bash
 make
-./dosemu_cli -a fd/freedos.img              # Boot FreeDOS from floppy
-./dosemu_cli -c fd/freedos_hd.img -boot c   # Boot from hard disk
-./dosemu_cli -cd image.iso -boot cd          # Boot from CD-ROM ISO
-./dosemu_cli -a fd/freedos.img -net          # Boot with NE2000 networking
+./freedos_cli -a fd/freedos.img              # Boot FreeDOS from floppy
+./freedos_cli -c fd/freedos_hd.img -boot c   # Boot from hard disk
+./freedos_cli -cd image.iso -boot cd          # Boot from CD-ROM ISO
+./freedos_cli -a fd/freedos.img -net          # Boot with NE2000 networking
 ```
 
 ## File Transfer
@@ -60,7 +60,7 @@ Where the host paths point depends on the platform:
 
 | Platform | Host file location |
 |---|---|
-| **CLI** | Relative to the directory where you ran `dosemu_cli` |
+| **CLI** | Relative to the directory where you ran `freedos_cli`  |
 | **macOS app** | `~/Library/Containers/com.awohl.FreeDOS/Data/Documents/` |
 | **iOS app** | Files app → FreeDOS folder |
 
@@ -68,12 +68,12 @@ See [docs/FILE_TRANSFER.md](docs/FILE_TRANSFER.md) for the full guide.
 
 ## Networking
 
-DOSEmu emulates an NE2000 Ethernet adapter (DP8390-based) at I/O base 0x300,
+iosFreeDOS emulates an NE2000 Ethernet adapter (DP8390-based) at I/O base 0x300,
 IRQ 3. Use any standard NE2000 packet driver and TCP/IP stack.
 
 ```bash
 # CLI: start with networking enabled
-./dosemu_cli -a fd/freedos.img -net
+./freedos_cli -a fd/freedos.img -net
 ```
 
 Inside DOS, load the packet driver and use mTCP or similar:
@@ -99,7 +99,7 @@ See [docs/NETWORKING.md](docs/NETWORKING.md) for the complete setup guide.
 ### CLI Build
 
 ```bash
-make                 # Builds dosemu_cli, test_emu88, dos/r.com, dos/w.com
+make                  # Builds freedos_cli, test_emu88, dos/r.com, dos/w.com
 make test_emu88      # Build and run CPU tests
 make clean           # Remove build artifacts
 ```
@@ -108,21 +108,21 @@ make clean           # Remove build artifacts
 
 ```bash
 xcodegen                   # Generate Xcode project from project.yml
-open DOSEmu.xcodeproj      # Open in Xcode, select target, build
+open iosFreeDOS.xcodeproj      # Open in Xcode, select target, build
 ```
 
 Or from the command line:
 
 ```bash
 # iOS Simulator
-xcodebuild -project DOSEmu.xcodeproj \
-  -scheme DOSEmu \
+xcodebuild -project iosFreeDOS.xcodeproj \
+  -scheme iosFreeDOS \
   -destination 'platform=iOS Simulator,name=iPhone 16' \
   SYMROOT="$(pwd)/build" build
 
 # macOS (Catalyst)
-xcodebuild -project DOSEmu.xcodeproj \
-  -scheme DOSEmu \
+xcodebuild -project iosFreeDOS.xcodeproj \
+  -scheme iosFreeDOS \
   -destination 'platform=macOS,variant=Mac Catalyst' \
   SYMROOT="$(pwd)/build" build
 ```
@@ -132,9 +132,9 @@ See [docs/BUILDING.md](docs/BUILDING.md) for full details.
 ## Project Structure
 
 ```
-DOSEmu/                    iOS/macOS app (SwiftUI + Obj-C++ bridge)
+iosFreeDOS/                iOS/macOS app (SwiftUI + Obj-C++ bridge)
   Views/                   ContentView, TerminalView, HelpView
-  Bridge/                  DOSEmulator.h/.mm — Obj-C++ bridge to C++ core
+  Bridge/                  DOSEmulator.h/.mm — Obj-C++ bridge
 src/                       C++ emulator core
   emu88.h / emu88.cc       8088/80186/386 CPU emulator
   emu88_mem.h/.cc          Memory subsystem (up to 16 MB)

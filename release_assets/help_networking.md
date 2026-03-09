@@ -23,7 +23,7 @@ Create `C:\MTCP\MTCP.CFG`:
 
 ```
 PACKETINT 0x60
-HOSTNAME  DOSEMU
+HOSTNAME  FREEDOS
 ```
 
 Set the environment variable:

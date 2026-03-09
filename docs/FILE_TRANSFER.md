@@ -39,12 +39,12 @@ File transferred.
 
 ## Where Are Host Files?
 
-The meaning of the host path depends on which platform you are running DOSEmu on.
+The meaning of the host path depends on which platform you are running iosFreeDOS on.
 
-### Command-Line Interface (`dosemu_cli`)
+### Command-Line Interface (`freedos_cli`)
 
 Host paths are relative to the **current working directory** where you launched
-`dosemu_cli`. If you ran `./dosemu_cli` from `/home/user/dos`, then:
+`freedos_cli`. If you ran `./freedos_cli` from `/home/user/dos`, then:
 
 ```
 A:\> R myfile.txt MYFILE.TXT
