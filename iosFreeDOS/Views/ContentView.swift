@@ -320,7 +320,10 @@ struct ContentView: View {
         HStack {
             Text(label)
             Spacer()
-            if let p = path {
+            if let progress = viewModel.downloadProgressForDrive(unit) {
+                ProgressView(value: progress)
+                    .frame(maxWidth: 120)
+            } else if let p = path {
                 Text(p.lastPathComponent)
                     .font(.caption)
                     .foregroundColor(.secondary)

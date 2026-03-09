@@ -597,6 +597,17 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         }
     }
 
+    /// Returns download progress (0–1) for a pending catalog disk attachment
+    /// targeting the given drive, or nil if no download is active for that drive.
+    func downloadProgressForDrive(_ drive: Int) -> Double? {
+        for (filename, pendingDrive) in pendingAttachments {
+            if pendingDrive == drive, case .downloading(let progress) = downloadStates[filename] {
+                return progress
+            }
+        }
+        return nil
+    }
+
     func downloadDisk(_ disk: DownloadableDisk) {
         downloadDiskWithRetry(disk, attemptsRemaining: 3)
     }
@@ -609,6 +620,21 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         downloadStates[disk.filename] = .downloading(progress: 0)
 
         let task = downloadSession.downloadTask(with: url) { [weak self] temp, resp, err in
+            // Stage the temp file immediately — URLSession deletes it after
+            // this completion handler returns, so it won't survive an async
+            // dispatch to the main queue.
+            var stagedURL: URL? = nil
+            if let temp = temp {
+                let staging = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString + "_" + disk.filename)
+                do {
+                    try FileManager.default.moveItem(at: temp, to: staging)
+                    stagedURL = staging
+                } catch {
+                    // Will report error on main queue
+                }
+            }
+
             DispatchQueue.main.async {
                 guard let self = self else { return }
 
@@ -636,7 +662,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                     return
                 }
 
-                guard let temp = temp else {
+                guard let staged = stagedURL else {
                     if attemptsRemaining > 1 {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             self.downloadDiskWithRetry(disk, attemptsRemaining: attemptsRemaining - 1)
@@ -649,9 +675,10 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                 }
 
                 if let expected = disk.sha256, !expected.isEmpty,
-                   let d = try? Data(contentsOf: temp) {
+                   let d = try? Data(contentsOf: staged) {
                     let hash = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
                     if hash != expected.lowercased() {
+                        try? FileManager.default.removeItem(at: staged)
                         self.downloadStates[disk.filename] = .error("SHA256 mismatch")
                         self.pendingAttachments.removeValue(forKey: disk.filename)
                         return
@@ -661,7 +688,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                 let dest = self.disksDirectory.appendingPathComponent(disk.filename)
                 try? FileManager.default.removeItem(at: dest)
                 do {
-                    try FileManager.default.moveItem(at: temp, to: dest)
+                    try FileManager.default.moveItem(at: staged, to: dest)
                     self.downloadStates[disk.filename] = .downloaded
                     self.statusText = "Downloaded \(disk.name)"
                     // Auto-attach if there's a pending attachment for this disk
@@ -670,6 +697,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                         self.manifestDrives.insert(drive)
                     }
                 } catch {
+                    try? FileManager.default.removeItem(at: staged)
                     self.downloadStates[disk.filename] = .error(error.localizedDescription)
                     self.pendingAttachments.removeValue(forKey: disk.filename)
                 }
@@ -682,12 +710,18 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         task.resume()
     }
 
-    /// Explicit user selection from catalog — always re-download to ensure
-    /// the latest version from the server.
+    /// Explicit user selection from catalog — use cached copy if available,
+    /// otherwise download.
     func useCatalogDisk(_ disk: DownloadableDisk, forDrive drive: Int) {
-        pendingAttachments[disk.filename] = drive
-        statusText = "Downloading \(disk.name)..."
-        downloadDisk(disk)
+        let path = disksDirectory.appendingPathComponent(disk.filename)
+        if FileManager.default.fileExists(atPath: path.path) {
+            attachDiskPath(path, forDrive: drive, diskName: disk.name)
+            manifestDrives.insert(drive)
+        } else {
+            pendingAttachments[disk.filename] = drive
+            statusText = "Downloading \(disk.name)..."
+            downloadDisk(disk)
+        }
     }
 
     /// Use cached disk if available, otherwise download.  Used for
