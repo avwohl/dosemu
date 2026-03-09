@@ -358,10 +358,12 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
     _machine->configure(_config);
 
     if (!_machine->boot(drive)) {
-        NSLog(@"[DOSEmu] Boot failed for drive 0x%02X", drive);
+        NSLog(@"[FreeDOS] Boot failed for drive 0x%02X", drive);
         return;
     }
 
+    NSLog(@"[FreeDOS] Booted drive 0x%02X, speed=%d (cps target mapped in runLoop)",
+          drive, (int)_machine->get_speed());
     _shouldRun = YES;
     dispatch_async(_emulatorQueue, ^{ [self runLoop]; });
 }
@@ -386,15 +388,26 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
     // Per-batch throttle: reset baseline each batch to avoid cumulative drift
     uint64_t batch_wall_start = mach_absolute_time();
     unsigned long long batch_cycle_start = _machine->cycles;
+    int batch_count = 0;
 
     while (_shouldRun) {
-        // Smaller batches = more responsive key echo (~20ms at 4.77 MHz)
         bool ok = _machine->run_batch(10000);
+        batch_count++;
 
         if (!ok) {
-            NSLog(@"[FreeDOS] CPU halted at %04X:%04X (cycles=%llu)",
-                  _machine->sregs[dos_machine::seg_CS], _machine->ip, _machine->cycles);
+            NSLog(@"[FreeDOS] CPU halted at %04X:%04X (cycles=%llu, batches=%d)",
+                  _machine->sregs[dos_machine::seg_CS], _machine->ip,
+                  _machine->cycles, batch_count);
             break;
+        }
+
+        // Periodic health log (every ~10 seconds at PC speed)
+        if (batch_count == 1000 || (batch_count % 50000 == 0)) {
+            uint64_t now_ns = mach_absolute_time() * timebase.numer / timebase.denom;
+            NSLog(@"[FreeDOS] batch=%d cycles=%llu speed=%d wfk=%d halted=%d",
+                  batch_count, _machine->cycles, (int)_machine->get_speed(),
+                  _machine->is_waiting_for_key(), _machine->halted);
+            (void)now_ns;
         }
 
         // Speed throttle: per-batch with drift cap
@@ -416,12 +429,10 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
 
             if (target_ns > wall_elapsed_ns) {
                 uint64_t sleep_ns = target_ns - wall_elapsed_ns;
-                // Cap sleep to 50ms to stay responsive
                 if (sleep_ns > 50000000) sleep_ns = 50000000;
                 if (sleep_ns > 100000) usleep((unsigned)(sleep_ns / 1000));
             } else if (wall_elapsed_ns - target_ns > 100000000) {
-                // If we've fallen >100ms behind, reset baseline instead of
-                // running full-speed to catch up (causes choppy bursts)
+                // If >100ms behind, reset instead of catching up
                 batch_wall_start = wall_now;
                 batch_cycle_start = _machine->cycles;
             }
@@ -433,10 +444,9 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
                     [self->_io->delegate emulatorDidRequestInput];
                 });
             }
-            // At a DOS prompt: sleep 50ms (20 Hz) to save battery.
-            // Keys are queued asynchronously and processed on next wakeup.
-            [NSThread sleepForTimeInterval:0.050];
-            // Reset throttle baseline after idle sleep
+            // Idle at prompt: sleep 10ms for responsive key echo.
+            // DOSBox uses 1ms; 10ms balances responsiveness vs battery.
+            [NSThread sleepForTimeInterval:0.010];
             batch_wall_start = mach_absolute_time();
             batch_cycle_start = _machine->cycles;
         } else if (cps == 0) {
