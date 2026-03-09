@@ -84,11 +84,6 @@ echo "Installing games to $OUTIMG..."
   copy_game "$GAMEDIR/xargon/Xargon" "XARGON"
 }
 
-[ -d "$GAMEDIR/kiloblaster/Kiloblas" ] && {
-  echo "  Kiloblaster..."
-  copy_game "$GAMEDIR/kiloblaster/Kiloblas" "KILOBLST"
-}
-
 [ -d "$GAMEDIR/majorstryker/MajorStr/MAJOR" ] && {
   echo "  Major Stryker..."
   copy_game "$GAMEDIR/majorstryker/MajorStr/MAJOR" "STRYKER"
@@ -114,15 +109,16 @@ echo "Installing games to $OUTIMG..."
   copy_game "$GAMEDIR/kroz" "KROZ"
 }
 
-[ -d "$GAMEDIR/liero" ] && {
-  echo "  Liero..."
-  copy_game "$GAMEDIR/liero" "LIERO"
-}
-
 [ -d "$GAMEDIR/supaplex" ] && {
   echo "  Supaplex..."
   copy_game "$GAMEDIR/supaplex" "SUPAPLEX"
 }
+
+# Install games guide
+if [ -f "$IMGDIR/fd/GAMES.TXT" ]; then
+  mcopy -D o "$IMGDIR/fd/GAMES.TXT" "c:/GAMES/GAMES.TXT"
+  echo "  GAMES.TXT guide installed"
+fi
 
 echo ""
 echo "Games installed. Contents of C:\\GAMES:"
