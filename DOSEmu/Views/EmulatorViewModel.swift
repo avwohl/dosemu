@@ -118,8 +118,8 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
     private var diskSaveTimer: Timer?
     private var configCancellable: AnyCancellable?
 
-    private let catalogURL = "https://github.com/avwohl/dosemu/releases/latest/download/disks.xml"
-    private let releaseBaseURL = "https://github.com/avwohl/dosemu/releases/latest/download"
+    private let catalogURL = "https://github.com/avwohl/iosFreeDOS/releases/latest/download/disks.xml"
+    private let releaseBaseURL = "https://github.com/avwohl/iosFreeDOS/releases/latest/download"
 
     var disksDirectory: URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]

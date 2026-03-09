@@ -547,7 +547,7 @@ struct AboutView: View {
             }
 
             Section("Links") {
-                Link(destination: URL(string: "https://github.com/avwohl/dosemu")!) {
+                Link(destination: URL(string: "https://github.com/avwohl/iosFreeDOS")!) {
                     HStack {
                         Label("Source Code on GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
                         Spacer()
@@ -556,7 +556,7 @@ struct AboutView: View {
                     }
                 }
 
-                Link(destination: URL(string: "https://github.com/avwohl/dosemu/issues")!) {
+                Link(destination: URL(string: "https://github.com/avwohl/iosFreeDOS/issues")!) {
                     HStack {
                         Label("Report an Issue", systemImage: "exclamationmark.bubble")
                         Spacer()
