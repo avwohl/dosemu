@@ -117,6 +117,15 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
     private var emulator: DOSEmulator?
     private var diskSaveTimer: Timer?
     private var configCancellable: AnyCancellable?
+    private var pendingAttachments: [String: Int] = [:]
+
+    // Dedicated URLSession with no caching for disk downloads (avoids redirect caching issues)
+    private lazy var downloadSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        config.urlCache = nil
+        return URLSession(configuration: config)
+    }()
 
     private let catalogURL = "https://github.com/avwohl/iosFreeDOS/releases/latest/download/disks.xml"
     private let releaseBaseURL = "https://github.com/avwohl/iosFreeDOS/releases/latest/download"
@@ -418,6 +427,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                 try? data.write(to: self.disksDirectory.appendingPathComponent("disks_catalog.xml"))
                 self.parseCatalogXML(data)
                 self.refreshDownloadStates()
+                self.autoAttachDefaultDisks()
             }
         }.resume()
     }
@@ -425,6 +435,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
     private func loadCachedCatalog() -> Bool {
         guard let data = try? Data(contentsOf: disksDirectory.appendingPathComponent("disks_catalog.xml")) else { return false }
         parseCatalogXML(data); refreshDownloadStates()
+        autoAttachDefaultDisks()
         return !diskCatalog.isEmpty
     }
 
@@ -440,6 +451,17 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         for disk in diskCatalog {
             let path = disksDirectory.appendingPathComponent(disk.filename)
             downloadStates[disk.filename] = FileManager.default.fileExists(atPath: path.path) ? .downloaded : (downloadStates[disk.filename] ?? .notDownloaded)
+        }
+    }
+
+    /// On first launch (no disks attached), auto-download and attach default disks from catalog
+    private func autoAttachDefaultDisks() {
+        let hasAnyDisk = floppyAPath != nil || floppyBPath != nil || hddCPath != nil || hddDPath != nil || isoPath != nil
+        guard !hasAnyDisk else { return }
+
+        for disk in diskCatalog {
+            guard let drive = disk.defaultDrive else { continue }
+            useCatalogDisk(disk, forDrive: drive)
         }
     }
 
@@ -484,26 +506,81 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
     }
 
     func downloadDisk(_ disk: DownloadableDisk) {
-        guard let url = URL(string: disk.url) else { return }
+        downloadDiskWithRetry(disk, attemptsRemaining: 3)
+    }
+
+    private func downloadDiskWithRetry(_ disk: DownloadableDisk, attemptsRemaining: Int) {
+        guard let url = URL(string: disk.url) else {
+            downloadStates[disk.filename] = .error("Invalid URL: \(disk.url)")
+            return
+        }
         downloadStates[disk.filename] = .downloading(progress: 0)
-        let task = URLSession(configuration: .ephemeral).downloadTask(with: url) { [weak self] temp, resp, err in
+
+        let task = downloadSession.downloadTask(with: url) { [weak self] temp, resp, err in
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                if let err = err { self.downloadStates[disk.filename] = .error(err.localizedDescription); return }
-                if let http = resp as? HTTPURLResponse, http.statusCode != 200 { self.downloadStates[disk.filename] = .error("HTTP \(http.statusCode)"); return }
-                guard let temp = temp else { return }
+
+                if let http = resp as? HTTPURLResponse, http.statusCode < 200 || http.statusCode >= 300 {
+                    if attemptsRemaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.downloadDiskWithRetry(disk, attemptsRemaining: attemptsRemaining - 1)
+                        }
+                    } else {
+                        self.downloadStates[disk.filename] = .error("HTTP \(http.statusCode) from \(disk.url)")
+                        self.pendingAttachments.removeValue(forKey: disk.filename)
+                    }
+                    return
+                }
+
+                if let err = err {
+                    if attemptsRemaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.downloadDiskWithRetry(disk, attemptsRemaining: attemptsRemaining - 1)
+                        }
+                    } else {
+                        self.downloadStates[disk.filename] = .error("\(err.localizedDescription) (\(disk.url))")
+                        self.pendingAttachments.removeValue(forKey: disk.filename)
+                    }
+                    return
+                }
+
+                guard let temp = temp else {
+                    if attemptsRemaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                            self.downloadDiskWithRetry(disk, attemptsRemaining: attemptsRemaining - 1)
+                        }
+                    } else {
+                        self.downloadStates[disk.filename] = .error("Download failed: \(disk.url)")
+                        self.pendingAttachments.removeValue(forKey: disk.filename)
+                    }
+                    return
+                }
+
                 if let expected = disk.sha256, !expected.isEmpty,
                    let d = try? Data(contentsOf: temp) {
                     let hash = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
-                    if hash != expected.lowercased() { self.downloadStates[disk.filename] = .error("SHA256 mismatch"); return }
+                    if hash != expected.lowercased() {
+                        self.downloadStates[disk.filename] = .error("SHA256 mismatch")
+                        self.pendingAttachments.removeValue(forKey: disk.filename)
+                        return
+                    }
                 }
+
                 let dest = self.disksDirectory.appendingPathComponent(disk.filename)
                 try? FileManager.default.removeItem(at: dest)
                 do {
                     try FileManager.default.moveItem(at: temp, to: dest)
                     self.downloadStates[disk.filename] = .downloaded
                     self.statusText = "Downloaded \(disk.name)"
-                } catch { self.downloadStates[disk.filename] = .error(error.localizedDescription) }
+                    // Auto-attach if there's a pending attachment for this disk
+                    if let drive = self.pendingAttachments.removeValue(forKey: disk.filename) {
+                        self.attachDiskPath(dest, forDrive: drive, diskName: disk.name)
+                        self.manifestDrives.insert(drive)
+                    }
+                } catch {
+                    self.downloadStates[disk.filename] = .error(error.localizedDescription)
+                    self.pendingAttachments.removeValue(forKey: disk.filename)
+                }
             }
         }
         let obs = task.progress.observe(\.fractionCompleted) { [weak self] p, _ in
@@ -515,7 +592,18 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
 
     func useCatalogDisk(_ disk: DownloadableDisk, forDrive drive: Int) {
         let path = disksDirectory.appendingPathComponent(disk.filename)
-        guard FileManager.default.fileExists(atPath: path.path) else { return }
+        if FileManager.default.fileExists(atPath: path.path) {
+            attachDiskPath(path, forDrive: drive, diskName: disk.name)
+            manifestDrives.insert(drive)
+        } else {
+            // Need to download first - attach after download completes
+            pendingAttachments[disk.filename] = drive
+            statusText = "Downloading \(disk.name)..."
+            downloadDisk(disk)
+        }
+    }
+
+    private func attachDiskPath(_ path: URL, forDrive drive: Int, diskName: String) {
         switch drive {
         case 0: floppyAPath = path; setConfigBootDrive(0)
         case 1: floppyBPath = path
@@ -524,8 +612,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         case 0xE0: isoPath = path; if floppyAPath == nil && hddCPath == nil { setConfigBootDrive(0xE0) }
         default: break
         }
-        manifestDrives.insert(drive)
-        statusText = "Loaded \(disk.name)"
+        statusText = "Loaded \(diskName)"
     }
 
     func downloadFromURL(toDrive drive: Int) {
@@ -534,12 +621,12 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
             errorMessage = "Enter a valid URL"; showingError = true; return
         }
         urlDownloading = true; urlDownloadProgress = 0
-        let task = URLSession(configuration: .ephemeral).downloadTask(with: url) { [weak self] temp, resp, err in
+        let task = downloadSession.downloadTask(with: url) { [weak self] temp, resp, err in
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.urlDownloading = false
-                if let err = err { self.errorMessage = err.localizedDescription; self.showingError = true; return }
-                if let http = resp as? HTTPURLResponse, http.statusCode != 200 { self.errorMessage = "HTTP \(http.statusCode)"; self.showingError = true; return }
+                if let err = err { self.errorMessage = "\(err.localizedDescription)\n\(trimmed)"; self.showingError = true; return }
+                if let http = resp as? HTTPURLResponse, http.statusCode != 200 { self.errorMessage = "HTTP \(http.statusCode) from \(trimmed)"; self.showingError = true; return }
                 guard let temp = temp else { return }
                 let filename = url.lastPathComponent.isEmpty ? "download.img" : url.lastPathComponent
                 let dest = self.disksDirectory.appendingPathComponent(filename)

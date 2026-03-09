@@ -293,8 +293,6 @@ struct ContentView: View {
 
     private func catalogDisks(forUnit unit: Int) -> [DownloadableDisk] {
         viewModel.diskCatalog.filter { disk in
-            let state = viewModel.downloadStates[disk.filename] ?? .notDownloaded
-            guard state == .downloaded else { return false }
             switch unit {
             case 0, 1: return disk.type == .floppy
             case 0x80, 0x81: return disk.type == .hdd
@@ -322,7 +320,22 @@ struct ContentView: View {
                 if !available.isEmpty {
                     Menu("From Catalog") {
                         ForEach(available) { disk in
-                            Button(disk.name) { viewModel.useCatalogDisk(disk, forDrive: unit) }
+                            let state = viewModel.downloadStates[disk.filename] ?? .notDownloaded
+                            Button {
+                                viewModel.useCatalogDisk(disk, forDrive: unit)
+                            } label: {
+                                switch state {
+                                case .downloaded:
+                                    Label(disk.name, systemImage: "checkmark.circle.fill")
+                                case .downloading:
+                                    Label("\(disk.name) (downloading...)", systemImage: "arrow.down.circle.dotted")
+                                case .error:
+                                    Label("\(disk.name) (retry)", systemImage: "exclamationmark.circle")
+                                case .notDownloaded:
+                                    Label("\(disk.name) (\(disk.formattedSize))", systemImage: "arrow.down.circle")
+                                }
+                            }
+                            .disabled({ if case .downloading = state { return true }; return false }())
                         }
                     }
                 }

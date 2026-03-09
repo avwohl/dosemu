@@ -59,24 +59,6 @@ abandonware or unauthorized copies are included.
 - **Developer:** Apogee Software (Todd Replogle)
 - **License:** Freeware, released by Apogee/3D Realms on March 20, 2009
 
-#### Monuments of Mars
-- **Year:** 1991
-- **Developer:** Apogee Software (Todd J. Replogle)
-- **License:** Freeware, released by Apogee/3D Realms on March 20, 2009
-- **Reference:** https://en.wikipedia.org/wiki/Monuments_of_Mars
-
-#### Pharaoh's Tomb
-- **Year:** 1990
-- **Developer:** Apogee Software (George Broussard)
-- **License:** Freeware, released by Apogee/3D Realms on March 20, 2009
-- **Reference:** https://en.wikipedia.org/wiki/Pharaoh%27s_Tomb
-
-#### Arctic Adventure
-- **Year:** 1991
-- **Developer:** Apogee Software (George Broussard)
-- **License:** Freeware, released by Apogee/3D Realms on March 20, 2009
-- **Notes:** Sequel to Pharaoh's Tomb.
-
 #### Alien Carnage / Halloween Harry (Episodes 1-4)
 - **Year:** 1993
 - **Developer:** Interactive Binary Illusions / SubZero Software
@@ -98,43 +80,11 @@ abandonware or unauthorized copies are included.
 - **License:** Freeware, released by author Allen Pilgrim on August 4, 2008. Source code also released.
 - **Reference:** https://en.wikipedia.org/wiki/Xargon
 
-#### ZZT
-- **Year:** 1991
-- **Developer:** Epic MegaGames (Tim Sweeney)
-- **License:** Freeware. Released by Epic MegaGames.
-- **Reference:** https://en.wikipedia.org/wiki/ZZT
-
-#### Crystal Caves
-- **Year:** 1991
-- **Developer:** Apogee Software
-- **License:** Shareware Episode 1 (freely distributable)
-- **Reference:** https://en.wikipedia.org/wiki/Crystal_Caves
-
-#### Secret Agent
+#### Kiloblaster
 - **Year:** 1992
-- **Developer:** Apogee Software
-- **License:** Shareware Episode 1 (freely distributable)
-- **Reference:** https://en.wikipedia.org/wiki/Secret_Agent_(video_game)
-
-### id Software Shareware
-
-#### Commander Keen 1: Marooned on Mars
-- **Year:** 1990
-- **Developer:** id Software
-- **License:** Freely distributable shareware Episode 1
-- **Reference:** https://en.wikipedia.org/wiki/Commander_Keen_in_Invasion_of_the_Vorticons
-
-#### Commander Keen 4: Secret of the Oracle
-- **Year:** 1991
-- **Developer:** id Software
-- **License:** Freely distributable shareware Episode 1
-- **Reference:** https://en.wikipedia.org/wiki/Commander_Keen_in_Goodbye,_Galaxy!
-
-#### Dangerous Dave
-- **Year:** 1990
-- **Developer:** id Software / Softdisk (John Romero)
-- **License:** Freeware (Gamer's Edge sampler disk release)
-- **Reference:** https://en.wikipedia.org/wiki/Dangerous_Dave
+- **Developer:** Epic MegaGames (Allen Pilgrim)
+- **License:** Shareware (freely distributable)
+- **Reference:** https://en.wikipedia.org/wiki/Kiloblaster
 
 ### Other Freeware / Shareware
 
@@ -156,23 +106,11 @@ abandonware or unauthorized copies are included.
 - **License:** Freeware, released by creator Ron Davis circa 2002. Source code also released.
 - **Reference:** https://www.adeptsoftware.com/got/
 
-#### Jetpack
-- **Year:** 1993
-- **Developer:** Software Creations (Adam Pedersen)
-- **License:** Freeware, released free by the author in 1998
-- **Reference:** https://en.wikipedia.org/wiki/Jetpack_(video_game)
-
-#### Scorched Earth
-- **Year:** 1991
-- **Developer:** Wendell Hicken
-- **License:** Shareware (freely distributable)
-- **Reference:** https://en.wikipedia.org/wiki/Scorched_Earth_(video_game)
-
-#### Epic Pinball
-- **Year:** 1993
-- **Developer:** Epic MegaGames / Digital Extremes
-- **License:** Shareware (1 table freely distributable)
-- **Reference:** https://en.wikipedia.org/wiki/Epic_Pinball
+#### Liero
+- **Year:** 1998
+- **Developer:** MetsänEläimet (Joosa Riekkinen)
+- **License:** Freeware v1.33
+- **Reference:** https://en.wikipedia.org/wiki/Liero
 
 ---
 
@@ -185,8 +123,6 @@ abandonware or unauthorized copies are included.
 - **One Must Fall: 2097** (1994): Freeware, but requires 4MB RAM + protected mode
 - **Cosmo's Cosmic Adventure** (1992): Real mode, but needs 528K+ (507K available)
 - **Traffic Department 2192** (1994): Real mode, but needs more memory than available
-- **Liero** (1998): Requires XMS (HIMEM.SYS)
-- **Kiloblaster** (1992): Turbo Pascal runtime fails hardware detection
 
 ### Excluded - Licensing Concerns
 
