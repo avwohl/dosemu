@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<catalog version="2">
+<catalog version="3">
+    <disk>
+        <filename>freedos_hd.img</filename>
+        <name>FreeDOS Hard Disk (with Games)</name>
+        <type>hdd</type>
+        <description>98MB bootable hard disk with FreeDOS, bundled games, and utilities.</description>
+        <size>103219200</size>
+        <license>GPL / Mixed Freeware</license>
+        <sha256></sha256>
+        <defaultDrive>128</defaultDrive>
+    </disk>
     <disk>
         <filename>fd13-floppy.img</filename>
         <name>FreeDOS 1.3 Boot Floppy</name>
@@ -8,7 +18,6 @@
         <size>1474560</size>
         <license>GPL</license>
         <sha256></sha256>
-        <defaultDrive>0</defaultDrive>
     </disk>
     <disk>
         <filename>fd12-floppy.img</filename>
@@ -18,7 +27,6 @@
         <size>1474560</size>
         <license>GPL</license>
         <sha256></sha256>
-        <defaultDrive>0</defaultDrive>
     </disk>
     <disk>
         <filename>msdos622-boot.img</filename>
@@ -28,7 +36,6 @@
         <size>1474560</size>
         <license>Proprietary</license>
         <sha256></sha256>
-        <defaultDrive>0</defaultDrive>
     </disk>
     <disk>
         <filename>fd13-full.iso</filename>
@@ -38,7 +45,6 @@
         <size>652214272</size>
         <license>GPL</license>
         <sha256></sha256>
-        <defaultDrive>224</defaultDrive>
     </disk>
     <disk>
         <filename>fd13-lite.iso</filename>
@@ -48,6 +54,5 @@
         <size>167772160</size>
         <license>GPL</license>
         <sha256></sha256>
-        <defaultDrive>224</defaultDrive>
     </disk>
 </catalog>
