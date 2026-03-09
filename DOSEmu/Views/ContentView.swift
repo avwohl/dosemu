@@ -517,14 +517,11 @@ struct AboutView: View {
         Form {
             Section {
                 VStack(spacing: 12) {
-                    Image("AppIcon")
+                    Image("FreeDOSLogo")
                         .resizable()
-                        .frame(width: 80, height: 80)
-                        .cornerRadius(18)
-                        .accessibilityHidden(true)
-
-                    Text("FreeDOS")
-                        .font(.title.bold())
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 280)
+                        .accessibilityLabel("FreeDOS logo")
 
                     Text("Version \(appVersion) (Build \(buildNumber))")
                         .font(.subheadline)
