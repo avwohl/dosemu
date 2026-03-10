@@ -118,6 +118,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
 
     var currentDiskUnit: Int = 0
     var exportDocument: DiskImageDocument? = nil
+    var exportFilename: String = "disk.img"
 
     private var emulator: DOSEmulator?
     private var diskSaveTimer: Timer?
@@ -163,6 +164,7 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
             self?.resolveBookmarksInBackground()
         }
         fetchDiskCatalog()
+
     }
 
     func clearTerminal() {
@@ -448,6 +450,15 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         guard let emu = emulator, let data = emu.getDiskData(Int32(unit)) else { return }
         currentDiskUnit = unit
         exportDocument = DiskImageDocument(data: data)
+        exportFilename = "disk.img"
+        showingDiskExporter = true
+    }
+
+    /// Export a disk file from the settings screen (no emulator needed)
+    func saveDiskFile(_ url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        exportDocument = DiskImageDocument(data: data)
+        exportFilename = url.lastPathComponent
         showingDiskExporter = true
     }
 
@@ -618,6 +629,15 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
                     try? fm.removeItem(at: url)
                     downloadStates[url.lastPathComponent] = .notDownloaded
                 }
+            }
+        }
+        // Clear drive paths that pointed to deleted catalog disks
+        let disksDir = disksDirectory.path
+        let pairs: [(Int, KeyPath<EmulatorViewModel, URL?>)] =
+            [(0, \.floppyAPath), (1, \.floppyBPath), (0x80, \.hddCPath), (0x81, \.hddDPath), (0xE0, \.isoPath)]
+        for (unit, kp) in pairs {
+            if let path = self[keyPath: kp], path.path.hasPrefix(disksDir) {
+                removeDisk(unit)
             }
         }
         // Clear any manifest drive assignments that pointed to catalog disks
@@ -896,7 +916,9 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         cursorCol = Int(col)
         terminalView?.updateCursor(row: cursorRow, col: cursorCol)
     }
-    func emulatorDidRequestInput() { if !terminalShouldFocus { terminalShouldFocus = true } }
+    func emulatorDidRequestInput() {
+        if !terminalShouldFocus { terminalShouldFocus = true }
+    }
 }
 
 // MARK: - XML Parser

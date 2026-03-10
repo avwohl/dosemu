@@ -13,3 +13,8 @@ Local.xcconfig
 fd/x86*.img
 fd/*_dev.img
 fd/freedos_hd.img
+fd/freedos_games.img
+fd/*.iso
+fd/freedos.img
+fd/games/
+fd/GAMES.TXT

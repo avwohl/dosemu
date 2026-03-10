@@ -9,6 +9,7 @@
 #include <atomic>
 #include <string>
 #include <mach/mach_time.h>
+#include <sched.h>
 
 //=============================================================================
 // iOS dos_io implementation
@@ -331,6 +332,7 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
     std::unique_ptr<dos_io_ios> _io;
     std::unique_ptr<dos_machine> _machine;
     dispatch_queue_t _emulatorQueue;
+    dispatch_semaphore_t _keySemaphore;
     BOOL _shouldRun;
     DOSControlifyMode _controlifyMode;
     dos_machine::Config _config;
@@ -340,6 +342,7 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
     self = [super init];
     if (self) {
         _emulatorQueue = dispatch_queue_create("com.iosFreeDOS.emulator", DISPATCH_QUEUE_SERIAL);
+        _keySemaphore = dispatch_semaphore_create(0);
         _shouldRun = NO;
         _controlifyMode = DOSControlifyOff;
     }
@@ -474,11 +477,9 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
 
         // Periodic health log (every ~10 seconds at PC speed)
         if (batch_count == 1000 || (batch_count % 50000 == 0)) {
-            uint64_t now_ns = mach_absolute_time() * timebase.numer / timebase.denom;
             NSLog(@"[FreeDOS] batch=%d cycles=%llu speed=%d wfk=%d halted=%d",
                   batch_count, _machine->cycles, (int)_machine->get_speed(),
                   _machine->is_waiting_for_key(), _machine->halted);
-            (void)now_ns;
         }
 
         // Speed throttle: per-batch with drift cap
@@ -516,12 +517,19 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
                     [d emulatorDidRequestInput];
                 });
             }
-            // Idle at prompt: sleep 1ms for responsive key echo (matches DOSBox).
-            [NSThread sleepForTimeInterval:0.001];
+            // Wait up to 55ms (one timer tick period) for a keypress.
+            // Semaphore wakes instantly when sendCharacter/sendScancode
+            // signals, giving responsive key echo while saving battery
+            // during idle.
+            dispatch_semaphore_wait(_keySemaphore,
+                dispatch_time(DISPATCH_TIME_NOW, 55 * NSEC_PER_MSEC));
             batch_wall_start = mach_absolute_time();
             batch_cycle_start = _machine->cycles;
-        } else if (cps == 0) {
-            [NSThread sleepForTimeInterval:0.001];
+        } else if (cps == 0 && batch_count % 64 == 0) {
+            // SPEED_FULL: yield briefly every 64 batches (~640K instructions)
+            // to avoid starving the UI thread, but don't sleep on every batch
+            // which would cap throughput and add 500ms+ key echo latency.
+            sched_yield();
         }
     }
 
@@ -539,10 +547,14 @@ static uint8_t ascii_to_scancode(uint8_t ascii) {
     }
     if (ascii == '\n') ascii = '\r';
     _machine->queue_key(ascii, ascii_to_scancode(ascii));
+    dispatch_semaphore_signal(_keySemaphore);
 }
 
 - (void)sendScancode:(uint8_t)ascii scancode:(uint8_t)scancode {
-    if (_machine) _machine->queue_key(ascii, scancode);
+    if (_machine) {
+        _machine->queue_key(ascii, scancode);
+        dispatch_semaphore_signal(_keySemaphore);
+    }
 }
 
 - (void)updateMouseX:(int)x y:(int)y buttons:(int)buttons {

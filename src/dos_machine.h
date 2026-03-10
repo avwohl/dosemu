@@ -4,6 +4,7 @@
 #include "emu88.h"
 #include "dos_io.h"
 #include "ne2000.h"
+#include <chrono>
 
 #ifndef IOSFREEDOS_VERSION
 #define IOSFREEDOS_VERSION "dev"
@@ -173,14 +174,18 @@ private:
   bool waiting_for_key;
   int kbd_poll_count;  // Consecutive AH=01 no-key responses
   unsigned long long kbd_poll_start_cycle;  // Cycle count when polling started
+  std::chrono::steady_clock::time_point idle_tick_time;  // Wall-clock timer for idle ticks
+
 
   // How many consecutive AH=01 "no key" polls before yielding.
   // Must be high enough to avoid triggering during DOS Ctrl-C checks
   // during file I/O (~5-20 per batch), but low enough to catch tight
   // polling loops at prompts (~5000+ per batch).
   static constexpr int KBD_POLL_THRESHOLD = 500;
-  // Minimum emulated time of continuous polling before yielding (~3 ticks = 165ms)
-  static constexpr uint32_t KBD_POLL_MIN_CYCLES = CYCLES_PER_TICK * 3;
+  // Minimum emulated time of continuous polling before yielding (~1 tick = 55ms).
+  // Lower values reduce battery drain during idle; the poll count threshold (500)
+  // already prevents false triggers during brief Ctrl-C checks.
+  static constexpr uint32_t KBD_POLL_MIN_CYCLES = CYCLES_PER_TICK;
 
   // Keyboard controller command state (for A20 gate)
   uint8_t kbd_cmd_pending;

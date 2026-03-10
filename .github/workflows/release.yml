@@ -33,11 +33,22 @@ jobs:
           nasm -f bin -o dos/r.com dos/r.asm
           nasm -f bin -o dos/w.com dos/w.asm
 
-      - name: Build hard disk image
+      - name: Download FreeDOS 1.4 ISOs
         run: |
-          if [ -x scripts/build_hdd.sh ]; then
-            scripts/build_hdd.sh
-          fi
+          mkdir -p fd
+          echo "Downloading FreeDOS 1.4 LiveCD..."
+          curl -L -o fd/FD14LIVE.iso \
+            https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.4/official/FD14LIVE.iso
+          echo "Downloading FreeDOS 1.4 Bonus CD..."
+          curl -L -o fd/FD14BNS.iso \
+            https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.4/official/FD14BNS.iso
+          ls -lh fd/*.iso
+
+      - name: Build hard disk image
+        run: scripts/build_hdd.sh
+
+      - name: Build games disk image
+        run: scripts/build_games_disk.sh
 
       - name: Collect release assets
         run: |
@@ -57,6 +68,14 @@ jobs:
           # Hard disk image (if built)
           if [ -f fd/freedos_hd.img ]; then
             cp fd/freedos_hd.img dist/
+          fi
+          # Games disk image (if built)
+          if [ -f fd/freedos_games.img ]; then
+            cp fd/freedos_games.img dist/
+          fi
+          # Shareware games bundle (for reproducible builds)
+          if [ -d fd/games ]; then
+            tar czf dist/shareware-games.tar.gz -C fd games GAMES.TXT
           fi
           # Generate checksums
           cd dist && shasum -a 256 * > SHA256SUMS

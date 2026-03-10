@@ -41,12 +41,12 @@ struct ContentView: View {
         .alert("Disk May Be Overwritten", isPresented: $viewModel.showingManifestWriteWarning) {
             Button("OK") {}
         } message: {
-            Text("This disk was downloaded from the catalog and may be replaced when the catalog is updated. Any changes you save could be lost.\n\nTo keep changes permanently, use Save Disk to copy to your own file.")
+            Text("This disk was downloaded from the catalog and may be replaced when the catalog is updated. Any changes you save could be lost.\n\nTo keep changes permanently, use Save As on the load screen to copy to your own file.")
         }
         .fileImporter(isPresented: $viewModel.showingDiskPicker, allowedContentTypes: [.data]) { result in
             viewModel.handleDiskImport(result.map { [$0] })
         }
-        .fileExporter(isPresented: $viewModel.showingDiskExporter, document: viewModel.exportDocument, contentType: .data, defaultFilename: "disk.img") { result in
+        .fileExporter(isPresented: $viewModel.showingDiskExporter, document: viewModel.exportDocument, contentType: .data, defaultFilename: viewModel.exportFilename) { result in
             viewModel.handleExportResult(result)
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
@@ -72,14 +72,9 @@ struct ContentView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    Button("Quit") {
-                        // Send Ctrl+C (ASCII 3) to interrupt the running DOS program
-                        viewModel.sendKey(Character(UnicodeScalar(3)))
-                    }
-                    .foregroundColor(.orange)
-                    .disabled(viewModel.isStarting)
-                    Button("Stop") { viewModel.stop() }
+                    Button("Quit") { viewModel.stop() }
                         .foregroundColor(.red)
+                        .disabled(viewModel.isStarting)
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 6)
@@ -381,8 +376,11 @@ struct ContentView: View {
                         }
                     }
                 }
-                if path != nil {
+                if let p = path {
                     Divider()
+                    Button { viewModel.saveDiskFile(p) } label: {
+                        Label("Save As", systemImage: "square.and.arrow.up")
+                    }
                     Button(role: .destructive) { viewModel.removeDisk(unit) } label: {
                         Label("Remove", systemImage: "trash")
                     }
@@ -483,6 +481,9 @@ struct ContentView: View {
                         Button("Use as CD-ROM") { viewModel.useCatalogDisk(disk, forDrive: 0xE0) }
                     }
                     Spacer()
+                    Button("Save As") {
+                        viewModel.saveDiskFile(viewModel.disksDirectory.appendingPathComponent(disk.filename))
+                    }
                     Button("Delete", role: .destructive) { viewModel.deleteCatalogDisk(disk) }
                 }
                 .font(.caption)

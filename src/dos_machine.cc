@@ -316,26 +316,39 @@ void dos_machine::set_speed(SpeedMode mode) {
 
 bool dos_machine::run_batch(int count) {
   waiting_for_key = false;
-  kbd_poll_count = 0;
+  // Note: kbd_poll_count is NOT reset here — it must accumulate across
+  // batches so the AH=01 polling threshold can be reached.  Non-keyboard
+  // interrupts in do_interrupt() reset it when the program does real work.
 
   for (int i = 0; i < count; i++) {
     if (waiting_for_key) {
       // Program is genuinely idle at a keyboard prompt (passed both
       // poll count AND emulated time thresholds). Yield to host.
 
-      // Fast-forward cycles to deliver a timer tick so guest timeouts
-      // still work (e.g. FreeDOS F5/F8 boot prompt). Same approach
-      // as HLT idle handling below.
-      cycles = tick_cycle_mark + CYCLES_PER_TICK;
-      tick_cycle_mark = cycles;
-      uint32_t ticks = bda_r32(bda::TIMER_COUNT) + 1;
-      if (ticks >= 0x1800B0) {
-        ticks = 0;
-        bda_w8(bda::TIMER_ROLLOVER, 1);
+      // Deliver timer ticks at real-time 18.2 Hz rate using wall clock.
+      // We do NOT fast-forward the cycle counter because inflated cycles
+      // confuse the host-side speed throttle (causes multi-second key
+      // echo latency).  Wall-clock ticks let guest timeouts (e.g.
+      // FreeDOS F5/F8 boot prompt) expire at the correct real-time rate.
+      auto now = std::chrono::steady_clock::now();
+      if (idle_tick_time == std::chrono::steady_clock::time_point{})
+        idle_tick_time = now;
+      auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+          now - idle_tick_time).count();
+      if (elapsed_us >= 54925) {  // 1/18.2 Hz ≈ 54.925ms
+        idle_tick_time += std::chrono::microseconds(54925);
+        uint32_t ticks = bda_r32(bda::TIMER_COUNT) + 1;
+        if (ticks >= 0x1800B0) {
+          ticks = 0;
+          bda_w8(bda::TIMER_ROLLOVER, 1);
+        }
+        bda_w32(bda::TIMER_COUNT, ticks);
+        if (get_flag(FLAG_IF) && !(pic_imr & 0x01))
+          request_int(pic_vector_base);
       }
-      bda_w32(bda::TIMER_COUNT, ticks);
-      if (get_flag(FLAG_IF) && !(pic_imr & 0x01))
-        request_int(pic_vector_base);
+      // Keep tick_cycle_mark in sync so the normal timer check doesn't
+      // fire immediately when the CPU resumes after idle.
+      tick_cycle_mark = cycles;
 
       if (video_mode == 0x13) {
         io->video_refresh_gfx(mem->get_mem() + VGA_VRAM_BASE, 320, 200, vga_dac);
@@ -346,6 +359,10 @@ bool dos_machine::run_batch(int count) {
         uint16_t pos = bda_r16(bda::CURSOR_POS + page * 2);
         io->video_set_cursor((pos >> 8) & 0xFF, pos & 0xFF);
       }
+      // Reset poll count so the CPU gets a full batch of instructions
+      // on the next call before re-triggering idle.  This lets timer-based
+      // timeouts (e.g. FreeDOS F5/F8 boot prompt) make progress.
+      kbd_poll_count = 0;
       return true;
     }
 
@@ -468,8 +485,9 @@ void dos_machine::do_interrupt(emu88_uint8 vector) {
   // Our ROM stub will catch it via unimplemented_opcode when the
   // chain reaches our entry point.
   // Reset keyboard poll counter since non-BIOS interrupt = program activity
-  // (exclude timer, time, and video - see dispatch_bios comment)
-  if (vector != 0x08 && vector != 0x1C && vector != 0x1A && vector != 0x10)
+  // (exclude timer, time, video, and keyboard itself - these are not
+  // indicators of program activity and shouldn't reset the idle detector)
+  if (vector != 0x08 && vector != 0x1C && vector != 0x1A && vector != 0x10 && vector != 0x16)
     kbd_poll_count = 0;
   emu88::do_interrupt(vector);
 }
@@ -752,4 +770,5 @@ void dos_machine::queue_key(uint8_t ascii, uint8_t scancode) {
   waiting_for_key = false;
   kbd_poll_count = 0;
   halted = false;  // Wake from HLT so CPU can process the key
+  idle_tick_time = {};  // Reset so next idle period starts fresh
 }

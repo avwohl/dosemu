@@ -1,14 +1,24 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<catalog version="5">
+<catalog version="6">
     <disk>
         <filename>freedos_hd.img</filename>
-        <name>FreeDOS Hard Disk (with Games)</name>
+        <name>FreeDOS Hard Disk</name>
         <type>hdd</type>
-        <description>98MB bootable hard disk with FreeDOS, bundled games, and utilities.</description>
-        <size>103219200</size>
+        <description>200MB bootable hard disk with FreeDOS 1.4, 230 utilities, archivers, editors, and disk tools.</description>
+        <size>210051072</size>
         <license>GPL / Mixed Freeware</license>
-        <sha256></sha256>
+        <sha256>5deb8945c990d914e2cb34b07e288302786a077a372394e1b6ff6fcbf7b23d97</sha256>
         <defaultDrive>128</defaultDrive>
+    </disk>
+    <disk>
+        <filename>freedos_games.img</filename>
+        <name>DOS Games Collection</name>
+        <type>hdd</type>
+        <description>200MB hard disk with 11 classic shareware games: Duke Nukem, Bio Menace, Jill of the Jungle, God of Thunder, Supaplex, and more. Mount as D: drive.</description>
+        <size>210051072</size>
+        <license>Mixed Freeware</license>
+        <sha256>539853f7e3a2e86365dc0132862a93e38aac8db104770a0acda03ec822f9284f</sha256>
+        <defaultDrive>129</defaultDrive>
     </disk>
     <disk>
         <filename>fd13-floppy.img</filename>
