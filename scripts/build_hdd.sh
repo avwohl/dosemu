@@ -16,8 +16,9 @@ SRCIMG="$IMGDIR/fd/freedos.img"
 # Download FreeDOS boot floppy if not present
 if [ ! -f "$SRCIMG" ]; then
   echo "Downloading FreeDOS 1.4 boot floppy..."
-  curl -L -o "$SRCIMG" \
-    https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.4/official/FD14BOOT.img
+  # Original: https://www.ibiblio.org/pub/micro/pc-stuff/freedos/files/distributions/1.4/official/FD14BOOT.img
+  curl -L --retry 3 --connect-timeout 30 -o "$SRCIMG" \
+    https://www.awohl.com/freedos/freedos.img
 fi
 
 # --- Locate ISOs ---
