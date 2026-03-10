@@ -593,15 +593,19 @@ class EmulatorViewModel: NSObject, ObservableObject, DOSEmulatorDelegate {
         }
     }
 
-    /// On first launch (no disks attached), auto-download the first C: disk from the catalog.
+    /// On first launch (no disks attached), auto-download and attach default disks from catalog.
+    /// Only disks with a <defaultDrive> tag are auto-downloaded.
     private func autoAttachDefaultDisks() {
         guard bookmarksResolved else { return }
         let hasAnyDisk = floppyAPath != nil || floppyBPath != nil || hddCPath != nil || hddDPath != nil || isoPath != nil
         guard !hasAnyDisk else { return }
 
-        // Only auto-download the first catalog disk with defaultDrive=0x80 (C:)
-        if let disk = diskCatalog.first(where: { $0.defaultDrive == 0x80 }) {
-            attachOrDownloadCatalogDisk(disk, forDrive: 0x80)
+        var usedDrives = Set<Int>()
+        for disk in diskCatalog {
+            guard let drive = disk.defaultDrive else { continue }
+            guard !usedDrives.contains(drive) else { continue }
+            usedDrives.insert(drive)
+            attachOrDownloadCatalogDisk(disk, forDrive: drive)
         }
     }
 
