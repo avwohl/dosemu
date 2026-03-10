@@ -10,7 +10,7 @@ struct MachineConfig: Codable, Identifiable, Equatable {
 
     // CPU
     var cpuType: Int = 2    // 0=8088, 1=286, 2=386
-    var speedMode: Int = 1  // 0=full, 1=PC 4.77, 2=AT 8, 3=386SX-16, 4=386DX-33, 5=486DX2-66
+    var speedMode: Int = 4  // 0=full, 1=PC 4.77, 2=AT 8, 3=386SX-16, 4=386DX-33, 5=486DX2-66
 
     // Display
     var displayAdapter: Int = 5  // 0=CGA, 1=MDA, 2=Hercules, 3=CGA+MDA, 4=EGA, 5=VGA
