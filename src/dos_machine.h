@@ -136,12 +136,16 @@ private:
 
   // PIT state
   uint16_t pit_counter[3];
+  uint16_t pit_reload[3];     // Programmed reload value
+  uint64_t pit_load_cycle[3]; // CPU cycle when counter was loaded
   uint8_t pit_mode[3];
   uint8_t pit_access[3];
   uint8_t pit_write_phase[3];
   uint8_t pit_read_phase[3];
   bool pit_latch_pending[3];
   uint16_t pit_latch_value[3];
+
+  uint16_t pit_current_count(int ch) const;
   uint8_t port_b;  // Port 0x61
 
   // CGA/MDA CRTC state

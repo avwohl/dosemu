@@ -21,6 +21,8 @@ dos_machine::dos_machine(emu88_mem *memory, dos_io *io)
       nic(nullptr), ne2000_base(0x300), ne2000_irq(3)
 {
   memset(pit_counter, 0, sizeof(pit_counter));
+  memset(pit_reload, 0, sizeof(pit_reload));
+  memset(pit_load_cycle, 0, sizeof(pit_load_cycle));
   memset(pit_mode, 0, sizeof(pit_mode));
   memset(pit_access, 0, sizeof(pit_access));
   memset(pit_write_phase, 0, sizeof(pit_write_phase));
@@ -38,6 +40,17 @@ dos_machine::dos_machine(emu88_mem *memory, dos_io *io)
 
 dos_machine::~dos_machine() {
   delete nic;
+}
+
+// Simulate PIT counter decrement based on elapsed CPU cycles.
+// PIT runs at 1.193182 MHz; we approximate as cycles/4 for 4.77 MHz base.
+uint16_t dos_machine::pit_current_count(int ch) const {
+  uint16_t reload = pit_reload[ch] ? pit_reload[ch] : 0x10000;
+  uint64_t elapsed_cycles = cycles - pit_load_cycle[ch];
+  // PIT ticks ≈ CPU cycles / 4 (1.193 MHz vs 4.77 MHz)
+  uint64_t pit_ticks = elapsed_cycles / 4;
+  uint16_t count = (uint16_t)((reload - (pit_ticks % reload)) & 0xFFFF);
+  return count ? count : (uint16_t)reload;
 }
 
 //=============================================================================
@@ -579,11 +592,17 @@ void dos_machine::port_out(emu88_uint16 port, emu88_uint8 value) {
         } else {
           pit_counter[ch] = (pit_counter[ch] & 0x00FF) | ((uint16_t)value << 8);
           pit_write_phase[ch] = 0;
+          pit_reload[ch] = pit_counter[ch];
+          pit_load_cycle[ch] = cycles;
         }
       } else if (pit_access[ch] == 1) {
         pit_counter[ch] = value;
+        pit_reload[ch] = pit_counter[ch];
+        pit_load_cycle[ch] = cycles;
       } else if (pit_access[ch] == 2) {
         pit_counter[ch] = (uint16_t)value << 8;
+        pit_reload[ch] = pit_counter[ch];
+        pit_load_cycle[ch] = cycles;
       }
       break;
     }
@@ -592,7 +611,7 @@ void dos_machine::port_out(emu88_uint16 port, emu88_uint8 value) {
       if (ch == 3) break;
       int access = (value >> 4) & 3;
       if (access == 0) {
-        pit_latch_value[ch] = pit_counter[ch];
+        pit_latch_value[ch] = pit_current_count(ch);
         pit_latch_pending[ch] = true;
         pit_read_phase[ch] = 0;
       } else {
@@ -674,7 +693,7 @@ emu88_uint8 dos_machine::port_in(emu88_uint16 port) {
     // --- PIT ---
     case 0x40: case 0x41: case 0x42: {
       int ch = port - 0x40;
-      uint16_t val = pit_latch_pending[ch] ? pit_latch_value[ch] : pit_counter[ch];
+      uint16_t val = pit_latch_pending[ch] ? pit_latch_value[ch] : pit_current_count(ch);
       if (pit_access[ch] == 3) {
         if (pit_read_phase[ch] == 0) {
           pit_read_phase[ch] = 1;
