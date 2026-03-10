@@ -524,10 +524,20 @@ void dos_machine::unimplemented_opcode(emu88_uint8 opcode) {
       ip -= 2;
       return;
     }
-    // IRET: pop IP, CS, FLAGS (they were pushed by the INT instruction)
+    // IRET: pop IP, CS, FLAGS (they were pushed by the INT instruction).
+    // The BIOS handler modified `flags` directly (e.g. CF for error status).
+    // Merge those result flags into the saved FLAGS so callers see them —
+    // this matters when reached through the interrupt chain or via V86
+    // reflection (DPMI servers like CWSDPMI).
+    uint16_t bios_flags = flags;
     ip = pop_word();
-    sregs[seg_CS] = pop_word();
+    load_segment_real(seg_CS, pop_word());
     flags = pop_word();
+    // Propagate arithmetic/status flags from the BIOS handler; preserve
+    // control flags (IF, TF, DF, IOPL) from the saved flags.
+    static constexpr uint16_t RESULT_FLAGS =
+      FLAG_CF | FLAG_PF | FLAG_AF | FLAG_ZF | FLAG_SF | FLAG_OF;
+    flags = (flags & ~RESULT_FLAGS) | (bios_flags & RESULT_FLAGS);
     return;
   }
   emu88::unimplemented_opcode(opcode);

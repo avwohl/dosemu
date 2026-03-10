@@ -454,6 +454,13 @@ struct ContentView: View {
             } else {
                 ForEach(viewModel.diskCatalog) { disk in
                     catalogRow(disk)
+                        .swipeActions(edge: .trailing) {
+                            if case .downloaded = viewModel.downloadStates[disk.filename] {
+                                Button("Delete", role: .destructive) {
+                                    viewModel.deleteCatalogDisk(disk)
+                                }
+                            }
+                        }
                 }
             }
         }
@@ -497,7 +504,6 @@ struct ContentView: View {
                     Button("Save As") {
                         viewModel.saveDiskFile(viewModel.disksDirectory.appendingPathComponent(disk.filename))
                     }
-                    Button("Delete", role: .destructive) { viewModel.deleteCatalogDisk(disk) }
                 }
                 .font(.caption)
             case .error(let msg):

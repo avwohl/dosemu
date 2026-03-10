@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<catalog version="6">
+<catalog version="8">
     <disk>
         <filename>freedos_hd.img</filename>
         <name>FreeDOS Hard Disk</name>
@@ -7,7 +7,7 @@
         <description>200MB bootable hard disk with FreeDOS 1.4, 230 utilities, archivers, editors, and disk tools.</description>
         <size>210051072</size>
         <license>GPL / Mixed Freeware</license>
-        <sha256>5deb8945c990d914e2cb34b07e288302786a077a372394e1b6ff6fcbf7b23d97</sha256>
+        <sha256>92488c5cd1b028af605f39276c43ada1b0ddb9cd7f33bd484dbe560b94294f4c</sha256>
         <defaultDrive>128</defaultDrive>
     </disk>
     <disk>

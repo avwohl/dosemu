@@ -264,6 +264,7 @@ SET TEMP=C:\TEMP
 SET DIRCMD=/OGN
 PROMPT $P$G
 IF NOT EXIST C:\TEMP\NUL MD C:\TEMP
+C:\FREEDOS\BIN\CWSDPMI -p
 BATEOF
 mcopy -D o /tmp/AUTOEXEC.BAT c:
 
@@ -274,6 +275,12 @@ if [ -f "$IMGDIR/dos/r.com" ]; then
     mcopy -D o "$IMGDIR/dos/r.com" "c:/FREEDOS/BIN/R.COM"
     mcopy -D o "$IMGDIR/dos/w.com" "c:/FREEDOS/BIN/W.COM"
     echo "Installed R.COM and W.COM"
+fi
+
+# Install DPMITEST.COM (DPMI diagnostic tool)
+if [ -f "$IMGDIR/dos/dpmitest.com" ]; then
+    mcopy -D o "$IMGDIR/dos/dpmitest.com" "c:/DPMITEST.COM"
+    echo "Installed DPMITEST.COM"
 fi
 
 # =========================================================================

@@ -5,7 +5,7 @@ and other DOS-compatible operating systems on your iPhone, iPad, or Mac.
 
 ## Features
 
-- **8088/80186/386 CPU emulator** written in C++ — executes real DOS binaries (real mode only — no protected mode, DPMI, or DOS extenders)
+- **8088/80186/286/386 CPU emulator** written in C++ — executes real DOS binaries in real mode and 386 protected mode (V86, ring transitions, paging)
 - **CGA, EGA, VGA, MDA, and Hercules** display adapters (configurable, including dual CGA+MDA)
 - **NE2000 network adapter** — DP8390-based Ethernet with standard packet driver support
 - **AdLib and Sound Blaster** sound card emulation
@@ -18,17 +18,18 @@ and other DOS-compatible operating systems on your iPhone, iPad, or Mac.
 - **Named configuration profiles** — save/load machine setups
 - **Speed control** — Full speed, IBM PC 4.77 MHz, IBM AT 8 MHz, 386SX 16 MHz, 386DX 33 MHz, or 486DX2 66 MHz
 
-## Compatibility Note
+## Compatibility
 
-The 386 CPU support is **real mode only**. Programs that require protected mode,
-DPMI, or DOS extenders (DOS4GW, DOS32A, CWSDPMI, etc.) will not run. This
-includes DOOM, Quake, Duke Nukem 3D, and most post-1993 games that use 32-bit
-DOS extenders. Games requiring HIMEM.SYS or EMM386 (XMS/EMS memory managers)
-also cannot run, as these require protected mode CPU transitions.
+The 386 CPU includes full protected mode support: GDT/LDT/IDT descriptor
+tables, ring 0–3 privilege transitions, call gates, V86 mode, paging with
+4KB/4MB pages, and all system instructions. The built-in XMS 3.0 driver
+provides up to 64 MB of extended memory. CWSDPMI ships on the FreeDOS hard
+disk image and loads at boot, so programs that need DPMI (DOS4GW, DOS32A,
+DJGPP, etc.) can run.
 
-The emulator runs a wide range of real-mode DOS software from the late 1980s
-through mid-1990s, including many classic Apogee, Epic MegaGames, and id
-Software titles. See [GAMES.md](GAMES.md) for the full list of bundled games.
+The emulator runs a wide range of DOS software from the late 1980s through the
+mid-1990s, including real-mode games and protected-mode programs that use
+DPMI-based DOS extenders. See [GAMES.md](GAMES.md) for the bundled game list.
 
 ## Quick Start
 
@@ -140,8 +141,9 @@ iosFreeDOS/                iOS/macOS app (SwiftUI + Obj-C++ bridge)
                            EmulatorViewModel, MachineConfig
   Bridge/                  DOSEmulator.h/.mm — Obj-C++ bridge
 src/                       C++ emulator core
-  emu88.h / emu88.cc       8088/80186/386 CPU emulator
-  emu88_mem.h/.cc          Memory subsystem (up to 16 MB)
+  emu88.h / emu88.cc       8088/80186/286/386 CPU emulator
+  emu88_pmode.cc           386 protected mode, V86, paging, exceptions
+  emu88_mem.h/.cc          Memory subsystem (up to 64 MB)
   dos_machine.h/.cc        PC hardware: PIC, PIT, DMA, PPI, CMOS, NE2000
   dos_bios.cc              BIOS interrupts (INT 10h, 13h, 16h, etc.)
   dos_io.h                 Abstract I/O interface for platform portability
@@ -183,12 +185,25 @@ host file I/O, and network I/O.
 
 ## CPU Compatibility
 
-The emulator implements the full 8088 instruction set plus:
+The emulator implements four CPU modes selectable at runtime:
 
-- **80186**: PUSHA/POPA, ENTER/LEAVE, PUSH imm, IMUL imm, BOUND, INS/OUTS
-- **386 (real mode)**: 32-bit operand/address prefixes, full 32-bit ALU,
-  string operations, MOVZX/MOVSX, SETcc, BT/BTS/BTR/BTC, BSF/BSR, BSWAP,
-  SHLD/SHRD, CMPXCHG, XADD, and system instructions (LGDT, LIDT, MOV CRn)
+| CPU | Features | Test Suite |
+|-----|----------|------------|
+| **8088** | Full 8088 instruction set | [SingleStepTests/8088](https://github.com/SingleStepTests/8088) — 100% pass (98.69% before SST-specific quirk fixes) |
+| **80186** | PUSHA/POPA, ENTER/LEAVE, PUSH imm, IMUL imm, BOUND, INS/OUTS | — |
+| **286** | Protected mode basics (LGDT, LIDT, LMSW), SMSW | Mostly passes — known edge cases with IMUL/IDIV sign-extension corner cases |
+| **386** | Full 32-bit ALU, protected mode, V86, paging, DPMI support | [test386.asm](https://github.com/barotto/test386.asm) — 100% pass (POST 0xFF) |
+
+### 386 Protected Mode
+
+- **Descriptor tables**: GDT, LDT, IDT with full descriptor parsing
+- **Privilege levels**: Ring 0–3 with CPL/DPL/RPL enforcement
+- **Segment types**: Code (conforming/non-conforming), data (expand-up/down), system (TSS, call gates)
+- **V86 mode**: IOPL-sensitive instructions trap to ring 0; segment register save/restore on transitions
+- **Paging**: 2-level page tables, 4KB and 4MB (PSE) pages, U/S and R/W protection, accessed/dirty bits
+- **Exceptions**: #GP, #SS, #NP, #TS, #PF with proper error codes; double/triple fault detection
+- **System instructions**: LGDT, LIDT, LLDT, LTR, SGDT, SIDT, SLDT, STR, SMSW, LMSW, VERR, VERW, LAR, LSL, ARPL, CLTS, INVLPG, MOV CR0–CR4, MOV DR0–DR7, CPUID, RDTSC
+- **Memory**: XMS 3.0 driver (up to 64 MB extended), A20 gate, CWSDPMI resident at boot
 
 FreeDOS 1.4 (which requires a 386) boots and runs successfully.
 
