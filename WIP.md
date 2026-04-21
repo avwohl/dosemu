@@ -6,8 +6,10 @@ shows "modified content" because the Makefile patches its
 `src/gui/sdlmain.cpp` at build time from
 `patches/sdlmain-expose-setup.patch`; `make distclean` resets it.
 
-HEAD is at `cbefb92` "LE loader: install one LDT descriptor per
-object".
+HEAD is at `48bc558` "LE loader: end-to-end execution -- LE_MIN
+runs to exit".  First hand-crafted LE binary executes cleanly
+through the full pipeline: load -> fixups -> descriptor install ->
+PM entry -> 32-bit execution -> PM INT 21h AH=4Ch -> exit 0.
 
 ## Resume checklist (fresh machine)
 
@@ -122,9 +124,10 @@ Plus:
 - **AH=4D**: reads `s_last_child_exit` populated by AH=4B on restore.
 - 3-level chain verified: `GRAND.COM` → `MIDDLE.COM` → `CHILD.COM`.
 
-## LE loader — more landed
+## LE loader — end-to-end
 
-Commits `dbbe111` + `b487526` + `98ce926` + `db1f0c6`:
+Commits `dbbe111` + `b487526` + `98ce926` + `db1f0c6` + `cbefb92` +
+`2db8310` + `48bc558`:
 
 - MZ binaries get their `lfanew` (file offset 0x3C) checked for "LE"
   or "LX" signature.
@@ -149,16 +152,24 @@ Commits `dbbe111` + `b487526` + `98ce926` + `db1f0c6`:
 - `le_install_descriptors` allocates a run of LDT slots and writes
   one descriptor per object with base/limit/access/D-bit derived
   from the object's flags.  Selector stashed in `LeObject.ldt_sel`.
-  Teardown path releases the slots.  Descriptors are syntactically
-  valid but not yet activated (loader doesn't enter PM).
+- `pm_setup_gdt_and_idt` extracted as shared helper used by both
+  `dosemu_dpmi_entry` and the new LE launch path.
+- `le_launch_pm_prep` seeds GDT/IDT from RM; `dosemu_startup`
+  gains an `is_pm` branch that flips CR0.PE, CPU_LLDT, loads
+  DS/ES/SS from LDT selectors, CPU_JMP to entry CS:EIP, then
+  DOSBOX_RunMachine.
+- `LE_MIN.EXE` code rewritten to `mov eax, imm32; mov ah, 4Ch;
+  int 21h`: the PM INT 21h handler picks up AL=0 and exits rc=0.
+  CI asserts rc=0.
 
-### Still missing for LE execution
+### Still missing for real LE binaries
 
 | Piece | Sketch |
 |---|---|
-| Entry point dispatch | After descriptor install, enter PM: set CS:EIP from `entry_obj_sel`:`entry_eip` (LE header offset 0x18:0x1C, selector from the corresponding `LeObject.ldt_sel`), SS:ESP from `stack_obj_sel`:`stack_esp` (0x20:0x24), DS from the auto-data-object selector (LE header offset 0x94). Existing `dpmi_enter_pm_mode` has the GDT/IDT/CR0/LLDT plumbing; the LE path needs its own variant that activates pre-installed LDT descriptors and jumps to a client-chosen CS:EIP (no retf-to-caller trick because there's no caller). |
-| Selector-bearing fixups (0x02/0x03/0x06) | Once entry dispatch works, replace the zero-selector stub in `le_apply_fixups` with `objects[tgt_obj-1].ldt_sel`. |
-| Test target | `LE_MIN.EXE` has working fixups but its "code" is `B8 imm32; INT 20h` -- INT 20h is RM terminate, not PM. Change to `B4 4C CD 21` (AH=4Ch INT 21h) and rely on the PM INT 21h handler once entry dispatch is up. |
+| Selector-bearing fixups (0x02/0x03/0x06) | `le_apply_fixups` currently writes 0 for the selector field of these fixup types. Now that descriptors are installed, replace the stub with `objects[tgt_obj-1].ldt_sel`. Unlocks 16:16 and 16:32 pointers which real clients use for vtables + function pointers. |
+| DPMI service hand-off | Real DOS4G/W clients skip our built-in DPMI switch and do their own init. `wd.exe` currently aborts on an un-installed interrupt vector (`INT:Gate Selector points to illegal descriptor with type 0x0`) shortly after entry. Probably needs a RM-stub boot that sets up INT 21h-equivalent RM vectors the client can reflect through. |
+| RM INT reflection for LE client | Our PM IDT reflection path covers vectors whose IVT[] points at CB_SEG. For LE clients we may need to reflect INT 21h/31h/2Fh/etc. unconditionally. |
+| Import resolution | LE supports imports from other modules (imp-ord / imp-name reference types). `le_apply_fixups` logs + aborts on these. Real clients may need them; for Watcom utils like `wd.exe` imports are typically RTL-internal and live in the same image. |
 
 Roughly another ~200-400 lines to reach "hello-world LE binary runs
 end-to-end" from here.
@@ -233,18 +244,15 @@ block themselves. DPMI doesn't require it.
 
 Ordered roughly by leverage / difficulty:
 
-1. **PM descriptor install + entry dispatch for LE.** With
-   fixups + pm_arena backing working, this is now the last big
-   piece. Plan: add `le_enter_pm` that installs an LDT descriptor
-   per object (access byte from flags, D-bit from BIG, base =
-   host_base, limit = virt_size - 1), loads GDT/LDT/IDT the same
-   way `dpmi_enter_pm_mode` does today, flips CR0.PE=1, and jumps
-   to `entry_obj`:`entry_eip` with SS:ESP and auto-data-obj DS set
-   up. Then re-test on `LE_MIN.EXE` (after swapping its exit stub
-   to AH=4Ch INT 21h) and see how far `wd.exe` gets.
-2. **Selector-bearing fixups (0x02/0x03/0x06).** Once LDT
-   descriptors exist per object, replace the stub patches in
-   `le_apply_fixups` with real selectors.
+1. **Selector-bearing fixups (0x02/0x03/0x06).** Small win. Wire
+   `objects[tgt_obj-1].ldt_sel` into the selector field instead of
+   writing 0. Should unblock any real LE binary that uses far
+   function pointers or vtables.
+2. **Make wd.exe survive its first interrupt.** Currently aborts
+   with `INT:Gate Selector points to illegal descriptor` ~0.3s in.
+   Step through via stderr to identify the vector it's hitting;
+   decide whether to install a RM handler for it or gate the vector
+   in the PM IDT.
 3. **Cross-build a DJGPP tiny hello** (separate toolchain). Might
    give us a COFF-in-MZ path that's easier than LE for some
    targets.
@@ -319,6 +327,9 @@ External-tool integration:
 ## Commits since the original handoff (1222c44)
 
 ```
+48bc558  LE loader: end-to-end execution -- LE_MIN runs to exit
+2db8310  DPMI: extract pm_setup_gdt_and_idt helper
+06b7f4d  WIP.md: LE LDT descriptor install landed
 cbefb92  LE loader: install one LDT descriptor per object
 7d7c1b0  WIP.md: refresh for LE fixup walker + pm_arena landing
 db1f0c6  LE loader: tier object allocation into pm_arena for >1MB binaries
@@ -354,5 +365,5 @@ ffcdbff  DPMI stage 4 (subset): INT 31h AX=0400 + get/set segment base
 bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 ```
 
-32 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
+35 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
