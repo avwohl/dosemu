@@ -4103,7 +4103,7 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   // LE image is a future-session item -- requires installing PM
   // descriptors for each object, applying fixups, and entering PM at
   // the entry point with the right CS:EIP/SS:ESP.
-  if (f.size() >= 0x40) {
+  if (f.size() >= 0x40 && !std::getenv("DOSEMU_LE_AS_MZ")) {
     const uint32_t le_off = rdd(f, 0x3C);
     if (le_off != 0 && le_off + 2 <= f.size()
         && ((f[le_off] == 'L' && f[le_off + 1] == 'E') ||
