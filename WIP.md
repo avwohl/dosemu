@@ -255,17 +255,20 @@ Ordered roughly by leverage / difficulty:
    - set_cf frame-offset bug in 32-bit gates fixed (0b57f67):
      was writing to [SP+4] (CS word) instead of [SP+8] (EFLAGS),
      corrupting CS's RPL to 1 on every CF-returning INT 21h/31h.
-   wd.exe now executes 0x135 bytes past entry (through two
-   INT 21h calls incl. AH=30h DOS version + AH=FFh soft-fail)
-   and GP-faults at IP=0x6f239 on a `66 26 8e 1d f0 6a 00 00`
-   instruction (roughly `mov ds, es:[6af0h]`).  Error code
-   0x4900 = the selector it tried to load.  That memory slot
-   looks like a DOS4G-initialized "pre-loaded PM selector" --
-   real DOS4G's RM stub fills well-known offsets in the data
-   object with PM selectors before entry; we leave them zeroed.
-   Next piece: replicate DOS4G's pre-entry environment setup,
-   which is genuine DPMI-host scaffolding (PSP/env/arg pointers,
-   fixed selectors for transfer buffer etc.).
+   - **Extender identified as Phar Lap, not DOS4G** (0930290).
+     Extending the INT 21h trace to dump full 32-bit EBX/ECX/EDX
+     revealed wd.exe's two pre-fault calls carry `EBX=0x50484152`
+     ("PHAR") and `EBX=0x50480000` ("PH").  The Watcom runtime is
+     probing for **Phar Lap 386|DOS-Extender**, not DOS4G.  Our
+     soft-fail on both calls is what forces the runtime into a
+     fallback that GP-faults ~0x135 bytes later.
+   Next piece: read up on the Phar Lap protocol (signatures,
+   INT 21h AH=FFh sub-calls, the fixed selector slots PharLap
+   fills in pre-entry).  Replicating the "yes PharLap present"
+   path is probably more tractable than the DOS4G setup was
+   going to be.  If instead we return "no extender" cleanly
+   enough, the Watcom runtime may have a bare-PM fallback that
+   would reveal yet another gap.
 
    Confirmed pattern: vi.exe (OW's vi, also LE CPU=2) fails with
    the exact same AH=30h/AH=FFh/GP trace, confirming this is a
@@ -347,6 +350,7 @@ External-tool integration:
 ## Commits since the original handoff (1222c44)
 
 ```
+0930290  INT 21h trace: show full 32-bit regs when called from PM
 c484c5e  WIP.md: set_cf fix landed; wd.exe next gap identified
 0b57f67  INT 21h/31h: fix set_cf frame offset for 32-bit gates
 3666d20  WIP.md: wd.exe next-failure instrumented
@@ -397,5 +401,5 @@ ffcdbff  DPMI stage 4 (subset): INT 31h AX=0400 + get/set segment base
 bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 ```
 
-44 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
+58 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
