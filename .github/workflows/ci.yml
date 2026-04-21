@@ -368,6 +368,20 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-stage6=ok'
 
+      - name: DPMI AX=0501: pm_arena tier (>1MB allocation above 1MB)
+        run: |
+          # Requesting >0xFFFFh paragraphs can't fit the MCB arena, so
+          # dosemu's AX=0501 handler falls back to pm_alloc in the
+          # extended-memory pool above 1MB.  For pm_arena blocks the
+          # handle encoding is SI:DI = high:low of the host linear base
+          # (SI >= 0x0010).  Fixture verifies the tier switch, the new
+          # handle encoding, a write/read round-trip through an ES
+          # selector pointed at the block, in-place shrink via AX=0503,
+          # and free via AX=0502.
+          out=$(build/dosemu tests/DPMI_PMALLOC.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-pmalloc=ok'
+
       - name: LE loader: regenerate + verify type-7 fixup walker
         run: |
           # Python generator emits a hand-crafted minimal LE binary with

@@ -221,6 +221,113 @@ uint16_t mcb_resize(uint16_t data_seg, uint16_t new_size,
   return new_size;
 }
 
+// ---------------------------------------------------------------------------
+// Protected-mode "big" memory arena for DPMI clients.
+//
+// The MCB arena caps out at ~512KB inside conventional memory.  That's fine
+// for small 32-bit clients but a real DOS4G-hosted binary easily needs
+// multi-megabyte allocations.  dosbox-staging configures 16MB of linear RAM
+// by default; everything above 1MB is untouched by the DOS subsystem in our
+// no-shell dosemu setup, so we claim it for DPMI memory services.
+//
+// The allocator is a simple first-fit free-list in linear bytes (page
+// aligned).  Accesses go through dosbox's mem_write* which already serve
+// extended memory correctly.  Clients point LDT descriptors at the returned
+// linear address via AX=0007 to read/write the block in PM.
+//
+// We keep this decoupled from dosbox's MEM_AllocatePages because that
+// allocator walks the whole page map (including conventional pages that
+// overlap our MCB arena), which would cause collisions we'd have to guard
+// against anyway.  Owning the [1MB, total_ram) span outright is simpler and
+// matches how real DPMI hosts treat their extended-memory pool.
+struct PmBlock {
+  uint32_t base;     // page-aligned host linear address
+  uint32_t size;     // page-aligned byte count
+};
+std::vector<PmBlock> s_pm_busy;   // allocated blocks, unsorted
+bool     s_pm_initialised = false;
+uint32_t s_pm_end         = 0;    // 1-past-last valid host byte
+
+constexpr uint32_t PM_ARENA_START = 0x100000u;   // 1MB
+constexpr uint32_t PM_PAGE        = 4096u;
+
+void pm_init() {
+  if (s_pm_initialised) return;
+  // MEM_TotalPages() returns 4KB-page count configured via `memsize` in
+  // dosbox.  Clamp the upper bound to that so we never issue addresses
+  // that dosbox would treat as unmapped.
+  const uint32_t total_pages = MEM_TotalPages();
+  const uint64_t end = static_cast<uint64_t>(total_pages) * PM_PAGE;
+  s_pm_end = (end > 0xFFFFFFFFu) ? 0xFFFFFFFFu : static_cast<uint32_t>(end);
+  s_pm_initialised = true;
+}
+
+uint32_t pm_round_up(uint32_t bytes) {
+  return (bytes + PM_PAGE - 1u) & ~(PM_PAGE - 1u);
+}
+
+// First-fit scan across [PM_ARENA_START, s_pm_end).  Returns a host linear
+// address, or 0 on out-of-memory.  Zero-filled on allocation.
+uint32_t pm_alloc(uint32_t bytes) {
+  pm_init();
+  if (bytes == 0 || s_pm_end <= PM_ARENA_START) return 0;
+  const uint32_t rounded = pm_round_up(bytes);
+  if (rounded < bytes) return 0;   // wrap
+  std::sort(s_pm_busy.begin(), s_pm_busy.end(),
+            [](const PmBlock &a, const PmBlock &b) { return a.base < b.base; });
+  uint32_t cursor = PM_ARENA_START;
+  uint32_t found  = 0;
+  for (const auto &b : s_pm_busy) {
+    if (b.base >= cursor && b.base - cursor >= rounded) {
+      found = cursor;
+      break;
+    }
+    cursor = b.base + b.size;
+  }
+  if (found == 0 && s_pm_end > cursor && s_pm_end - cursor >= rounded)
+    found = cursor;
+  if (found == 0) return 0;
+  s_pm_busy.push_back({found, rounded});
+  // Intentionally skipping zero-fill: the DPMI spec doesn't require
+  // it, and touching every byte via mem_writeb for multi-MB blocks is
+  // slow enough that it desyncs dosbox's timer/IRET bookkeeping (seen
+  // during initial bring-up -- the IRET from AX=0501 tripped "Stack
+  // segment not writable" after a 1MB zero-fill loop).  Clients that
+  // want zeros clear the block themselves, same as DOS AH=48h.
+  return found;
+}
+
+bool pm_free(uint32_t base) {
+  for (auto it = s_pm_busy.begin(); it != s_pm_busy.end(); ++it) {
+    if (it->base == base) { s_pm_busy.erase(it); return true; }
+  }
+  return false;
+}
+
+// Resize in place: shrink always succeeds; grow succeeds if the range
+// [base, base + new_rounded) doesn't collide with any other block and
+// stays within s_pm_end.  No relocation -- the DPMI spec allows either
+// behaviour and the existing MCB resize path also stays in place.
+bool pm_resize(uint32_t base, uint32_t new_bytes) {
+  pm_init();
+  if (new_bytes == 0) return false;
+  const uint32_t new_rounded = pm_round_up(new_bytes);
+  if (new_rounded < new_bytes) return false;
+  PmBlock *me = nullptr;
+  for (auto &b : s_pm_busy) if (b.base == base) { me = &b; break; }
+  if (!me) return false;
+  if (new_rounded <= me->size) { me->size = new_rounded; return true; }
+  if (base + new_rounded > s_pm_end) return false;
+  for (const auto &b : s_pm_busy) {
+    if (&b == me) continue;
+    const uint32_t lo = b.base;
+    const uint32_t hi = b.base + b.size;
+    if (lo < base + new_rounded && hi > base) return false;
+  }
+  me->size = new_rounded;
+  return true;
+}
+
 // Per-drive current directory (without drive letter, backslash-separated).
 std::map<char, std::string> s_drive_cwd;
 
@@ -1828,20 +1935,20 @@ Bitu dosemu_int31() {
       return CBRET_NONE;
     }
 
-    case 0x0501: {  // Allocate memory block (stage 6 minimal)
+    case 0x0501: {  // Allocate memory block
       // Input:  BX:CX = size in bytes (BX high, CX low)
       // Output: BX:CX = linear address of block
       //         SI:DI = handle (opaque; must round-trip to 0x0502/0x0503)
       // Error:  CF=1, AX=8012h (out of memory)
       //
-      // We delegate to the real-mode MCB allocator: every byte we hand a
-      // DPMI client comes from the same 0x2000-0xA000 paragraph arena DOS
-      // memory management uses.  That caps allocations at ~600KB total --
-      // fine for small DPMI clients, nowhere near enough for a real
-      // 32-bit app.  Returning a linear address <1MB is legal per the
-      // DPMI spec; real hosts typically allocate above 1MB but the spec
-      // only requires that the address be valid for the client to
-      // read/write.
+      // Two-tier backing store:
+      //   Tier 1: the MCB arena in conventional memory (paras fit in 16
+      //           bits).  Handle = SI:DI = 0:mcb_data_seg.
+      //   Tier 2: pm_arena above 1MB, for requests that don't fit in the
+      //           MCB or that the MCB chain can't satisfy right now.
+      //           Handle = SI:DI = high:low of host linear base (SI
+      //           always >= 0x0010 because base >= 0x100000).
+      // The two handle encodings are distinguishable by SI (0 vs >=16).
       const uint32_t bytes = (static_cast<uint32_t>(reg_bx) << 16) | reg_cx;
       if (bytes == 0) {
         reg_ax = 0x8021;       // invalid value
@@ -1849,44 +1956,49 @@ Bitu dosemu_int31() {
         return CBRET_NONE;
       }
       const uint32_t paras32 = (bytes + 15u) >> 4;
-      if (paras32 > 0xFFFFu) {
+      // Tier 1 attempt for reasonable-sized requests.
+      if (paras32 > 0 && paras32 <= 0xFFFFu) {
+        uint16_t largest = 0;
+        const uint16_t data_seg = mcb_allocate(
+            static_cast<uint16_t>(paras32), largest);
+        if (data_seg != 0) {
+          const uint32_t linear = static_cast<uint32_t>(data_seg) * 16u;
+          reg_bx = (linear >> 16) & 0xFFFF;
+          reg_cx = linear & 0xFFFF;
+          reg_si = 0;
+          reg_di = data_seg;
+          set_cf(false);
+          return CBRET_NONE;
+        }
+      }
+      // Tier 2: fall back to pm_arena.  Covers >1MB requests and MCB-OOM.
+      const uint32_t linear = pm_alloc(bytes);
+      if (linear == 0) {
         reg_ax = 0x8012;
         set_cf(true);
         return CBRET_NONE;
       }
-      uint16_t largest = 0;
-      const uint16_t data_seg = mcb_allocate(
-          static_cast<uint16_t>(paras32), largest);
-      if (data_seg == 0) {
-        reg_ax = 0x8012;       // physical memory unavailable
-        set_cf(true);
-        return CBRET_NONE;
-      }
-      const uint32_t linear = static_cast<uint32_t>(data_seg) * 16u;
       reg_bx = (linear >> 16) & 0xFFFF;
       reg_cx = linear & 0xFFFF;
-      // Handle = data_seg (16 bits, stashed in DI; SI=0).  0x0502/0x0503
-      // recover the MCB by reading (handle - 1).
-      reg_si = 0;
-      reg_di = data_seg;
+      reg_si = (linear >> 16) & 0xFFFF;
+      reg_di = linear & 0xFFFF;
       set_cf(false);
       return CBRET_NONE;
     }
 
     case 0x0502: {  // Free memory block
-      // Input:  SI:DI = handle returned by 0x0501.
-      // SI must be zero (we never hand out handles with SI != 0) and
-      // DI must be a valid MCB data segment in our arena.
-      if (reg_si != 0 || reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
-        reg_ax = 0x8023;       // invalid handle
-        set_cf(true);
+      // Input: SI:DI = handle.  SI=0 means MCB tier; non-zero SI means
+      // SI:DI is the linear base of a pm_arena block.
+      if (reg_si == 0) {
+        if (reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
+          reg_ax = 0x8023; set_cf(true); return CBRET_NONE;
+        }
+        if (!mcb_free(reg_di)) { reg_ax = 0x8023; set_cf(true); return CBRET_NONE; }
+        set_cf(false);
         return CBRET_NONE;
       }
-      if (!mcb_free(reg_di)) {
-        reg_ax = 0x8023;
-        set_cf(true);
-        return CBRET_NONE;
-      }
+      const uint32_t base = (static_cast<uint32_t>(reg_si) << 16) | reg_di;
+      if (!pm_free(base)) { reg_ax = 0x8023; set_cf(true); return CBRET_NONE; }
       set_cf(false);
       return CBRET_NONE;
     }
@@ -2296,32 +2408,32 @@ Bitu dosemu_int31() {
     case 0x0503: {  // Resize memory block
       // Input:  SI:DI = handle, BX:CX = new size in bytes.
       // Output: BX:CX = linear address of the (possibly-relocated) block.
-      //         SI:DI = new handle.  We only resize in place, so handle
-      //         and base are unchanged on success -- the spec allows a
-      //         host to relocate on grow; we just fail instead.
-      if (reg_si != 0 || reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
-        reg_ax = 0x8023; set_cf(true); return CBRET_NONE;
-      }
+      //         SI:DI = new handle.  In-place only (spec allows either).
       const uint32_t new_bytes = (static_cast<uint32_t>(reg_bx) << 16) | reg_cx;
-      if (new_bytes == 0) {
-        reg_ax = 0x8021; set_cf(true); return CBRET_NONE;
-      }
-      const uint32_t new_paras32 = (new_bytes + 15u) >> 4;
-      if (new_paras32 > 0xFFFFu) {
-        reg_ax = 0x8012; set_cf(true); return CBRET_NONE;
-      }
-      uint16_t largest = 0;
-      const uint16_t got = mcb_resize(reg_di,
-          static_cast<uint16_t>(new_paras32), largest);
-      if (got != new_paras32) {
-        reg_ax = 0x8012;       // couldn't satisfy the new size
-        set_cf(true);
+      if (new_bytes == 0) { reg_ax = 0x8021; set_cf(true); return CBRET_NONE; }
+      if (reg_si == 0) {
+        if (reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
+          reg_ax = 0x8023; set_cf(true); return CBRET_NONE;
+        }
+        const uint32_t new_paras32 = (new_bytes + 15u) >> 4;
+        if (new_paras32 > 0xFFFFu) { reg_ax = 0x8012; set_cf(true); return CBRET_NONE; }
+        uint16_t largest = 0;
+        const uint16_t got = mcb_resize(reg_di,
+            static_cast<uint16_t>(new_paras32), largest);
+        if (got != new_paras32) { reg_ax = 0x8012; set_cf(true); return CBRET_NONE; }
+        const uint32_t linear = static_cast<uint32_t>(reg_di) * 16u;
+        reg_bx = (linear >> 16) & 0xFFFF;
+        reg_cx = linear & 0xFFFF;
+        set_cf(false);
         return CBRET_NONE;
       }
-      const uint32_t linear = static_cast<uint32_t>(reg_di) * 16u;
-      reg_bx = (linear >> 16) & 0xFFFF;
-      reg_cx = linear & 0xFFFF;
-      // SI:DI unchanged (in-place resize = same handle).
+      // pm_arena block.
+      const uint32_t base = (static_cast<uint32_t>(reg_si) << 16) | reg_di;
+      if (!pm_resize(base, new_bytes)) {
+        reg_ax = 0x8012; set_cf(true); return CBRET_NONE;
+      }
+      reg_bx = (base >> 16) & 0xFFFF;
+      reg_cx = base & 0xFFFF;
       set_cf(false);
       return CBRET_NONE;
     }
