@@ -43,14 +43,21 @@ page_tbl_off     = obj_tbl_off + NUM_OBJECTS * OBJ_ENTRY   # 0xE0
 fixup_page_off   = page_tbl_off + NUM_PAGES * 4            # 0xE4
 fixup_record_off = fixup_page_off + (NUM_PAGES + 1) * 4    # 0xEC
 
-# Fixup record for page 1 (the only page).  One internal type-7 fixup:
-#   byte source type  = 0x07  (32-bit offset)
-#   byte target flags = 0x00  (internal ref, 8-bit obj num, 16-bit target off)
-#   word source off   = 0x0001  (imm32 of B8 at page+0)
-#   byte target obj   = 0x02
-#   word target off   = 0x0000
-fixup_record = bytes([0x07, 0x00]) + struct.pack("<H", 0x0001) \
-             + bytes([0x02]) + struct.pack("<H", 0x0000)
+# Fixup record for page 1 (the only page).  Two internal fixups:
+#   (a) type 0x07  (32-bit offset) at source offset 0x0001 -> obj2+0x0
+#       patches the imm32 of the `B8` opcode at entry.
+#   (b) type 0x06  (16:32 far pointer) at source offset 0x000b -> obj2+0x8
+#       writes [32-bit offset=0x00000008][16-bit selector=obj2's LDT sel]
+#       into bytes 11..16 of obj 1.  This never executes (the exit
+#       stub at offset 5..10 terminates the program first) but the
+#       fixup walker still applies it, and CI asserts the "type 0x06"
+#       log line so the selector-bearing code path has coverage.
+fixup_record = (
+    bytes([0x07, 0x00]) + struct.pack("<H", 0x0001)
+    + bytes([0x02]) + struct.pack("<H", 0x0000)
+    + bytes([0x06, 0x10]) + struct.pack("<H", 0x000B)      # 0x10 = target offset is 32-bit
+    + bytes([0x02]) + struct.pack("<I", 0x00000008)
+)
 
 # Fixup page table: (num_pages + 1) entries of dword offsets into the
 # fixup record table.  Page 1's fixups occupy [0, len(fixup_record));
@@ -86,7 +93,7 @@ struct.pack_into("<I", le, 0x28, PAGE_SIZE)      # page size
 # clip the final per-page copy; setting it to 16 means we only copy
 # 16 bytes per page — which is fine since the objects are 8 bytes each
 # and the page's "meaningful" content ends there.
-struct.pack_into("<I", le, 0x2C, 16)             # last page size
+struct.pack_into("<I", le, 0x2C, 32)             # last page size
 struct.pack_into("<I", le, 0x30, len(fixup_page_table) + len(fixup_record))  # fixup section size
 struct.pack_into("<I", le, 0x34, 0)              # fixup checksum
 struct.pack_into("<I", le, 0x38, 0)              # loader section size
@@ -127,7 +134,7 @@ def obj_entry(virt_size, virt_base, flags, first_page, page_count):
     return struct.pack("<IIIII", virt_size, virt_base, flags,
                         first_page, page_count) + b"\x00\x00\x00\x00"
 
-objs = obj_entry(0x10, 0x10000, 0x0005 | 0x2000, 1, 1)  # obj1 code+read, BIG, page 1
+objs = obj_entry(0x20, 0x10000, 0x0005 | 0x2000, 1, 1)  # obj1 code+read, BIG, page 1
 objs += obj_entry(0x10, 0x20000, 0x0003, 1, 1)           # obj2 data R+W, page 1 (shared)
 
 # ---- Object page map table -------------------------------------------------
@@ -147,17 +154,19 @@ page = bytearray(PAGE_SIZE)
 #   CD 21                int 21h           (PM INT 21h handler runs,
 #                                          AH=4Ch, AL=0 so exit code 0)
 page[0] = 0xB8
-page[1:5] = b"\xDE\xAD\xBE\xEF"   # placeholder imm32; fixup should overwrite
+page[1:5] = b"\xDE\xAD\xBE\xEF"   # placeholder imm32; type-7 fixup overwrites
 page[5:7] = b"\xB4\x4C"
 page[7:9] = b"\x30\xC0"
 page[9:11] = b"\xCD\x21"
-# Obj 2 data overlaps starting at page offset 11 in the same physical
-# page -- fine, since both objects refer to page 1.  Their virt_bases
-# differ (0x10000 vs 0x20000), so fixup targets resolve based on
-# host_base.
-# Truncate per last_page_sz = 16 bytes on the wire (the loader clips the
-# copy to 16 bytes; we emit only 16 bytes on disk for this page).
-DATA_PAGE_BYTES = 16
+# Bytes 11..16 of obj 1: destination of the 16:32 far-pointer fixup.
+# Initialize to 0xCC (int 3) so if the client somehow executes here
+# it traps loudly rather than corrupting silently.  The fixup writes
+# 6 bytes: 4-byte offset + 2-byte selector.
+for i in range(11, 32): page[i] = 0xCC
+# Truncate per last_page_sz (0x20 for obj 1 + 0x10 obj 2 shares page);
+# emit exactly obj 1's virt_size since obj 2 occupies the same physical
+# source bytes via a different descriptor base.
+DATA_PAGE_BYTES = 32
 
 # ---- Assemble file ---------------------------------------------------------
 body = (bytes(le) + objs + page_map + fixup_page_table + fixup_record

@@ -382,7 +382,7 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-pmalloc=ok'
 
-      - name: LE loader: regenerate + verify type-7 fixup walker
+      - name: LE loader: regenerate + verify fixup walker
         run: |
           # Python generator emits a hand-crafted minimal LE binary with
           # one code object, one data object, and a single type-7 (32-bit
@@ -394,14 +394,17 @@ jobs:
           out=$(build/dosemu tests/LE_MIN.EXE 2>&1)
           echo "dosemu output:"
           echo "$out"
-          echo "$out" | grep -q 'LE fixups applied: 1'
+          echo "$out" | grep -q 'LE fixups applied: 2'
           # Extract obj2's host base from the loader log and verify the
-          # fixup log resolved the target reference to exactly that.
+          # type-7 fixup resolved the target reference to exactly that,
+          # and the type-6 (16:32 far pointer) fixup resolved to obj2+8.
           base2=$(echo "$out" | sed -n 's/.*obj 2: host=0x\([0-9a-fA-F]\+\).*/\1/p')
           test -n "$base2"
           expected=$(printf '0x%08x' 0x$base2)
-          echo "expected target linear: $expected"
+          expected8=$(printf '0x%08x' $(( 0x$base2 + 8 )))
+          echo "expected target linear: $expected / $expected8"
           echo "$out" | grep -q "type 0x07 -> obj2+0x0 = $expected"
+          echo "$out" | grep -q "type 0x06 -> obj2+0x8 = $expected8"
           # LE_MIN's code is `mov eax, imm32; mov ah, 4Ch; xor al, al;
           # int 21h`.  After fixup + descriptor install + PM entry it
           # should fall through to our PM INT 21h handler, set
