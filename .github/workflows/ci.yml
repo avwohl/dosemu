@@ -163,6 +163,21 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-integration=ok'
 
+      - name: DPMI AX=0300: Simulate Real Mode Interrupt
+        run: |
+          # Full mode-switch round-trip: save PM state, swap IDTR to
+          # the RM IVT (ours points at the PM IDT -- left loaded, the
+          # RM INT reads 8-byte PM gate descriptors as 4-byte seg:off
+          # pairs and jumps to garbage), clear CR0.PE, load RM regs
+          # from client struct, CALLBACK_RunRealInt, restore CR0.PE +
+          # PM IDTR, reload PM segments (including a manual CS cache
+          # refresh), write RM results back to the struct.
+          # Fixture invokes INT 1Ah AH=00 (BIOS tick count) and
+          # verifies the struct's ECX/EDX came back non-zero.
+          out=$(build/dosemu tests/DPMI_SIMRM.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-simrm=ok'
+
       - name: DPMI stage 6b: AX=0503 resize memory block (shrink + grow)
         run: |
           # Alloc 256 bytes, shrink to 64 (in-place split), grow back to

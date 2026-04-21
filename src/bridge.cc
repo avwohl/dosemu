@@ -742,10 +742,6 @@ Bitu dosemu_dpmi_entry() {
   // switch is identical except for the D flag on the code descriptor and
   // the IDT gate type.
   const bool bits32 = (reg_ax == 1);
-  if (std::getenv("DOSEMU_TRACE")) {
-    std::fprintf(stderr, "[dpmi] switch entry: bits32=%d client_cs=%04x\n",
-                 bits32 ? 1 : 0, client_cs);
-  }
 
   write_gdt_descriptor(0, 0,              0,      0);                 // null
   write_gdt_descriptor(1, client_cs * 16, 0xFFFF, 0x9A, bits32);      // code
@@ -1026,10 +1022,6 @@ uint16_t ldt_find_run(uint16_t count) {
 }
 
 Bitu dosemu_int31() {
-  if (std::getenv("DOSEMU_TRACE")) {
-    std::fprintf(stderr, "[int31] AX=%04x BX=%04x CX=%04x DX=%04x\n",
-                 reg_ax, reg_bx, reg_cx, reg_dx);
-  }
   switch (reg_ax) {
 
     case 0x0400: {  // Get DPMI version
@@ -1269,6 +1261,160 @@ Bitu dosemu_int31() {
         set_cf(true);
         return CBRET_NONE;
       }
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0300: {  // Simulate Real Mode Interrupt
+      // Input:
+      //   BL        = interrupt number
+      //   BH        = flags (bit 0 = reset interrupt controller; unused)
+      //   CX        = words to copy from PM stack to RM stack (we ignore
+      //               -- minimal implementation uses a fresh RM stack)
+      //   ES:(E)DI -> RealModeCallStructure (50 bytes):
+      //     +00 EDI  +04 ESI  +08 EBP  +0C reserved
+      //     +10 EBX  +14 EDX  +18 ECX  +1C EAX
+      //     +20 flags (word)  +22 ES  +24 DS  +26 FS  +28 GS
+      //     +2A IP            +2C CS  +2E SP  +30 SS
+      //
+      // The struct is updated in place with register values on return.
+      //
+      // Mode-switch flow: save PM state, clear CR0.PE, load RM
+      // registers + segments from the struct, call CALLBACK_RunRealInt
+      // (which sets CS:IP to a pre-built RM stub that does `INT N` +
+      // stop callback, then runs DOSBOX_RunMachine recursively), copy
+      // results back to the struct, set CR0.PE=1, reload PM selectors
+      // via CPU_SetSegGeneral (refreshes each descriptor cache from
+      // the GDT/LDT -- crucial for CS, which otherwise retains its
+      // RM-interpreted base of selector*16 from the RM phase).
+      const uint8_t intnum = reg_bl;
+      // Pin the struct's linear address before we touch segments.
+      const PhysPt rmcs = SegPhys(es) + reg_edi;
+
+      // Snapshot PM state (segments + full register file + stack).
+      const uint32_t saved_cr0  = cpu.cr0;
+      const uint16_t saved_cs   = SegValue(cs);
+      const uint16_t saved_ds   = SegValue(ds);
+      const uint16_t saved_ss   = SegValue(ss);
+      const uint16_t saved_es   = SegValue(es);
+      const uint16_t saved_fs   = SegValue(fs);
+      const uint16_t saved_gs   = SegValue(gs);
+      const uint32_t saved_esp  = reg_esp;
+      const uint32_t saved_ebp  = reg_ebp;
+      const uint32_t saved_eax  = reg_eax;
+      const uint32_t saved_ebx  = reg_ebx;
+      const uint32_t saved_ecx  = reg_ecx;
+      const uint32_t saved_edx  = reg_edx;
+      const uint32_t saved_esi  = reg_esi;
+      const uint32_t saved_edi  = reg_edi;
+
+      // Load RM register context from the struct.
+      const uint32_t s_edi = mem_readd(rmcs + 0x00);
+      const uint32_t s_esi = mem_readd(rmcs + 0x04);
+      const uint32_t s_ebp = mem_readd(rmcs + 0x08);
+      const uint32_t s_ebx = mem_readd(rmcs + 0x10);
+      const uint32_t s_edx = mem_readd(rmcs + 0x14);
+      const uint32_t s_ecx = mem_readd(rmcs + 0x18);
+      const uint32_t s_eax = mem_readd(rmcs + 0x1C);
+      const uint16_t s_es  = mem_readw(rmcs + 0x22);
+      const uint16_t s_ds  = mem_readw(rmcs + 0x24);
+      const uint16_t s_fs  = mem_readw(rmcs + 0x26);
+      const uint16_t s_gs  = mem_readw(rmcs + 0x28);
+      const uint16_t s_sp  = mem_readw(rmcs + 0x2E);
+      const uint16_t s_ss  = mem_readw(rmcs + 0x30);
+
+      // Swap IDTR to the RM IVT (base=0, limit=0x3FF) for the RM
+      // round-trip.  On a 386, real-mode INT dispatch uses IDTR (not
+      // a fixed IVT); ours points at the PM IDT at 0x1A000, so the
+      // RM INT would read our 8-byte gate descriptors as 4-byte
+      // seg:off pairs and jump to garbage.  Restored below before
+      // re-entering PM.
+      const Bitu saved_idt_base  = CPU_SIDT_base();
+      const Bitu saved_idt_limit = CPU_SIDT_limit();
+      CPU_LIDT(0x3FF, 0);
+
+      // Clear CR0.PE.  Now in real mode.
+      CPU_SET_CRX(0, saved_cr0 & ~1u);
+
+      // Load RM register + segment context from the struct.  SegSet16
+      // unconditionally sets Segs.phys[seg] = val << 4 (RM semantics),
+      // which is what we want here.
+      reg_eax = s_eax; reg_ebx = s_ebx; reg_ecx = s_ecx; reg_edx = s_edx;
+      reg_esi = s_esi; reg_edi = s_edi; reg_ebp = s_ebp;
+      SegSet16(ds, s_ds); SegSet16(es, s_es);
+      SegSet16(fs, s_fs); SegSet16(gs, s_gs);
+      if (s_ss != 0) {
+        SegSet16(ss, s_ss);
+        reg_esp = s_sp;
+      } else {
+        // Scratch stack in the DOS data area.  The DPMI spec lets the
+        // host provide one when the client leaves SS:SP zero.
+        SegSet16(ss, 0x0050);
+        reg_esp = 0x0F00;
+      }
+
+      CALLBACK_RunRealInt(intnum);
+
+      // Snapshot results before reloading PM state clobbers them.
+      const uint32_t r_eax = reg_eax;
+      const uint32_t r_ebx = reg_ebx;
+      const uint32_t r_ecx = reg_ecx;
+      const uint32_t r_edx = reg_edx;
+      const uint32_t r_esi = reg_esi;
+      const uint32_t r_edi = reg_edi;
+      const uint32_t r_ebp = reg_ebp;
+      const uint16_t r_flags = static_cast<uint16_t>(reg_flags & 0xFFFF);
+      const uint16_t r_es = SegValue(es);
+      const uint16_t r_ds = SegValue(ds);
+      const uint16_t r_fs = SegValue(fs);
+      const uint16_t r_gs = SegValue(gs);
+
+      // Back to protected mode + restore PM IDTR.
+      CPU_SET_CRX(0, saved_cr0);
+      CPU_LIDT(saved_idt_limit, saved_idt_base);
+
+      // Reload PM selectors so their descriptor caches come from the
+      // GDT/LDT again (CALLBACK_RunRealInt left each cached base set
+      // as selector*16 -- its RM interpretation).
+      CPU_SetSegGeneral(ds, saved_ds);
+      CPU_SetSegGeneral(ss, saved_ss);
+      CPU_SetSegGeneral(es, saved_es);
+      CPU_SetSegGeneral(fs, saved_fs);
+      CPU_SetSegGeneral(gs, saved_gs);
+      // CS can't be loaded with a plain MOV; manually refresh its
+      // cached base from the saved selector's GDT descriptor so the
+      // next instruction fetch (of the shim's CF / IRETD) uses the
+      // PM base.  The IRET itself will then do a proper CS load with
+      // cpu.code.big update via the kernel code path.
+      {
+        Descriptor cs_desc;
+        cpu.gdt.GetDescriptor(saved_cs, cs_desc);
+        Segs.val[cs]  = saved_cs;
+        Segs.phys[cs] = cs_desc.GetBase();
+      }
+
+      // Restore host register file (the PM client hasn't "seen" any
+      // of the register changes we made during the RM call).
+      reg_eax = saved_eax; reg_ebx = saved_ebx;
+      reg_ecx = saved_ecx; reg_edx = saved_edx;
+      reg_esi = saved_esi; reg_edi = saved_edi;
+      reg_ebp = saved_ebp; reg_esp = saved_esp;
+
+      // Write results back to the struct (SS:SP and CS:IP aren't
+      // updated on an INT -- those are call-specific outputs).
+      mem_writed(rmcs + 0x00, r_edi);
+      mem_writed(rmcs + 0x04, r_esi);
+      mem_writed(rmcs + 0x08, r_ebp);
+      mem_writed(rmcs + 0x10, r_ebx);
+      mem_writed(rmcs + 0x14, r_edx);
+      mem_writed(rmcs + 0x18, r_ecx);
+      mem_writed(rmcs + 0x1C, r_eax);
+      mem_writew(rmcs + 0x20, r_flags);
+      mem_writew(rmcs + 0x22, r_es);
+      mem_writew(rmcs + 0x24, r_ds);
+      mem_writew(rmcs + 0x26, r_fs);
+      mem_writew(rmcs + 0x28, r_gs);
+
       set_cf(false);
       return CBRET_NONE;
     }
@@ -2156,10 +2302,6 @@ void dosemu_startup() {
     const RealPt rp = int21_cb.Get_RealPointer();
     s_int21_cb_seg = static_cast<uint16_t>((rp >> 16) & 0xFFFF);
     s_int21_cb_off = static_cast<uint16_t>(rp & 0xFFFF);
-    if (std::getenv("DOSEMU_TRACE")) {
-      std::fprintf(stderr, "[cb] int21 callback at %04x:%04x\n",
-                   s_int21_cb_seg, s_int21_cb_off);
-    }
   }
 
   // Second callback: same native handler, but the dosbox-emitted stub
