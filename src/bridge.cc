@@ -687,6 +687,68 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
+    case 0x29: {  // Parse filename at DS:SI into FCB at ES:DI.  Minimal
+                  // implementation: report "no valid filename" and advance
+                  // SI past whitespace so callers don't loop.
+      while (true) {
+        const uint8_t c = mem_readb(SegValue(ds) * 16u + reg_si);
+        if (c != ' ' && c != '\t') break;
+        ++reg_si;
+      }
+      reg_al = 0xFF;  // bad-filename code; callers treat as "no more args"
+      return CBRET_NONE;
+    }
+
+    case 0x33: {  // Get/set ctrl-break checking: AL=0 get, AL=1 set; DL
+      static uint8_t ctrl_break_on = 0;
+      if      (reg_al == 0) reg_dl = ctrl_break_on;
+      else if (reg_al == 1) ctrl_break_on = reg_dl;
+      // AL=5 (boot drive), AL=6 (DOS version) sub-functions left unhandled.
+      return CBRET_NONE;
+    }
+
+    case 0x37: {  // Get/set switchar (the / vs - convention).  Keep it
+                  // as '/' so DOS programs parse their own CLI sensibly.
+      static uint8_t switchar = '/';
+      if      (reg_al == 0) { reg_dl = switchar; reg_al = 0; }
+      else if (reg_al == 1) { switchar = reg_dl; reg_al = 0; }
+      return CBRET_NONE;
+    }
+
+    case 0x4B: {  // Load-and-execute.  Real implementation needs a full
+                  // child-process + CPU-state save/restore; stub returns
+                  // "file not found" so well-behaved callers just give up.
+      return_error(0x02);
+      break;
+    }
+
+    case 0x50: {  // Set current PSP to BX.  We only ever have one process,
+                  // so just accept it silently -- some C runtimes call
+                  // this to register their own PSP.
+      return CBRET_NONE;
+    }
+
+    case 0x51:
+    case 0x62: {  // Get current PSP -> BX
+      reg_bx = PSP_SEG;
+      return CBRET_NONE;
+    }
+
+    case 0x5D: {  // Network / file-locking sub-functions; report "not
+                  // supported" so programs fall back to normal file ops.
+      return_error(0x01);
+      break;
+    }
+
+    case 0x63: {  // Get lead-byte table (DBCS).  Report "no DBCS" via a
+                  // NUL pointer.
+      SegSet16(ds, 0);
+      reg_si = 0;
+      reg_al = 0;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
     case 0x2A: {  // Get date: AL=dow (0=Sun), CX=year, DH=month, DL=day
       const time_t t = std::time(nullptr);
       struct tm lt;
