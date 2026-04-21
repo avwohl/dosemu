@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build meson pkg-config ccache \
+            libsdl2-dev libsdl2-net-dev libpng-dev libopusfile-dev \
+            libspeexdsp-dev libfluidsynth-dev libslirp-dev libasound2-dev \
+            libxi-dev
+
+      - name: Cache dosbox-staging build
+        uses: actions/cache@v4
+        with:
+          path: dosbox-staging/build
+          key: dosbox-staging-${{ hashFiles('dosbox-staging/meson.build', 'dosbox-staging/meson_options.txt') }}
+
+      - name: Build dosbox-staging
+        run: |
+          if [ ! -x dosbox-staging/build/dosbox ]; then
+            meson setup dosbox-staging/build --buildtype=release dosbox-staging
+            ninja -C dosbox-staging/build
+          fi
+
+      - name: Configure dosemu
+        run: cmake -S src -B build
+
+      - name: Build dosemu
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
