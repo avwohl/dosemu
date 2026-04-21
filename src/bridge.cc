@@ -1168,6 +1168,13 @@ Bitu dosemu_le_exc_handle32(int vec) {
   } else {
     dosemu_le_exc_dump32(vec);
   }
+  std::fprintf(stderr,
+      "  EAX=%08x EBX=%08x ECX=%08x EDX=%08x\n"
+      "  ESI=%08x EDI=%08x EBP=%08x\n"
+      "  DS=%04x ES=%04x FS=%04x GS=%04x\n",
+      reg_eax, reg_ebx, reg_ecx, reg_edx,
+      reg_esi, reg_edi, reg_ebp,
+      SegValue(ds), SegValue(es), SegValue(fs), SegValue(gs));
   s_exit_code = 1;
   shutdown_requested = true;
   return CBRET_STOP;
@@ -1186,6 +1193,13 @@ Bitu dosemu_le_exc_handle16(int vec) {
   } else {
     dosemu_le_exc_dump16(vec);
   }
+  std::fprintf(stderr,
+      "  AX=%04x BX=%04x CX=%04x DX=%04x "
+      "SI=%04x DI=%04x BP=%04x\n"
+      "  DS=%04x ES=%04x FS=%04x GS=%04x\n",
+      reg_ax, reg_bx, reg_cx, reg_dx,
+      reg_si, reg_di, reg_bp,
+      SegValue(ds), SegValue(es), SegValue(fs), SegValue(gs));
   s_exit_code = 1;
   shutdown_requested = true;
   return CBRET_STOP;
