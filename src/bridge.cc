@@ -547,6 +547,17 @@ void return_error(uint16_t dos_err) {
   set_cf(true);
 }
 
+// INT 31h (DPMI) stub.  Until stages 2-6 of the DPMI plan land, every DPMI
+// service returns CF=1 with AX=8001h ("unsupported DPMI function").  A
+// client that skipped INT 2Fh/1687h detection and called INT 31h anyway
+// now gets a defined failure instead of dispatching to an un-installed
+// vector.
+Bitu dosemu_int31() {
+  reg_ax = 0x8001;
+  set_cf(true);
+  return CBRET_NONE;
+}
+
 Bitu dosemu_int21() {
   switch (reg_ah) {
 
@@ -1258,6 +1269,11 @@ void dosemu_startup() {
   CALLBACK_HandlerObject int21_cb;
   int21_cb.Install(&dosemu_int21, CB_INT21, "dosemu Int 21");
   int21_cb.Set_RealVec(0x21);
+
+  // Explicit INT 31h denial stub (DPMI stage 1 -- see dpmi_plan.md).
+  CALLBACK_HandlerObject int31_cb;
+  int31_cb.Install(&dosemu_int31, CB_IRET, "dosemu Int 31 (DPMI not yet)");
+  int31_cb.Set_RealVec(0x31);
 
   build_psp(s_program, s_args);
 
