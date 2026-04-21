@@ -247,6 +247,9 @@ Fixture inventory (CI covers all these)
                                  PM_SHIM_SEG=0x1C00.
     DPMI_STAGE6B.COM         -- AX=0503 resize: alloc 256, shrink 64,
                                  grow 128, free.
+    DPMI_INTEGRATION.COM     -- End-to-end 32-bit PM smoke test that
+                                 chains stages 2-6 + reflection in one
+                                 realistic-client-style sequence.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility

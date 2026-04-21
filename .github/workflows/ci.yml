@@ -149,6 +149,20 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-reflect=ok'
 
+      - name: DPMI integration: chain stages 2-6 + reflection in 32-bit PM
+        run: |
+          # Hand-assembled "realistic client" in 32-bit PM: detect DPMI,
+          # switch, AX=0400/0003/0000/0501/0007 (version/incr/LDT-alloc/
+          # mem-alloc/set-base), load LDT selector into FS, round-trip
+          # a 32-bit pattern at offset 0 and 1020, INT 10h reflection
+          # (32-bit shim path), AX=0503 grow, INT 21h AH=09 print,
+          # AX=0502 free, AX=0001 free LDT, exit 0.  A single pass
+          # validates that every DPMI service integrates cleanly with
+          # every other one from a 32-bit client's perspective.
+          out=$(build/dosemu tests/DPMI_INTEGRATION.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-integration=ok'
+
       - name: DPMI stage 6b: AX=0503 resize memory block (shrink + grow)
         run: |
           # Alloc 256 bytes, shrink to 64 (in-place split), grow back to
