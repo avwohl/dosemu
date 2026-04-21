@@ -44,5 +44,11 @@ jobs:
       - name: Build dosemu
         run: cmake --build build -j$(nproc)
 
-      - name: Smoke
+      - name: Smoke (--version)
         run: build/dosemu --version
+
+      - name: Smoke (run HELLO.COM)
+        run: |
+          output=$(build/dosemu tests/HELLO.COM 2>/dev/null)
+          echo "dosemu output: $output"
+          echo "$output" | grep -q 'dosemu-hello-ok'

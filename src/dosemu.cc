@@ -84,13 +84,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (!dosemu::bridge::bring_up_emulator(cfg.headless, cfg.verbose)) return 1;
-
-  std::fprintf(stderr,
-    "dosemu: emulator brought up and torn down cleanly; INT 21h handler\n"
-    "        and EXE loader not yet wired up.\n"
-    "        program=%s  args=%zu  headless=%d  machine=%s  cputype=%s  memsize=%d\n",
-    cfg.program.c_str(), cfg.args.size(), cfg.headless ? 1 : 0,
-    cfg.machine.c_str(), cfg.cputype.c_str(), cfg.memsize_mb);
-  return 2;
+  int rc = dosemu::bridge::run_com(cfg.program.c_str(), cfg.headless, cfg.verbose);
+  if (rc < 0) return 1;
+  return rc;
 }

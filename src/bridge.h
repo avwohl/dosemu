@@ -14,10 +14,12 @@ namespace dosemu::bridge {
 const char *dosbox_version();
 
 // Full in-process bring-up of dosbox-staging: registers sections, parses
-// config, initialises SDL, activates modules, and runs our startup hook
-// (instead of SHELL_Init).  verbose: 0=errors only, 1=warnings, 2=info.
-// Returns true on success.
-bool bring_up_emulator(bool headless, int verbose);
+// config, initialises SDL, activates modules, overrides SHELL_Init with our
+// own startup hook, installs an INT 21h handler that dispatches to
+// host-side C++, loads `program` as a .COM file, and runs the CPU until it
+// exits via INT 21h AH=4Ch.  Returns the DOS exit code (AL) on success, or
+// -1 on startup failure.
+int run_com(const char *program, bool headless, int verbose);
 
 } // namespace dosemu::bridge
 

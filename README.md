@@ -7,11 +7,11 @@ implementations running on the host. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
-**Status:** early scaffolding. CLI parses, `.cfg` loads, and the dosemu
-binary links against the meson-built dosbox-staging static libraries
-(`libcpu.a`, `libhardware.a`, `libints.a`, …). The CPU/machine bring-up and
-the host-side INT 21h handler still need wiring — `dosemu PROG.EXE`
-currently exits with a "not yet implemented" message. See `todo.txt`.
+**Status:** first end-to-end DOS program runs.
+`dosemu tests/HELLO.COM` → `dosemu-hello-ok`. dosbox-staging is linked
+in-process for CPU + PC hardware; DOS INT 21h is handled entirely by C++
+host code (currently AH=02 putchar, AH=09 print string, AH=4Ch exit).
+No subprocess, no dosbox shell, no generated dosbox.conf.
 
 ## Building
 
