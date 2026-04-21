@@ -3566,7 +3566,10 @@ bool load_le_inspect(const std::string &path,
 //
 // Page types we handle:
 //   0 Legal         -- copy bytes from data_pages_off + (page-1)*4KB
-//   1 Iterated      -- TODO (compressed; uncommon)
+//   1 Iterated      -- compressed RLE; logs a one-shot warning and
+//                      leaves the page zeroed (loader continues, but a
+//                      binary with iterated pages won't execute
+//                      correctly until this is expanded).  Uncommon.
 //   2 Invalid       -- leave zeros
 //   3 Zero-filled   -- leave zeros (we allocated zero-filled memory)
 //   4 Range-of-zeros (LX) -- leave zeros
@@ -3652,7 +3655,30 @@ bool le_load_objects(const std::vector<uint8_t> &f, size_t le_off,
                              | (static_cast<uint32_t>(f[pt_entry + 1]) << 8)
                              |  static_cast<uint32_t>(f[pt_entry + 2]);
       const uint8_t  ptype   = f[pt_entry + 3];
-      if (ptype != 0) continue;                       // only "legal" for now
+      if (ptype != 0) {
+        // Non-"legal" page types leave the allocated memory at its
+        // pre-zeroed state.  Warn once per unique ptype so the user
+        // knows when a binary hits an untested code path.  Known:
+        //   1 Iterated     -- RLE-compressed; uncommon but exists
+        //   2 Invalid      -- fine to leave zero
+        //   3 Zero-filled  -- fine to leave zero
+        //   4 LX Range-of-zeros -- fine to leave zero
+        static uint8_t seen_types = 0;
+        const uint8_t bit = 1u << (ptype & 7);
+        if (!(seen_types & bit)) {
+          seen_types |= bit;
+          const char *name =
+              ptype == 1 ? "Iterated (RLE-compressed, zero-fill stub)"
+            : ptype == 2 ? "Invalid (zero-fill OK)"
+            : ptype == 3 ? "Zero-filled (zero-fill OK)"
+            : ptype == 4 ? "Range-of-zeros (zero-fill OK)"
+            :              "unknown";
+          std::fprintf(stderr,
+              "dosemu: LE obj %u page %u: non-legal page type 0x%x -- %s\n",
+              i + 1, p, ptype, name);
+        }
+        continue;
+      }
       if (pnum_be == 0) continue;
       const uint32_t file_pg_off = data_pages + (pnum_be - 1) * page_size;
       uint32_t copy_bytes = page_size;
