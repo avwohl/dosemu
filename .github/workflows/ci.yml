@@ -83,6 +83,18 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'int31=denied'
 
+      - name: Real compiler output (Open Watcom 16-bit hello)
+        run: |
+          out=$(build/dosemu tests/HELLO_W.EXE 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'hello from watcom'
+
+      - name: Real compiler output (bcc hello)
+        run: |
+          out=$(build/dosemu tests/HELLO_B.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'hello from bcc'
+
       - name: Real tool (FreeDOS xcopy.exe copies a file)
         run: |
           xcopy=dosbox-staging/build/resources/drives/y/dos/xcopy.exe

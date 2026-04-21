@@ -7,11 +7,16 @@ implementations running on the host. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
-**Status:** real DOS programs run.
+**Status:** real DOS programs run. Real C compilers produce working binaries.
 
-	dosemu tests/HELLO.COM                → prints dosemu-hello-ok
-	dosemu tests/HELLO.EXE                → prints dosemu-hello-exe-ok
-	echo F | dosemu xcopy.exe src dst     → copies src to dst (real FreeDOS xcopy!)
+	dosemu tests/HELLO_W.EXE              → hello from watcom   (Open Watcom 16-bit)
+	dosemu tests/HELLO_B.COM              → hello from bcc      (bcc 0.16.21)
+	echo F | dosemu xcopy.exe src dst     → copies src to dst   (FreeDOS xcopy)
+	dosemu mTCP-FTP.EXE                   → prints usage banner (mTCP, Watcom 16-bit)
+
+32-bit Watcom (`owcc-dos4g` / DOS4GW) binaries currently fail with
+"Can't run DOS/4G(W)" at DPMI mode-switch time — DPMI stage 3+ work.
+See `.claude/.../dpmi_plan.md`.
 
 dosbox-staging is linked in-process for CPU + PC hardware. DOS INT 21h is
 handled entirely by C++ host code. Currently implemented:
