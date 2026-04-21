@@ -77,6 +77,12 @@ constexpr uint32_t MAX_COM_SIZE     = 0xFF00;
 // .EXE image goes one paragraph past the PSP (PSP is 256 bytes = 16 paras).
 constexpr uint16_t EXE_LOAD_SEG     = PSP_SEG + 0x10;
 
+// Environment block sits in its own segment below the PSP.  Holds strings
+// "VAR=value\0" separated by NUL, terminated by an extra NUL, then a
+// little-endian uint16 count followed by argv[0] as ASCIIZ.
+constexpr uint16_t ENV_SEG          = 0x0050;  // physical 0x500, start of DOS data area
+constexpr uint32_t ENV_BYTES        = 0x0800;  // reserve 2KB -- fits average env
+
 // Initial register snapshot a loader returns to dosemu_startup.
 struct InitialRegs {
   uint16_t cs, ip, ss, sp, ax;
@@ -681,6 +687,42 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
+    case 0x2A: {  // Get date: AL=dow (0=Sun), CX=year, DH=month, DL=day
+      const time_t t = std::time(nullptr);
+      struct tm lt;
+      localtime_r(&t, &lt);
+      reg_al = static_cast<uint8_t>(lt.tm_wday);
+      reg_cx = static_cast<uint16_t>(lt.tm_year + 1900);
+      reg_dh = static_cast<uint8_t>(lt.tm_mon + 1);
+      reg_dl = static_cast<uint8_t>(lt.tm_mday);
+      return CBRET_NONE;
+    }
+
+    case 0x2C: {  // Get time: CH=hour, CL=min, DH=sec, DL=hundredths
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      struct tm lt;
+      localtime_r(&ts.tv_sec, &lt);
+      reg_ch = static_cast<uint8_t>(lt.tm_hour);
+      reg_cl = static_cast<uint8_t>(lt.tm_min);
+      reg_dh = static_cast<uint8_t>(lt.tm_sec);
+      reg_dl = static_cast<uint8_t>(ts.tv_nsec / 10000000);  // nanoseconds -> hundredths
+      return CBRET_NONE;
+    }
+
+    case 0x56: {  // rename: DS:DX = old name, ES:DI = new name
+      const std::string old_dos = read_dos_string(SegValue(ds), reg_dx);
+      const std::string new_dos = read_dos_string(SegValue(es), reg_di);
+      const std::string old_h   = dos_to_host(old_dos);
+      const std::string new_h   = dos_to_host(new_dos);
+      if (::rename(old_h.c_str(), new_h.c_str()) < 0) {
+        return_error(errno == ENOENT ? 0x02 : 0x05);
+        break;
+      }
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
     case 0x30: {  // Get DOS version.  Report 6.22, no OEM info.
       reg_al = 6;
       reg_ah = 22;
@@ -940,16 +982,66 @@ bool load_program(const std::string &path, InitialRegs &out) {
   return load_com(path, out);
 }
 
-// Build a minimal PSP at PSP_SEG:0000.  Only the command tail at offset 80h
-// is populated meaningfully; everything else is zeroed.  Real programs
-// querying the PSP will find a legal-looking but mostly empty structure.
-void build_psp(const std::vector<std::string> &args) {
+// Fill the env block at ENV_SEG: sequence of "KEY=value\0" strings, an
+// extra NUL to terminate the list, uint16 count (1), then the program
+// path as ASCIIZ.  Returns false if the block would overflow ENV_BYTES.
+bool build_env_block(const std::string &program_path) {
+  const PhysPt base = ENV_SEG * 16u;
+  size_t off = 0;
+
+  auto put_string = [&](const std::string &s) {
+    for (char c : s) {
+      if (off >= ENV_BYTES - 1) return false;
+      mem_writeb(base + off++, static_cast<uint8_t>(c));
+    }
+    mem_writeb(base + off++, 0);
+    return true;
+  };
+
+  // Minimal DOS env: COMSPEC + PATH + a few host env vars that are
+  // commonly expected (HOME, USER, TMPDIR).
+  if (!put_string("COMSPEC=C:\\COMMAND.COM")) return false;
+  if (!put_string("PATH=C:\\"))               return false;
+  for (const char *key : {"HOME", "USER", "TMPDIR", "LANG"}) {
+    const char *val = std::getenv(key);
+    if (val && *val) {
+      std::string entry = std::string(key) + "=" + val;
+      if (entry.size() > 200) continue;   // keep things sane
+      if (!put_string(entry)) return false;
+    }
+  }
+  // End-of-list marker (extra NUL).
+  if (off >= ENV_BYTES) return false;
+  mem_writeb(base + off++, 0);
+  // argc = 1 (the program itself).
+  if (off + 2 > ENV_BYTES) return false;
+  mem_writeb(base + off++, 1);
+  mem_writeb(base + off++, 0);
+  // argv[0] as ASCIIZ.  Use the DOS-style uppercase of the last path segment.
+  std::string argv0 = "C:\\";
+  const size_t slash = program_path.find_last_of("/\\");
+  std::string basename = (slash == std::string::npos) ? program_path
+                                                      : program_path.substr(slash + 1);
+  for (auto &c : basename) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  argv0 += basename;
+  return put_string(argv0);
+}
+
+// Build a minimal PSP at PSP_SEG:0000.  Populates INT 20h, command tail at
+// offset 80h, and the env-segment pointer at offset 2Ch.
+void build_psp(const std::string &program_path,
+               const std::vector<std::string> &args) {
   const PhysPt psp = PSP_SEG * 16;
   for (int i = 0; i < 256; ++i) mem_writeb(psp + i, 0);
 
-  // INT 20h at offset 0x00 (CD 20) — programs sometimes jump here.
+  // INT 20h at offset 0x00 (CD 20).
   mem_writeb(psp + 0x00, 0xCD);
   mem_writeb(psp + 0x01, 0x20);
+
+  // Environment segment at offset 2Ch.
+  build_env_block(program_path);
+  mem_writeb(psp + 0x2C, ENV_SEG & 0xFF);
+  mem_writeb(psp + 0x2D, (ENV_SEG >> 8) & 0xFF);
 
   // Command tail: " arg1 arg2 ..." + 0x0D
   std::string tail;
@@ -974,7 +1066,7 @@ void dosemu_startup() {
   int21_cb.Install(&dosemu_int21, CB_INT21, "dosemu Int 21");
   int21_cb.Set_RealVec(0x21);
 
-  build_psp(s_args);
+  build_psp(s_program, s_args);
 
   InitialRegs ir;
   if (!load_program(s_program, ir)) {
