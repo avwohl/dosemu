@@ -95,7 +95,6 @@ bool load_config_file(const std::string &path, Config &cfg) {
     else if (key == "core")          cfg.cpu_core = val;
     else if (key == "memsize")       cfg.memsize_mb = std::atoi(val.c_str());
     else if (key == "headless")      cfg.headless = parse_bool(val);
-    else if (key == "dosbox")        cfg.dosbox_binary = val;
     else if (key.rfind("drive_", 0) == 0 && key.size() == 7) {
       DriveMount dm;
       dm.letter    = static_cast<char>(std::toupper(static_cast<unsigned char>(key[6])));

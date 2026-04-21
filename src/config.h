@@ -61,9 +61,6 @@ struct Config {
   // dosemu runtime behaviour.
   bool headless = true;           // Suppress SDL window when true
   int  verbose  = 0;              // 0=quiet, 1=normal, 2=trace
-
-  // Path to the dosbox-staging binary. Auto-detected if empty.
-  std::string dosbox_binary;
 };
 
 // Load a .cfg file into cfg. Returns true on success. Errors are printed to

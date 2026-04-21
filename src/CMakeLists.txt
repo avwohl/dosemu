@@ -15,36 +15,88 @@ endif()
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
 # ---------------------------------------------------------------------------
-# dosemu CLI — subprocess-style wrapper around dosbox-staging.
+# dosbox-staging
 #
-# The dosbox-staging submodule lives at ${CMAKE_SOURCE_DIR}/../dosbox-staging
-# and is built separately via its own meson build system. At runtime dosemu
-# locates the dosbox binary via:
-#   1. --dosbox=PATH on the CLI
-#   2. DOSEMU_DOSBOX env var
-#   3. ../dosbox-staging/build/dosbox relative to the dosemu binary
-#   4. dosbox / dosbox-staging on PATH
+# We link against the static libraries produced by dosbox-staging's upstream
+# meson build, which lives at ../dosbox-staging/build.  Meson is expected to
+# have been run already (see README for the one-time setup step).
+#
+# Strict cpmemu-style DOS replacement is the end goal: eventually we will
+# stop linking libdos.a and libshell.a.  For now every lib gets pulled in so
+# we can confirm the mechanical linking works.
 # ---------------------------------------------------------------------------
+set(DB ${CMAKE_SOURCE_DIR}/../dosbox-staging)
+set(DB_BUILD ${DB}/build)
+
+if(NOT EXISTS ${DB_BUILD}/libdosbox.a)
+  message(FATAL_ERROR
+    "dosbox-staging has not been built.  Run:\n"
+    "    meson setup ${DB}/build --buildtype=release ${DB}\n"
+    "    ninja -C ${DB}/build")
+endif()
+
+find_package(SDL2 REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GLIB REQUIRED glib-2.0)
+
 add_executable(dosemu
   dosemu.cc
   config.cc
-  dosbox_conf.cc
+  bridge.cc
 )
 
-# Handy make target: build the bundled dosbox-staging if it hasn't been.
-add_custom_target(dosbox
-  COMMAND ${CMAKE_COMMAND} -E echo "Building dosbox-staging via meson..."
-  COMMAND meson setup --buildtype=release ${CMAKE_SOURCE_DIR}/../dosbox-staging/build ${CMAKE_SOURCE_DIR}/../dosbox-staging || true
-  COMMAND ninja -C ${CMAKE_SOURCE_DIR}/../dosbox-staging/build
-  VERBATIM
+target_include_directories(dosemu PRIVATE
+  ${DB}/include
+  ${DB_BUILD}          # for generated config.h
+  ${SDL2_INCLUDE_DIRS}
 )
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-enable_testing()
-add_test(NAME smoke
-  COMMAND bash ${CMAKE_SOURCE_DIR}/../tests/run_tests.sh
-  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..)
-set_tests_properties(smoke PROPERTIES
-  ENVIRONMENT "DOSEMU=$<TARGET_FILE:dosemu>")
+# Link order mirrors what meson uses for the dosbox binary.  --start-group /
+# --end-group handles circular references between the per-subdir archives
+# (e.g. libmidi -> libhardware -> libmidi).
+target_link_libraries(dosemu PRIVATE
+  -Wl,--start-group
+  ${DB_BUILD}/libdosbox.a
+  ${DB_BUILD}/src/capture/libcapture.a
+  ${DB_BUILD}/src/cpu/libcpu.a
+  ${DB_BUILD}/src/dos/libdos.a
+  ${DB_BUILD}/src/fpu/libfpu.a
+  ${DB_BUILD}/src/gui/libgui.a
+  ${DB_BUILD}/src/hardware/libhardware.a
+  ${DB_BUILD}/src/ints/libints.a
+  ${DB_BUILD}/src/midi/libmidi.a
+  ${DB_BUILD}/src/misc/libmisc.a
+  ${DB_BUILD}/src/shell/libshell.a
+  ${DB_BUILD}/src/libs/ESFMu/libesfmu.a
+  ${DB_BUILD}/src/libs/YM7128B_emu/libym7128bemu.a
+  ${DB_BUILD}/src/libs/decoders/libdecoders.a
+  ${DB_BUILD}/src/libs/loguru/libloguru.a
+  ${DB_BUILD}/src/libs/manymouse/libmanymouse.a
+  ${DB_BUILD}/src/libs/nuked/libnuked.a
+  ${DB_BUILD}/src/libs/residfp/libresidfp.a
+  ${DB_BUILD}/src/libs/tal-chorus/libtalchorus.a
+  ${DB_BUILD}/src/libs/whereami/libwhereami.a
+  ${DB_BUILD}/src/libs/zmbv/libzmbv.a
+  ${DB_BUILD}/subprojects/libpng-1.6.40/libpng16.a
+  ${DB_BUILD}/subprojects/zlib-ng/libzlib.a
+  ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.so
+  ${DB_BUILD}/subprojects/iir1-1.9.3/iir/libiir.so
+  -Wl,--end-group
+  SDL2::SDL2
+  ${GLIB_LIBRARIES}
+  atomic stdc++fs dl m
+)
+
+# Host libs that meson's dosbox also links against.
+find_library(SDL2_NET SDL2_net REQUIRED)
+find_library(SLIRP slirp REQUIRED)
+find_library(SPEEX speexdsp REQUIRED)
+find_library(OPUSFILE opusfile REQUIRED)
+find_library(FLUIDSYNTH fluidsynth REQUIRED)
+find_library(ASOUND asound REQUIRED)
+find_library(XI Xi REQUIRED)
+find_library(GL GL REQUIRED)
+target_link_libraries(dosemu PRIVATE
+  ${SDL2_NET} ${SLIRP} ${SPEEX} ${OPUSFILE}
+  ${FLUIDSYNTH} ${ASOUND} ${XI} ${GL}
+)
