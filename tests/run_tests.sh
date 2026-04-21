@@ -141,20 +141,63 @@ DOSBOX="${DOSBOX:-$ROOT/dosbox-staging/build/dosbox}"
 if [[ ! -x "$DOSBOX" ]]; then
   note "SKIP  dosbox-staging not built ($DOSBOX)"
 else
-  # Run ECHO (a COMMAND.COM builtin) and capture its stdout.
+  # Headless dosbox renders text to an invisible SDL surface — stdout
+  # isn't connected to INT 21h writes.  We verify that the program *ran*
+  # by checking for file-system side-effects (what real DOS compilers
+  # actually produce).
   mkdir -p "$WORK/dosrun"
   cd "$WORK/dosrun"
+
+  # 1) COMMAND.COM redirection: ECHO ... > OUT.TXT must create OUT.TXT
+  #    with the expected contents on the Linux side.
   cat > go.cfg <<EOF
 program = ECHO
-args = dosemu-live-test-ok
+args = dosemu-live-test-ok > OUT.TXT
 drive_C = $WORK/dosrun
 EOF
-
-  out=$("$DOSEMU" --dosbox="$DOSBOX" go.cfg 2>&1 || true)
-  if grep -q 'dosemu-live-test-ok' <<< "$out"; then
-    pass 'dosbox runs ECHO and returns output'
+  "$DOSEMU" --dosbox="$DOSBOX" go.cfg >/dev/null 2>&1 || true
+  if [[ -f "$WORK/dosrun/OUT.TXT" ]] && grep -q 'dosemu-live-test-ok' "$WORK/dosrun/OUT.TXT"; then
+    pass 'ECHO > OUT.TXT creates file visible on the host'
   else
-    fail "dosbox ECHO test (got: $out)"
+    fail 'ECHO > OUT.TXT ($WORK/dosrun/OUT.TXT missing or wrong contents)'
+  fi
+  rm -f "$WORK/dosrun/OUT.TXT"
+
+  # 2) Hand-assembled .COM: write "dosemu-hello-ok" to a file via AH=3C/40.
+  #    The existing hello.asm uses AH=9 print-string (not useful for
+  #    headless verification); we build a write-to-file variant inline.
+  if command -v nasm >/dev/null 2>&1; then
+    cat > "$WORK/dosrun/WRITE.ASM" <<'ASMEOF'
+    org 100h
+    mov ah, 3Ch             ; create file
+    xor cx, cx
+    mov dx, fname
+    int 21h
+    jc  .bail
+    mov bx, ax              ; handle
+    mov ah, 40h             ; write
+    mov cx, msg_len
+    mov dx, msg
+    int 21h
+    mov ah, 3Eh             ; close
+    int 21h
+.bail:
+    mov ax, 4C00h
+    int 21h
+
+fname   db 'WROTE.TXT', 0
+msg     db 'dosemu-wrote-ok', 13, 10
+msg_len equ $ - msg
+ASMEOF
+    (cd "$WORK/dosrun" && nasm -f bin WRITE.ASM -o WRITE.COM)
+    "$DOSEMU" --dosbox="$DOSBOX" WRITE.COM >/dev/null 2>&1 || true
+    if [[ -f "$WORK/dosrun/WROTE.TXT" ]] && grep -q 'dosemu-wrote-ok' "$WORK/dosrun/WROTE.TXT"; then
+      pass 'INT 21h AH=3C/40 writes WROTE.TXT visible to host'
+    else
+      fail "INT 21h write test (no WROTE.TXT or bad contents)"
+    fi
+  else
+    note 'SKIP  INT 21h write test — nasm not installed'
   fi
 fi
 

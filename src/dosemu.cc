@@ -126,9 +126,11 @@ int main(int argc, char **argv) {
     return 1;
   }
   if (pid == 0) {
-    if (cfg.headless) setenv("SDL_VIDEODRIVER", "dummy", 1);
-    // Ensure audio never initializes — avoids ALSA/PulseAudio timing issues
-    // in ephemeral headless runs.
+    // Headless: SDL "offscreen" video driver renders into an off-screen
+    // surface (no window, no X server needed).  "dummy" would be cheaper
+    // but dosbox-staging's texture/opengl pipeline needs a real SDL
+    // renderer and panics on dummy.
+    if (cfg.headless) setenv("SDL_VIDEODRIVER", "offscreen", 1);
     setenv("SDL_AUDIODRIVER", "dummy", 1);
     execvp(dosbox.c_str(), const_cast<char *const *>(cargv.data()));
     std::perror("dosemu: execvp");
