@@ -24,9 +24,9 @@ handled entirely by C++ host code. Currently implemented:
 	09  print string       25  set int vector     42  seek handle
 	0A  buffered input     29  parse filename     44  ioctl (basic)
 	2A  get date           2C  get time           47  get cwd
-	30  get DOS version    33  ctrl-break         48  allocate (bump)
-	35  get int vector     37  switchar           49  free (no-op)
-	39  mkdir              3A  rmdir              4A  resize (stub)
+	30  get DOS version    33  ctrl-break         48  alloc (MCB)
+	35  get int vector     37  switchar           49  free + coalesce
+	39  mkdir              3A  rmdir              4A  resize (MCB)
 	3B  chdir              3C  create handle      4B  exec (stub err)
 	3D  open handle        4C  exit               4E  findfirst
 	4F  findnext           50  set PSP            51  get PSP

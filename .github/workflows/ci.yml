@@ -54,8 +54,16 @@ jobs:
           output=$(build/dosemu tests/SYSCALLS.COM 2>/dev/null)
           echo "dosemu output: $output"
           echo "$output" | grep -q 'dosver=6.22'
-          echo "$output" | grep -q 'alloc=0x2000'
+          # MCB allocator places the first MCB at 0x2000, so data lands
+          # at 0x2001.  The old bump allocator returned 0x2000.
+          echo "$output" | grep -q 'alloc=0x2001'
           echo "$output" | grep -q 'int21-set-ok'
+
+      - name: Smoke (MCB chain reuses memory after free)
+        run: |
+          out=$(build/dosemu tests/MCB_TEST.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'alloc-free-alloc-same'
 
       - name: Smoke (.cfg drives + default_mode=text)
         run: |

@@ -94,11 +94,128 @@ std::string                 s_program;
 std::vector<std::string>    s_args;
 int                         s_exit_code = 0;
 
-// Bump allocator for AH=48/49/4A.  Host paragraphs above this segment are
-// assumed free; allocations are carved in order and never actually freed.
-// Good enough for C runtimes that malloc once at startup.
-uint16_t                    s_mem_highwater = 0x2000;
-constexpr uint16_t          MEM_CEILING     = 0x9FFF; // top of conventional mem
+// DOS memory control block (MCB) chain for AH=48/49/4Ah.
+//
+// Each MCB occupies one 16-byte paragraph and looks like:
+//
+//   +0  uint8   'M' (0x4D) or 'Z' (0x5A, the arena's last block)
+//   +1  uint16  owner PSP segment, 0 = free
+//   +3  uint16  size in paragraphs, not counting the MCB itself
+//   +5  ...     reserved + 8-byte name (unused here)
+//
+// The block's usable data starts at MCB_SEG + 1 and runs for `size`
+// paragraphs.  Allocation walks the chain, finds a free block big enough,
+// splits it; free marks a block free and forward-coalesces with the next.
+constexpr uint16_t MCB_ARENA_START = 0x2000;   // first MCB's segment
+constexpr uint16_t MCB_ARENA_END   = 0xA000;   // one past end of arena
+
+bool s_mcb_initialised = false;
+
+void mcb_init() {
+  const PhysPt m = MCB_ARENA_START * 16u;
+  mem_writeb(m + 0, 'Z');                                   // last block
+  mem_writew(m + 1, 0);                                     // free
+  mem_writew(m + 3, MCB_ARENA_END - MCB_ARENA_START - 1);   // size
+  s_mcb_initialised = true;
+}
+
+// Walk the chain looking for a free block of at least `need` paragraphs.
+// Returns MCB segment, or 0 on failure.  Sets `largest` to the biggest
+// free block seen so AH=48h can report it.
+uint16_t mcb_find_free(uint16_t need, uint16_t &largest) {
+  largest = 0;
+  uint16_t seg = MCB_ARENA_START;
+  while (true) {
+    const PhysPt m = seg * 16u;
+    const uint8_t type = mem_readb(m);
+    if (type != 'M' && type != 'Z') return 0;    // chain corrupt
+    const uint16_t owner = mem_readw(m + 1);
+    const uint16_t size  = mem_readw(m + 3);
+    if (owner == 0) {
+      if (size >= need) return seg;
+      if (size > largest) largest = size;
+    }
+    if (type == 'Z') return 0;
+    seg = static_cast<uint16_t>(seg + 1 + size);
+  }
+}
+
+// Split a block if it's meaningfully larger than `need`.  Updates the
+// current MCB and writes a new free MCB after the allocation.
+void mcb_split(uint16_t mcb_seg, uint16_t need) {
+  const PhysPt m = mcb_seg * 16u;
+  const uint16_t cur = mem_readw(m + 3);
+  const uint8_t  type = mem_readb(m);
+  if (cur <= need + 1) return;          // too small to split profitably
+  const uint16_t new_seg = static_cast<uint16_t>(mcb_seg + 1 + need);
+  const PhysPt nm = new_seg * 16u;
+  mem_writeb(nm + 0, type);             // inherit (possibly 'Z')
+  mem_writew(nm + 1, 0);                // free
+  mem_writew(nm + 3, cur - need - 1);
+  mem_writeb(m + 0, 'M');               // current is no longer last
+  mem_writew(m + 3, need);
+}
+
+// AH=48h -> returns data segment (MCB+1) or 0 on failure; on failure
+// sets *largest_out to the largest free block for the DOS convention.
+uint16_t mcb_allocate(uint16_t need, uint16_t &largest_out) {
+  if (!s_mcb_initialised) mcb_init();
+  const uint16_t seg = mcb_find_free(need, largest_out);
+  if (seg == 0) return 0;
+  mcb_split(seg, need);
+  mem_writew(seg * 16u + 1, PSP_SEG);
+  return static_cast<uint16_t>(seg + 1);
+}
+
+// AH=49h.  Mark the MCB free, then merge forward if the next block is
+// also free.  Returns true on success, false on corrupt chain.
+bool mcb_free(uint16_t data_seg) {
+  if (!s_mcb_initialised) return false;
+  const uint16_t mcb_seg = static_cast<uint16_t>(data_seg - 1);
+  const PhysPt m = mcb_seg * 16u;
+  const uint8_t type = mem_readb(m);
+  if (type != 'M' && type != 'Z') return false;
+  mem_writew(m + 1, 0);
+  if (type == 'Z') return true;
+  const uint16_t size     = mem_readw(m + 3);
+  const uint16_t next_seg = static_cast<uint16_t>(mcb_seg + 1 + size);
+  const PhysPt nm = next_seg * 16u;
+  if (mem_readw(nm + 1) != 0) return true;     // next isn't free
+  const uint8_t  next_type = mem_readb(nm);
+  const uint16_t next_size = mem_readw(nm + 3);
+  mem_writew(m + 3, static_cast<uint16_t>(size + 1 + next_size));
+  mem_writeb(m + 0, next_type);                // inherit possibly 'Z'
+  return true;
+}
+
+// AH=4Ah resize.  Returns the new size (possibly smaller than requested
+// if we can't grow enough).  Writes `largest_out` to the max size we
+// could have provided on failure.
+uint16_t mcb_resize(uint16_t data_seg, uint16_t new_size,
+                    uint16_t &largest_out) {
+  largest_out = 0;
+  if (!s_mcb_initialised) return 0;
+  const uint16_t mcb_seg = static_cast<uint16_t>(data_seg - 1);
+  const PhysPt m = mcb_seg * 16u;
+  const uint8_t type = mem_readb(m);
+  if (type != 'M' && type != 'Z') return 0;
+  const uint16_t cur = mem_readw(m + 3);
+  largest_out = cur;
+  if (new_size == cur) return cur;
+  if (new_size < cur) { mcb_split(mcb_seg, new_size); return new_size; }
+  if (type == 'Z') return cur;                 // cannot grow; last block
+  const uint16_t next_seg = static_cast<uint16_t>(mcb_seg + 1 + cur);
+  const PhysPt nm = next_seg * 16u;
+  if (mem_readw(nm + 1) != 0) return cur;      // next not free
+  const uint16_t combined = static_cast<uint16_t>(cur + 1 + mem_readw(nm + 3));
+  largest_out = combined;
+  if (combined < new_size) return cur;         // not enough even combined
+  // Consume next, then split back down if there's slack.
+  mem_writeb(m + 0, mem_readb(nm));
+  mem_writew(m + 3, combined);
+  mcb_split(mcb_seg, new_size);
+  return new_size;
+}
 
 // Per-drive current directory (without drive letter, backslash-separated).
 std::map<char, std::string> s_drive_cwd;
@@ -875,27 +992,33 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
-    case 0x48: {  // Allocate BX paragraphs -> AX = segment, or CF=1 w/ BX = max
-      if (reg_bx == 0xFFFF || reg_bx > (MEM_CEILING - s_mem_highwater)) {
-        reg_bx = (s_mem_highwater > MEM_CEILING) ? 0
-                 : (MEM_CEILING - s_mem_highwater);
-        return_error(0x08);  // insufficient memory
-        break;
+    case 0x48: {  // Allocate BX paragraphs -> AX=segment, CF=1 if fail (BX=max)
+      uint16_t largest = 0;
+      const uint16_t seg = mcb_allocate(reg_bx, largest);
+      if (seg == 0) {
+        reg_ax = 0x08;                   // insufficient memory
+        reg_bx = largest;                // largest block available
+        set_cf(true);
+        return CBRET_NONE;
       }
-      reg_ax = s_mem_highwater;
-      s_mem_highwater = static_cast<uint16_t>(s_mem_highwater + reg_bx);
+      reg_ax = seg;
       set_cf(false);
       return CBRET_NONE;
     }
 
-    case 0x49: {  // Free memory block at ES.  Bump allocator never frees.
+    case 0x49: {  // Free memory block at ES
+      if (!mcb_free(SegValue(es))) { return_error(0x09); break; }  // bad MCB
       set_cf(false);
       return CBRET_NONE;
     }
 
-    case 0x4A: {  // Resize memory block at ES to BX paragraphs.  Stub: succeed
-                  // if shrinking or if the block is the last one we handed out.
-      set_cf(false);
+    case 0x4A: {  // Resize ES block to BX paragraphs
+      uint16_t largest = 0;
+      const uint16_t got = mcb_resize(SegValue(es), reg_bx, largest);
+      if (got == reg_bx) { set_cf(false); return CBRET_NONE; }
+      reg_ax = 0x08;
+      reg_bx = largest;
+      set_cf(true);
       return CBRET_NONE;
     }
 
@@ -1167,7 +1290,7 @@ int run_program(const dosemu::Config &cfg) {
   s_handles.clear();
   s_drives.clear();
   s_drive_cwd.clear();
-  s_mem_highwater = 0x2000;
+  s_mcb_initialised = false;           // re-init chain on first allocation
   s_file_mappings = cfg.file_mappings;
   s_dta_linear    = PSP_SEG * 16 + 0x80;
   for (auto &kv : s_finds) close_find_state(kv.second);
