@@ -926,11 +926,13 @@ Bitu dosemu_dpmi_entry() {
   // (the stub's CB is 'retf', so we must leave those words there -- but we
   // overwrite CS with our PM code selector so retf takes us into PM).
   //
-  // This is DPMI stage 3 -- mode switch only.  Stages 4-7 (LDT management,
-  // INT 21h reflection from PM, linear memory allocation) are not yet
-  // implemented, so most real DPMI clients (DJGPP, DOS4GW) will still fail
-  // at the first interrupt after the switch.  The switch itself is
-  // verifiable; what breaks after reveals the next piece to build.
+  // The switch is followed up by full DPMI 0.9 support: LDT descriptor
+  // allocation, INT 21h reflection through the PM IDT, linear memory
+  // allocation (MCB + pm_arena tier), RM-callback registration,
+  // exception dispatch, virtual IF state, and mode-switch primitives
+  // for calling back into real mode.  See dosemu_int31 for the full
+  // sub-function set and the DPMI_* test fixtures for per-sub-function
+  // verification.
 
   const uint16_t client_cs = mem_readb(SegValue(ss) * 16u + reg_sp + 2)
                            | (mem_readb(SegValue(ss) * 16u + reg_sp + 3) << 8);
