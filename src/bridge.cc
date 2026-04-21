@@ -571,6 +571,66 @@ void return_error(uint16_t dos_err) {
   set_cf(true);
 }
 
+// INT 16h (BIOS keyboard services).  Programs like deltree/debug read user
+// input this way rather than via INT 21h.  We plumb host stdin to AH=00
+// (wait for key) and AH=01 (check for key).  A single-byte peek buffer
+// gives AH=01 the "ready without consuming" semantic the BIOS ABI expects.
+int s_int16_peek = -1;
+
+Bitu dosemu_int16() {
+  switch (reg_ah) {
+    case 0x00:
+    case 0x10: {          // wait for key; AH=scancode, AL=ASCII
+      uint8_t c = 0;
+      if (s_int16_peek >= 0) {
+        c = static_cast<uint8_t>(s_int16_peek);
+        s_int16_peek = -1;
+      } else {
+        const ssize_t n = ::read(STDIN_FILENO, &c, 1);
+        if (n <= 0) c = 0x1B;  // EOF -> ESC so interactive progs give up
+      }
+      if (c == '\n') c = '\r';
+      reg_al = c;
+      reg_ah = (c >= 'a' && c <= 'z') ? (c - 'a' + 0x1E)
+             : (c >= 'A' && c <= 'Z') ? (c - 'A' + 0x1E)
+             : (c == 0x0D)          ? 0x1C
+             : (c == 0x1B)          ? 0x01
+             : 0x01;
+      return CBRET_NONE;
+    }
+    case 0x01:
+    case 0x11: {          // check key: ZF=1 if none, else ZF=0 + AX=key
+      if (s_int16_peek < 0) {
+        fd_set rd; FD_ZERO(&rd); FD_SET(STDIN_FILENO, &rd);
+        struct timeval zero = {0, 0};
+        if (::select(STDIN_FILENO + 1, &rd, nullptr, nullptr, &zero) > 0) {
+          uint8_t c;
+          if (::read(STDIN_FILENO, &c, 1) == 1) {
+            if (c == '\n') c = '\r';
+            s_int16_peek = c;
+          }
+        }
+      }
+      if (s_int16_peek < 0) {
+        CALLBACK_SZF(true);
+        return CBRET_NONE;
+      }
+      const uint8_t c = static_cast<uint8_t>(s_int16_peek);
+      reg_al = c;
+      reg_ah = (c >= 'a' && c <= 'z') ? (c - 'a' + 0x1E)
+             : (c >= 'A' && c <= 'Z') ? (c - 'A' + 0x1E)
+             : 0x01;
+      CALLBACK_SZF(false);
+      return CBRET_NONE;
+    }
+    case 0x02:            // get shift state: report no modifiers
+      reg_al = 0;
+      return CBRET_NONE;
+    default:
+      return CBRET_NONE;
+  }
+}
+
 // INT 31h (DPMI) stub.  Until stages 2-6 of the DPMI plan land, every DPMI
 // service returns CF=1 with AX=8001h ("unsupported DPMI function").  A
 // client that skipped INT 2Fh/1687h detection and called INT 31h anyway
@@ -1424,6 +1484,13 @@ void dosemu_startup() {
   CALLBACK_HandlerObject int31_cb;
   int31_cb.Install(&dosemu_int31, CB_IRET, "dosemu Int 31 (DPMI not yet)");
   int31_cb.Set_RealVec(0x31);
+
+  // INT 16h keyboard -- plumbed to host stdin so interactive DOS programs
+  // (deltree, debug, etc.) can read a keypress via the BIOS path.
+  s_int16_peek = -1;
+  CALLBACK_HandlerObject int16_cb;
+  int16_cb.Install(&dosemu_int16, CB_IRET, "dosemu Int 16 (BIOS kbd)");
+  int16_cb.Set_RealVec(0x16);
 
   build_psp(s_program, s_args);
 
