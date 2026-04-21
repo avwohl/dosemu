@@ -3198,6 +3198,69 @@ uint16_t rdw(const std::vector<uint8_t> &b, size_t off) {
   return static_cast<uint16_t>(b[off]) |
          (static_cast<uint16_t>(b[off + 1]) << 8);
 }
+// Helper: read a little-endian 32-bit dword.
+uint32_t rdd(const std::vector<uint8_t> &b, size_t off) {
+  return static_cast<uint32_t>(b[off]) |
+         (static_cast<uint32_t>(b[off + 1]) << 8)  |
+         (static_cast<uint32_t>(b[off + 2]) << 16) |
+         (static_cast<uint32_t>(b[off + 3]) << 24);
+}
+
+// LE (Linear Executable) binary format -- Watcom DOS4G/W's output.
+// MZ stub at the start, "new exe" header at file[0x3C] pointing to a
+// "LE" or "LX" signature.  For now we parse and report the structure;
+// full execution requires installing PM descriptors for each object,
+// setting CS:EIP and SS:ESP to the entry point, and jumping into the
+// image.  That's substantial follow-up work.  This scaffolding lets
+// dosemu recognize LE binaries and fail with a clear, parseable error
+// rather than the generic "header mismatch" the MZ path would give.
+bool load_le_inspect(const std::string &path,
+                     const std::vector<uint8_t> &f,
+                     size_t le_off) {
+  if (f.size() < le_off + 0xB0) return false;
+  const char sig[3] = { static_cast<char>(f[le_off]),
+                        static_cast<char>(f[le_off + 1]), 0 };
+  if (std::strcmp(sig, "LE") != 0 && std::strcmp(sig, "LX") != 0) return false;
+
+  const uint16_t cpu_type     = rdw(f, le_off + 0x08);
+  const uint32_t num_pages    = rdd(f, le_off + 0x14);
+  const uint32_t entry_obj    = rdd(f, le_off + 0x18);  // 1-based
+  const uint32_t entry_eip    = rdd(f, le_off + 0x1C);
+  const uint32_t stack_obj    = rdd(f, le_off + 0x20);
+  const uint32_t stack_esp    = rdd(f, le_off + 0x24);
+  const uint32_t page_size    = rdd(f, le_off + 0x28);
+  const uint32_t obj_tbl_off  = rdd(f, le_off + 0x40);
+  const uint32_t num_objects  = rdd(f, le_off + 0x44);
+  const uint32_t page_tbl_off = rdd(f, le_off + 0x48);
+  const uint32_t data_pages   = rdd(f, le_off + 0x80);
+
+  std::fprintf(stderr,
+               "dosemu: %s is %s (CPU=%u, %u pages of %u bytes, %u objects, "
+               "entry obj#%u+0x%x, stack obj#%u+0x%x)\n",
+               path.c_str(), sig, cpu_type, num_pages, page_size,
+               num_objects, entry_obj, entry_eip, stack_obj, stack_esp);
+
+  // Dump per-object metadata.  Useful for future-session loader work.
+  for (uint32_t i = 0; i < num_objects && i < 16; ++i) {
+    const size_t entry = le_off + obj_tbl_off + i * 24;
+    if (entry + 24 > f.size()) break;
+    const uint32_t virt_size    = rdd(f, entry + 0x00);
+    const uint32_t reloc_base   = rdd(f, entry + 0x04);
+    const uint32_t flags        = rdd(f, entry + 0x08);
+    const uint32_t page_idx     = rdd(f, entry + 0x0C);
+    const uint32_t page_count   = rdd(f, entry + 0x10);
+    std::fprintf(stderr,
+                 "  obj %u: base=0x%08x size=0x%x flags=0x%04x pages=%u..%u (%s%s%s%s)\n",
+                 i + 1, reloc_base, virt_size, flags,
+                 page_idx, page_idx + page_count - 1,
+                 (flags & 0x0004) ? "X" : "-",
+                 (flags & 0x0002) ? "W" : "-",
+                 (flags & 0x0001) ? "R" : "-",
+                 (flags & 0x4000) ? "32" : "16");
+  }
+  (void)data_pages; (void)page_tbl_off;
+  return true;
+}
 
 // Load an MZ .EXE at the given PSP segment (image goes at psp_seg + 0x10).
 bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
@@ -3210,6 +3273,26 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   if (!((f[0] == 'M' && f[1] == 'Z') || (f[0] == 'Z' && f[1] == 'M'))) {
     std::fprintf(stderr, "dosemu: %s has no MZ signature\n", path.c_str());
     return false;
+  }
+
+  // Before handling as a pure MZ, check for an LE/LX "new exe" header
+  // pointed at by MZ+0x3C.  If present, report the structure so the
+  // failure is actionable rather than silent.  Actually executing the
+  // LE image is a future-session item -- requires installing PM
+  // descriptors for each object, applying fixups, and entering PM at
+  // the entry point with the right CS:EIP/SS:ESP.
+  if (f.size() >= 0x40) {
+    const uint32_t le_off = rdd(f, 0x3C);
+    if (le_off != 0 && le_off + 2 <= f.size()
+        && ((f[le_off] == 'L' && f[le_off + 1] == 'E') ||
+            (f[le_off] == 'L' && f[le_off + 1] == 'X'))) {
+      load_le_inspect(path, f, le_off);
+      std::fprintf(stderr,
+          "dosemu: %s is LE/LX -- DOS4G/W-style PM binary; executing an "
+          "LE image requires PM-descriptor setup + entry, not yet wired\n",
+          path.c_str());
+      return false;
+    }
   }
 
   const uint16_t bytes_in_last_page = rdw(f, 0x02);
