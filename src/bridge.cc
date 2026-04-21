@@ -3522,6 +3522,36 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
+    case 0xFF: {
+      // Undocumented DOS/4GW API (Rational Systems / Tenberry).
+      // Watcom's C runtime probes for DOS/4GW's presence via
+      // AH=FFh sub-functions when starting a 32-bit LE binary.
+      // Without this, wcc386.exe, wd.exe, vi.exe and friends fall
+      // through to a no-extender fallback path that GP-faults.
+      //
+      // The key probe is:
+      //   AH=FFh DH=00h DL=78h -> if DOS/4G present:
+      //     EAX = 0x4734FFFF   (high word 0x4734 = byte-swapped "4G")
+      //
+      // (Reference: Ralf Brown's Interrupt List, INT 21 AH=FFh DH=00h.)
+      //
+      // Claiming DOS/4G presence is a promise we can't fully keep --
+      // real DOS/4G provides additional API entry points that clients
+      // may call after detection.  But advertising presence here
+      // gets the Watcom runtime past its hard-coded "abort if no
+      // extender detected" step, which is the current blocker.
+      // Further DOS/4G-specific entry points can be stubbed as
+      // clients hit them.
+      if (reg_al == 0x00 && reg_dh == 0x00 && reg_dl == 0x78) {
+        reg_eax = 0x4734FFFFu;
+        set_cf(false);
+        return CBRET_NONE;
+      }
+      // Fall through to the soft-fail path for other AH=FFh sub-fns.
+      return_error(0x01);
+      break;
+    }
+
     default:
       // Unknown sub-function.  Log once per distinct AH to stderr for
       // debugging, then return the DOS "invalid function" error so the
