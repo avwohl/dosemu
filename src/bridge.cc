@@ -45,6 +45,7 @@ Section_prop *get_sdl_section();
 void DOS_Locale_AddMessages();
 void RENDER_AddMessages();
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -57,6 +58,7 @@ void RENDER_AddMessages();
 #include <ctime>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -116,10 +118,10 @@ std::map<uint16_t, HostHandle> s_handles;
 std::map<char, std::string> s_drives;
 char                        s_current_drive = 'C';
 
-// Default translation mode for newly-opened files.  When true, AH=40h
-// writes strip CR bytes and AH=3Fh reads expand LF to CR LF -- gives the
-// DOS program classic CRLF semantics while the host file stays Unix-LF.
-bool                        s_default_text_mode = false;
+// Default translation mode for newly-opened files.  Captures
+// cfg.default_mode so resolve_path can decide per-file when Auto selects
+// by extension.
+FileMode                    s_default_mode = FileMode::Auto;
 
 // Per-file / per-pattern mappings from cfg.file_mappings.
 std::vector<FileMapping>    s_file_mappings;
@@ -128,19 +130,23 @@ std::vector<FileMapping>    s_file_mappings;
 // findfirst/findnext from it.  Default is PSP:0080h (128-byte area).
 uint32_t                    s_dta_linear = PSP_SEG * 16 + 0x80;
 
-// State for AH=4Eh/4Fh findfirst/findnext.  Keyed by DTA linear address so
-// a program can juggle multiple DTAs.  DIR* stays open across findnext
-// calls and closes when the scan runs out or the state is evicted.
+// State for AH=4Eh/4Fh findfirst/findnext.  Keyed by DTA linear address.
+// Unlike a streaming readdir loop, we enumerate the whole directory up
+// front so that 8.3 collision numbering is deterministic across runs.
+struct FindEntry {
+  std::string host_name;    // name on the host
+  std::string mangled_8_3;  // DOS view, uppercased + ~N-resolved
+};
 struct FindState {
-  DIR*        dir;
-  std::string host_dir;
-  std::string pattern_u;  // upper-cased glob (e.g. "*.TST")
+  std::vector<FindEntry> entries;  // filtered, already pattern-matched
+  size_t                 index;    // next entry to return
+  std::string            host_dir;
 };
 std::map<uint32_t, FindState> s_finds;
 
 void close_find_state(FindState &st) {
-  if (st.dir) ::closedir(st.dir);
-  st.dir = nullptr;
+  st.entries.clear();
+  st.index = 0;
 }
 
 // --- Host <-> guest helpers -----------------------------------------------
@@ -223,18 +229,17 @@ std::string basename_dos(const std::string &dos_path) {
 // Resolve a DOS path against cfg.file_mappings.  An exact (non-wildcard)
 // match on the basename replaces both the host path and the mode.  A
 // wildcard match only overrides the mode -- the host path still comes from
-// the drive mount.  Falls back to dos_to_host() + s_default_text_mode.
+// the drive mount.  Falls back to dos_to_host() + s_default_mode.
 struct Resolved {
   std::string host_path;
   bool        text_mode;
 };
 
-// Mangle a host filename into DOS 8.3 form.  Long basenames become
-// FIRST6~1, long extensions are truncated.  Case-sensitive collisions
-// aren't tracked -- a directory with "LongFoo1" and "LongFoo2" will show
-// both as "LONGFO~1" to DOS.  Acceptable for initial findfirst support;
-// collision-aware numbering comes later if real tools need it.
-std::string mangle_8_3(const std::string &name) {
+// Mangle a host filename into DOS 8.3 form with collision-aware numbering.
+// If the upper-cased short form isn't already taken, use it as-is.  If it
+// is, or if the base is too long for 8.3, emit BASEPFX~N.EXT with N bumped
+// until unique among the names `used` already contains.
+std::string mangle_8_3(const std::string &name, std::set<std::string> &used) {
   std::string base, ext;
   const size_t dot = name.find_last_of('.');
   if (dot == std::string::npos) { base = name; ext = ""; }
@@ -245,11 +250,26 @@ std::string mangle_8_3(const std::string &name) {
   };
   up(base);
   up(ext);
+  if (ext.size() > 3) ext = ext.substr(0, 3);
 
-  if (base.size() > 8) base = base.substr(0, 6) + "~1";
-  if (ext.size()  > 3) ext  = ext.substr(0, 3);
-  if (ext.empty())  return base;
-  return base + "." + ext;
+  const bool long_form = base.size() > 8;
+  if (!long_form) {
+    std::string candidate = ext.empty() ? base : base + "." + ext;
+    if (used.insert(candidate).second) return candidate;
+    // Fell through: short name collided (case insensitive), fall through
+    // to ~N resolution.
+  }
+  for (int n = 1; n < 1000; ++n) {
+    const std::string nsuffix = "~" + std::to_string(n);
+    size_t prefix_len = 8 - nsuffix.size();
+    if (prefix_len > base.size()) prefix_len = base.size();
+    const std::string candidate_base = base.substr(0, prefix_len) + nsuffix;
+    const std::string candidate = ext.empty() ? candidate_base
+                                              : candidate_base + "." + ext;
+    if (used.insert(candidate).second) return candidate;
+  }
+  // Give up: let the last attempt stand even if duplicate.
+  return name;
 }
 
 // DOS file-time pair: DS:1E format ((h<<11)|(m<<5)|(s/2)), date ((y-1980)<<9|(mo<<5)|d).
@@ -297,46 +317,87 @@ std::pair<std::string, std::string> split_dir_pattern(const std::string &dos_pat
   return {dos_path.substr(0, slash), dos_path.substr(slash + 1)};
 }
 
-// Scan the current FindState's DIR until a matching entry is found.
-// Fills the DTA and returns true on success.  On exhaustion, closes the
-// DIR and returns false.
+// Return the next pre-computed entry from st.  Writes DTA and returns
+// true, or closes the state and returns false when exhausted.
 bool scan_next(FindState &st) {
-  while (struct dirent *ent = ::readdir(st.dir)) {
-    const std::string name = ent->d_name;
-    if (name == "." || name == "..") continue;
-    const std::string mangled = mangle_8_3(name);
-    if (!glob_match(mangled, st.pattern_u)) continue;
-    dta_write_entry(st.host_dir + "/" + name, mangled);
-    return true;
+  if (st.index >= st.entries.size()) {
+    close_find_state(st);
+    return false;
   }
-  close_find_state(st);
-  return false;
+  const auto &e = st.entries[st.index++];
+  dta_write_entry(st.host_dir + "/" + e.host_name, e.mangled_8_3);
+  return true;
+}
+
+// Enumerate host_dir upfront: readdir + sort + pre-mangle with collision
+// tracking + filter by glob.  Deterministic across runs.
+bool build_find_state(const std::string &host_dir,
+                      const std::string &pattern_u,
+                      FindState &out) {
+  DIR *dir = ::opendir(host_dir.c_str());
+  if (!dir) return false;
+
+  std::vector<std::string> names;
+  while (struct dirent *ent = ::readdir(dir)) {
+    const std::string n = ent->d_name;
+    if (n == "." || n == "..") continue;
+    names.push_back(n);
+  }
+  ::closedir(dir);
+  std::sort(names.begin(), names.end());
+
+  std::set<std::string> used;
+  out.entries.clear();
+  out.host_dir = host_dir;
+  out.index    = 0;
+  for (const auto &n : names) {
+    const std::string m = mangle_8_3(n, used);
+    if (glob_match(m, pattern_u)) {
+      out.entries.push_back({n, m});
+    }
+  }
+  return true;
+}
+
+// Text-by-extension heuristic for FileMode::Auto.  Extensions commonly
+// associated with text content: source, config, data, scripts.
+bool ext_is_textual(const std::string &base_u) {
+  static const std::vector<std::string> kTextExt = {
+    "TXT","ASM","S","C","H","CC","CPP","CXX","HPP","HXX","INC",
+    "CFG","INI","BAT","LOG","MD","BAS","PAS","PL","PY","RB","RC",
+    "DEF","MAK","MAP","LST","TBL","SRT","DAT","CSV","XML","HTML","HTM",
+    "JSON","YAML","YML","SH","JS","TS","TEX","DIF","PATCH","ERR"
+  };
+  const size_t dot = base_u.find_last_of('.');
+  if (dot == std::string::npos) return false;
+  const std::string ext = base_u.substr(dot + 1);
+  return std::find(kTextExt.begin(), kTextExt.end(), ext) != kTextExt.end();
+}
+
+bool mode_is_text(FileMode mode, const std::string &base_u) {
+  if (mode == FileMode::Text)   return true;
+  if (mode == FileMode::Binary) return false;
+  return ext_is_textual(base_u);  // Auto
 }
 
 Resolved resolve_path(const std::string &dos_path) {
   const std::string base_u = upper(basename_dos(dos_path));
 
-  auto mode_to_text = [](const FileMapping &m, bool default_text) {
-    if (m.mode == FileMode::Text)   return true;
-    if (m.mode == FileMode::Binary) return false;
-    return default_text;
-  };
-
-  // Pass 1: exact (non-wildcard) match.
+  // Pass 1: exact (non-wildcard) match -- remap path + mode.
   for (const auto &m : s_file_mappings) {
     if (!has_wildcard(m.pattern) && upper(m.pattern) == base_u) {
-      return {m.host_path, mode_to_text(m, s_default_text_mode)};
+      return {m.host_path, mode_is_text(m.mode, base_u)};
     }
   }
   // Pass 2: wildcard -- first match wins, mode-only override.
-  bool text_mode = s_default_text_mode;
+  FileMode resolved_mode = s_default_mode;
   for (const auto &m : s_file_mappings) {
     if (has_wildcard(m.pattern) && glob_match(base_u, upper(m.pattern))) {
-      text_mode = mode_to_text(m, s_default_text_mode);
+      resolved_mode = m.mode;
       break;
     }
   }
-  return {dos_to_host(dos_path), text_mode};
+  return {dos_to_host(dos_path), mode_is_text(resolved_mode, base_u)};
 }
 
 // Allocate the next free DOS handle for a given host fd.
@@ -478,7 +539,9 @@ Bitu dosemu_int21() {
       static int stdin_pending = -1;
       if (reg_bx == 0) {
         fd = STDIN_FILENO;
-        text_mode = s_default_text_mode;
+        // Stdin is treated as text iff the user asked for text mode
+        // globally -- there's no filename to run extension heuristics on.
+        text_mode = (s_default_mode == FileMode::Text);
         pending = &stdin_pending;
       } else {
         auto it = s_handles.find(reg_bx);
@@ -570,22 +633,17 @@ Bitu dosemu_int21() {
       const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
       auto [dir_part, pat_part]  = split_dir_pattern(dos_path);
 
-      // Evict any prior state on this DTA so we don't leak DIR*.
-      auto it = s_finds.find(s_dta_linear);
-      if (it != s_finds.end()) { close_find_state(it->second); s_finds.erase(it); }
+      // Evict any prior state on this DTA.
+      s_finds.erase(s_dta_linear);
 
       const std::string host_dir = dir_part.empty()
-          ? dos_to_host("")
-          : dos_to_host(dir_part);
-      DIR *dir = ::opendir(host_dir.c_str());
-      if (!dir) { return_error(0x03); break; }      // path not found
-
+          ? dos_to_host("") : dos_to_host(dir_part);
       FindState st;
-      st.dir       = dir;
-      st.host_dir  = host_dir;
-      st.pattern_u = upper(pat_part);
-      if (!scan_next(st)) { return_error(0x12); break; }  // no more files
-      s_finds[s_dta_linear] = st;
+      if (!build_find_state(host_dir, upper(pat_part), st)) {
+        return_error(0x03); break;                   // path not found
+      }
+      if (!scan_next(st)) { return_error(0x12); break; }
+      s_finds[s_dta_linear] = std::move(st);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -638,6 +696,30 @@ Bitu dosemu_int21() {
       const uint16_t seg = mem_readb(ivt + 2) | (mem_readb(ivt + 3) << 8);
       reg_bx = off;
       SegSet16(es, seg);
+      return CBRET_NONE;
+    }
+
+    case 0x39: {  // mkdir: DS:DX = path
+      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string host_path = dos_to_host(dos_path);
+      if (::mkdir(host_path.c_str(), 0755) < 0) { return_error(0x03); break; }
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x3A: {  // rmdir: DS:DX = path
+      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string host_path = dos_to_host(dos_path);
+      if (::rmdir(host_path.c_str()) < 0) { return_error(0x10); break; }  // current dir
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x41: {  // unlink: DS:DX = path
+      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string host_path = dos_to_host(dos_path);
+      if (::unlink(host_path.c_str()) < 0) { return_error(0x02); break; }
+      set_cf(false);
       return CBRET_NONE;
     }
 
@@ -938,15 +1020,9 @@ int run_program(const dosemu::Config &cfg) {
   }
   s_current_drive = s_drives.begin()->first;
 
-  // Default mode: if the user asked for Text (or Auto with eol_convert on),
-  // newly-opened handles translate CR LF <-> LF host-side.
-  s_default_text_mode =
-      (cfg.default_mode == FileMode::Text) ||
-      (cfg.default_mode == FileMode::Auto && cfg.default_eol_convert);
-  // Auto-default with eol_convert=true is historical cpmemu behaviour but
-  // can surprise users running binary tools.  Enable only when the user
-  // asked for text explicitly; Auto falls back to binary.
-  if (cfg.default_mode == FileMode::Auto) s_default_text_mode = false;
+  // Default mode.  Auto resolves per-file by extension; Text/Binary are
+  // unconditional.
+  s_default_mode = cfg.default_mode;
 
   loguru::g_stderr_verbosity = (cfg.verbose >= 2) ? loguru::Verbosity_INFO
                               : (cfg.verbose >= 1) ? loguru::Verbosity_WARNING

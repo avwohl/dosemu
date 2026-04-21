@@ -122,6 +122,38 @@ jobs:
           echo "$out" | grep -q '^THIRDF~1\.TST$'
           echo "$out" | grep -vq '^IGNORED'
 
+      - name: Smoke (collision-aware 8.3 numbering)
+        run: |
+          workdir=$(mktemp -d)
+          touch "$workdir/longfilename1.tst" \
+                "$workdir/longfilename2.tst" \
+                "$workdir/longfilename3.tst"
+          cat > "$workdir/run.cfg" <<EOF
+          program = $GITHUB_WORKSPACE/tests/LISTDIR.COM
+          drive_C = $workdir
+          EOF
+          out=$(build/dosemu "$workdir/run.cfg" 2>/dev/null)
+          echo "$out"
+          echo "$out" | grep -q '^LONGFI~1\.TST$'
+          echo "$out" | grep -q '^LONGFI~2\.TST$'
+          echo "$out" | grep -q '^LONGFI~3\.TST$'
+
+      - name: Smoke (auto mode picks text by extension)
+        run: |
+          workdir=$(mktemp -d)
+          cat > "$workdir/run.cfg" <<EOF
+          program = $GITHUB_WORKSPACE/tests/WRITE.COM
+          args = auto-ext
+          drive_C = $workdir
+          default_mode = auto
+          EOF
+          build/dosemu "$workdir/run.cfg" 2>/dev/null
+          if grep -qU $'\r' "$workdir/WROTE.TXT"; then
+            echo "FAIL: auto mode did not apply text translation to .TXT"
+            xxd "$workdir/WROTE.TXT"
+            exit 1
+          fi
+
       - name: Smoke (stdin input via AH=01h)
         run: |
           out=$(echo 'hi-stdin' | build/dosemu tests/ECHOIN.COM 2>/dev/null)
