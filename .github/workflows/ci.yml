@@ -181,6 +181,18 @@ jobs:
           echo "$out" | grep -q 'middle=ok'
           echo "$out" | grep -q 'grand=ok'
 
+      - name: AH=4Bh AL=1 load-without-execute returns CS:IP + SS:SP
+        run: |
+          workdir=$(mktemp -d)
+          cp tests/CHILD.COM tests/SPAWN_AL1.COM "$workdir/"
+          cat > "$workdir/run.cfg" <<EOF
+          program = $workdir/SPAWN_AL1.COM
+          drive_C = $workdir
+          EOF
+          out=$(build/dosemu "$workdir/run.cfg" 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'spawn-al1=ok'
+
       - name: AH=4Bh Load and Execute Program (spawn child, resume parent)
         run: |
           # Parent (SPAWN.COM) calls AH=4Bh AL=0 with DS:DX = "CHILD.COM"

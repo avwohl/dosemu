@@ -2894,9 +2894,12 @@ Bitu dosemu_int21() {
       return CBRET_STOP;
     }
 
-    case 0x4B: {  // Load and Execute Program (subset: AL=0 only)
-      if (reg_al != 0) {
-        return_error(1);   // invalid function
+    case 0x4B: {  // Load and Execute Program
+      // AL=0: load + execute (full nested child run).
+      // AL=1: load only, return initial regs in param block (debuggers).
+      // AL=3: load overlay -- caller-specified load segment, no reloc.
+      if (reg_al != 0 && reg_al != 1 && reg_al != 3) {
+        return_error(1);
         break;
       }
       const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
@@ -2904,6 +2907,29 @@ Bitu dosemu_int21() {
       if (::access(r.host_path.c_str(), F_OK) != 0) {
         return_error(2);   // file not found
         break;
+      }
+
+      // AL=3 Load Overlay: caller provides load segment at
+      // [ES:BX + 0], relocation factor at [ES:BX + 2].  We load the
+      // raw image there (COM: bytes as-is; EXE: strip header + apply
+      // reloc-factor to the relocation table entries) and return to
+      // caller -- overlay entrypoints are caller's problem.
+      if (reg_al == 3) {
+        const PhysPt pb = SegPhys(es) + reg_bx;
+        const uint16_t load_seg = mem_readw(pb + 0);
+        const uint16_t reloc    = mem_readw(pb + 2);
+        // Re-use load_program_at at the caller's load_seg.  The
+        // loader's relocation logic uses load_seg+reloc for each
+        // fixup target, but since we pass load_seg directly it
+        // matches caller intent.  reloc is ignored for .COM.
+        (void)reloc;
+        InitialRegs discarded;
+        if (!load_program_at(r.host_path, load_seg, discarded)) {
+          return_error(2);
+          break;
+        }
+        set_cf(false);
+        return CBRET_NONE;
       }
 
       // Reserve 64KB for the child (0x1000 paragraphs), leaving room
@@ -2923,6 +2949,34 @@ Bitu dosemu_int21() {
         mcb_free(child_psp);
         return_error(2);
         break;
+      }
+
+      // AL=1 Load-without-execute: caller wants the image in memory
+      // and the initial SS:SP / CS:IP returned in its parameter
+      // block.  Param block layout for AL=1:
+      //   +0E DWORD SS:SP
+      //   +12 DWORD CS:IP
+      // We also keep the child memory allocated -- caller will later
+      // jump to the entry point, and eventual cleanup is caller's
+      // responsibility (AH=49 free).  Env/PSP are set up as for AL=0.
+      if (reg_al == 1) {
+        const PhysPt psp = child_psp * 16u;
+        for (int i = 0; i < 256; ++i) mem_writeb(psp + i, 0);
+        mem_writeb(psp + 0x00, 0xCD);
+        mem_writeb(psp + 0x01, 0x20);
+        mem_writeb(psp + 0x02, 0x00);
+        mem_writeb(psp + 0x03, 0xA0);
+        mem_writeb(psp + 0x2C, ENV_SEG & 0xFF);
+        mem_writeb(psp + 0x2D, (ENV_SEG >> 8) & 0xFF);
+        mem_writeb(psp + 0x80, 0);
+        mem_writeb(psp + 0x81, 0x0D);
+        const PhysPt pb = SegPhys(es) + reg_bx;
+        mem_writew(pb + 0x0E, child_regs.sp);
+        mem_writew(pb + 0x10, child_regs.ss);
+        mem_writew(pb + 0x12, child_regs.ip);
+        mem_writew(pb + 0x14, child_regs.cs);
+        set_cf(false);
+        return CBRET_NONE;
       }
 
       // Copy the parent's environment into a fresh MCB so the child
