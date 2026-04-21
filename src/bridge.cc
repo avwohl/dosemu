@@ -3453,7 +3453,7 @@ struct LeObject {
   uint16_t ldt_sel;         // LDT selector installed by le_install_descriptors
                             // (0 = not yet installed)
   bool     is_code;
-  bool     is_big;          // 0x4000 "BIG" bit => 32-bit
+  bool     is_big;          // 0x2000 "BIG" bit => 32-bit
 };
 
 bool load_le_inspect(const std::string &path,
@@ -3498,7 +3498,7 @@ bool load_le_inspect(const std::string &path,
                  (flags & 0x0004) ? "X" : "-",
                  (flags & 0x0002) ? "W" : "-",
                  (flags & 0x0001) ? "R" : "-",
-                 (flags & 0x4000) ? "32" : "16");
+                 (flags & 0x2000) ? "32" : "16");
   }
   (void)data_pages; (void)page_tbl_off;
   return true;
@@ -3538,7 +3538,14 @@ bool le_load_objects(const std::vector<uint8_t> &f, size_t le_off,
     o.virt_base = rdd(f, e + 0x04);
     o.flags     = rdd(f, e + 0x08);
     o.is_code   = (o.flags & 0x0004) != 0;
-    o.is_big    = (o.flags & 0x4000) != 0;
+    // LE object flag bit 13 (0x2000) = BIG -- default operand size is
+    // 32 bits (descriptor D=1).  Bit 14 (0x4000) is "conforming" for
+    // code segments, NOT the BIG bit.  Spec: OS/2 2.x LE format,
+    // object table flag layout.  We were reading the wrong bit, which
+    // made real 32-bit LE binaries (e.g. Watcom's wd.exe with obj
+    // flags 0x2045) look 16-bit and their 20-bit entry_eip (0x6f104)
+    // unreachable through a 16-bit IP.
+    o.is_big    = (o.flags & 0x2000) != 0;
     const uint32_t page_idx    = rdd(f, e + 0x0C);   // 1-based
     const uint32_t page_count  = rdd(f, e + 0x10);
     o.first_page  = page_idx;
@@ -3777,7 +3784,7 @@ bool le_apply_fixups(const std::vector<uint8_t> &f, size_t le_off,
 // limit = virt_size - 1, access byte derived from object flags:
 //   code object (flag 0x0004) => 0x9A (present, DPL=0, code, readable)
 //   data object              => 0x92 (present, DPL=0, data, writable)
-// D-bit from BIG flag (0x4000) sets default operand size:
+// D-bit from BIG flag (0x2000) sets default operand size:
 //   16-bit object (BIG=0) => descriptor D=0
 //   32-bit object (BIG=1) => descriptor D=1
 // Writes the resulting selector back into o.ldt_sel.  Returns true

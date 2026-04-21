@@ -120,12 +120,14 @@ struct.pack_into("<I", le, 0xA4, 0)              # instance demand
 struct.pack_into("<I", le, 0xA8, 0)              # heap size
 
 # ---- Object table ----------------------------------------------------------
-# Flags bits: 0x01=R 0x02=W 0x04=X 0x40=discardable 0x4000=BIG
+# Flags bits: 0x01=R 0x02=W 0x04=X 0x40=preload 0x2000=BIG (USE32)
+# 0x4000 is the CONFORMING bit, NOT BIG -- common trip point when
+# hand-crafting LE binaries.
 def obj_entry(virt_size, virt_base, flags, first_page, page_count):
     return struct.pack("<IIIII", virt_size, virt_base, flags,
                         first_page, page_count) + b"\x00\x00\x00\x00"
 
-objs = obj_entry(0x10, 0x10000, 0x0005 | 0x4000, 1, 1)  # obj1 code+read, BIG, page 1
+objs = obj_entry(0x10, 0x10000, 0x0005 | 0x2000, 1, 1)  # obj1 code+read, BIG, page 1
 objs += obj_entry(0x10, 0x20000, 0x0003, 1, 1)           # obj2 data R+W, page 1 (shared)
 
 # ---- Object page map table -------------------------------------------------
