@@ -71,6 +71,19 @@ bool load_config_file(const std::string &path, Config &cfg);
 // Expand $VAR and ${VAR} references in s against the process environment.
 std::string expand_env_vars(const std::string &s);
 
+// Resolve a bare program name to an absolute host path.  Search order:
+//   1. CWD
+//   2. directories from DOSEMU_PATH (colon-separated)
+// Within each directory, tries the name as given if it already has a
+// .com/.exe extension, otherwise tries NAME.COM then NAME.EXE
+// (case-insensitively, per DOS convention).  Returns empty on miss.
+std::string resolve_program_path(const std::string &name);
+
+// Given a resolved program path, return the matching sidecar .cfg path if
+// it exists (same directory, same basename, .cfg extension).  Empty
+// string if no sidecar is present.
+std::string sidecar_cfg(const std::string &program_path);
+
 } // namespace dosemu
 
 #endif // DOSEMU_CONFIG_H

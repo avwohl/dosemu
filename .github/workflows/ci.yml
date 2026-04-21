@@ -205,6 +205,36 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'survived-unimpl'
 
+      - name: Smoke (DOSEMU_PATH search, bare name + case-insensitive)
+        run: |
+          out=$(DOSEMU_PATH=tests build/dosemu HELLO 2>/dev/null)
+          echo "bare HELLO: $out"
+          echo "$out" | grep -q 'dosemu-hello-ok'
+          out=$(DOSEMU_PATH=tests build/dosemu hello 2>/dev/null)
+          echo "lowercase hello: $out"
+          echo "$out" | grep -q 'dosemu-hello-ok'
+          # Failure case: name not on path, dosemu exits non-zero.
+          if build/dosemu DOES_NOT_EXIST 2>/dev/null; then
+            echo "FAIL: missing program should exit non-zero"; exit 1
+          fi
+
+      - name: Smoke (sidecar .cfg auto-loads next to executable)
+        run: |
+          workdir=$(mktemp -d)
+          cp tests/WRITE.COM "$workdir/"
+          cat > "$workdir/WRITE.cfg" <<EOF
+          args = from-sidecar
+          drive_C = $workdir
+          default_mode = text
+          EOF
+          DOSEMU_PATH=$workdir build/dosemu WRITE 2>/dev/null
+          # Sidecar args=... must reach the program.
+          grep -q 'from-sidecar' "$workdir/WROTE.TXT"
+          # Sidecar default_mode=text must strip CR.
+          if grep -qU $'\r' "$workdir/WROTE.TXT"; then
+            echo "FAIL: sidecar default_mode=text did not apply"; exit 1
+          fi
+
       - name: Smoke (run WRITE.COM, verify file I/O + command tail)
         run: |
           workdir=$(mktemp -d)

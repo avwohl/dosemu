@@ -11,7 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <dirent.h>
 #include <fstream>
+#include <sys/stat.h>
 
 namespace dosemu {
 
@@ -142,6 +144,106 @@ bool load_config_file(const std::string &path, Config &cfg) {
     }
   }
   return true;
+}
+
+namespace {
+
+std::string upper(const std::string &s) {
+  std::string u = s;
+  for (auto &c : u) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  return u;
+}
+
+bool path_is_file(const std::string &p) {
+  struct stat st;
+  return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+bool has_path_sep(const std::string &s) {
+  return s.find_first_of("/\\") != std::string::npos;
+}
+
+bool has_com_or_exe(const std::string &s) {
+  if (s.size() < 4) return false;
+  std::string tail = upper(s.substr(s.size() - 4));
+  return tail == ".COM" || tail == ".EXE";
+}
+
+// Case-insensitive scan of `dir` for a file named NAME.{COM,EXE}.  Prefers
+// .COM over .EXE (DOS convention).  Returns empty on miss.
+std::string find_in_dir(const std::string &dir, const std::string &name) {
+  const std::string want_u = upper(name);
+  DIR *d = opendir(dir.empty() ? "." : dir.c_str());
+  if (!d) return "";
+  std::string best_com, best_exe;
+  while (struct dirent *e = readdir(d)) {
+    const std::string entry = e->d_name;
+    if (entry.size() != want_u.size() + 4) continue;
+    const std::string entry_u = upper(entry);
+    if (entry_u.compare(0, want_u.size(), want_u) != 0) continue;
+    const std::string ext = entry_u.substr(want_u.size());
+    if      (ext == ".COM" && best_com.empty()) best_com = entry;
+    else if (ext == ".EXE" && best_exe.empty()) best_exe = entry;
+  }
+  closedir(d);
+  const std::string hit = !best_com.empty() ? best_com : best_exe;
+  if (hit.empty()) return "";
+  return dir.empty() ? hit : (dir + "/" + hit);
+}
+
+// Same but for an exact filename (name already carries the extension).
+std::string find_exact_in_dir(const std::string &dir, const std::string &name) {
+  const std::string want_u = upper(name);
+  DIR *d = opendir(dir.empty() ? "." : dir.c_str());
+  if (!d) return "";
+  std::string hit;
+  while (struct dirent *e = readdir(d)) {
+    if (upper(e->d_name) == want_u) { hit = e->d_name; break; }
+  }
+  closedir(d);
+  if (hit.empty()) return "";
+  return dir.empty() ? hit : (dir + "/" + hit);
+}
+
+} // namespace
+
+std::string resolve_program_path(const std::string &name) {
+  // If the caller already supplied a directory component, don't search --
+  // just verify the file exists.
+  if (has_path_sep(name)) {
+    return path_is_file(name) ? name : std::string{};
+  }
+
+  std::vector<std::string> dirs = {""};      // empty = CWD
+  if (const char *env = std::getenv("DOSEMU_PATH")) {
+    std::string p = env;
+    size_t start = 0;
+    while (start <= p.size()) {
+      size_t sep = p.find(':', start);
+      if (sep == std::string::npos) sep = p.size();
+      if (sep > start) dirs.push_back(p.substr(start, sep - start));
+      if (sep == p.size()) break;
+      start = sep + 1;
+    }
+  }
+
+  for (const auto &dir : dirs) {
+    std::string hit = has_com_or_exe(name) ? find_exact_in_dir(dir, name)
+                                           : find_in_dir(dir, name);
+    if (!hit.empty()) return hit;
+  }
+  return "";
+}
+
+std::string sidecar_cfg(const std::string &program_path) {
+  const size_t dot = program_path.find_last_of('.');
+  if (dot == std::string::npos) return "";
+  const std::string candidate = program_path.substr(0, dot) + ".cfg";
+  if (path_is_file(candidate)) return candidate;
+  // Also accept .CFG for DOS-ish naming.
+  const std::string upper_candidate = program_path.substr(0, dot) + ".CFG";
+  if (path_is_file(upper_candidate)) return upper_candidate;
+  return "";
 }
 
 } // namespace dosemu

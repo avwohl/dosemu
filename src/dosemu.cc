@@ -73,10 +73,26 @@ int main(int argc, char **argv) {
 
   std::string first = argv[i];
   if (ends_with(first, ".cfg") || ends_with(first, ".conf")) {
+    // Explicit config file.
     if (!dosemu::load_config_file(first, cfg)) return 1;
     for (++i; i < argc; ++i) cfg.args.emplace_back(argv[i]);
   } else {
-    cfg.program = first;
+    // Program name (bare, with extension, or with path).  Resolve on
+    // DOSEMU_PATH and auto-load a sidecar .cfg if present.
+    std::string resolved = dosemu::resolve_program_path(first);
+    if (resolved.empty()) {
+      std::fprintf(stderr, "dosemu: cannot find '%s' on DOSEMU_PATH\n",
+                   first.c_str());
+      return 1;
+    }
+    const std::string sidecar = dosemu::sidecar_cfg(resolved);
+    if (!sidecar.empty()) {
+      if (!dosemu::load_config_file(sidecar, cfg)) return 1;
+      if (cfg.verbose > 0)
+        std::fprintf(stderr, "dosemu: loaded sidecar %s\n", sidecar.c_str());
+    }
+    // The resolved path always wins over any `program =` inside the sidecar.
+    cfg.program = resolved;
     for (++i; i < argc; ++i) cfg.args.emplace_back(argv[i]);
   }
 

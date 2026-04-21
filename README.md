@@ -101,7 +101,17 @@ implements what that DOS does.
 ## Usage
 
 	dosemu [options] PROGRAM.EXE [args...]
-	dosemu config.cfg
+	dosemu [options] config.cfg
+	dosemu PROG                         # bare name -- search DOSEMU_PATH
+
+`dosemu PROG` looks for `PROG.COM` (preferred) or `PROG.EXE` first in the
+current directory, then in each `:`-separated entry of `DOSEMU_PATH`.
+Matching is case-insensitive. If a sidecar `PROG.cfg` exists next to the
+resolved executable, it is auto-loaded as configuration (drive mounts,
+text-mode, file mappings) before the program runs:
+
+	export DOSEMU_PATH=~/dos/bin:/usr/local/dos/bin
+	dosemu tcc hello.c                  # finds tcc.exe + tcc.cfg (if any)
 
 Options:
 
