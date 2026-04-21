@@ -982,6 +982,7 @@ struct ProcessState {
   uint32_t eax, ebx, ecx, edx, esi, edi;
   uint32_t eflags;
   uint16_t child_data_seg;   // MCB data seg of child's memory, for mcb_free
+  uint16_t child_env_seg;    // MCB data seg of child's env copy (0 = none)
   uint16_t child_exit_code;  // populated by AH=4C before CBRET_STOP
 };
 std::vector<ProcessState> s_process_stack;
@@ -2513,9 +2514,38 @@ Bitu dosemu_int21() {
         break;
       }
 
+      // Copy the parent's environment into a fresh MCB so the child
+      // can mutate its own copy without corrupting the parent's.  Env
+      // blocks are typically <2KB; we give the child a full 2KB
+      // (ENV_BYTES/16 paragraphs) for headroom.  Any failure rolls
+      // back the code-block MCB before propagating the DOS error.
+      const uint16_t env_paras = (ENV_BYTES + 15u) / 16u;
+      const uint16_t child_env = mcb_allocate(env_paras, largest);
+      if (child_env == 0) {
+        mcb_free(child_psp);
+        return_error(8);
+        break;
+      }
+      // Source is whatever env-seg is currently active for the parent
+      // -- top-level parent uses ENV_SEG; a grandchild inherits from
+      // its parent's PSP+0x2C.  read_parent_env_seg(parent's PSP).
+      uint16_t parent_env_seg = ENV_SEG;
+      {
+        const PhysPt parent_psp = SegValue(ds) * 16u;
+        // Trust PSP+0x2C only when parent's DS actually points at a
+        // PSP (first byte = 0xCD = INT 20h marker).
+        if (mem_readb(parent_psp) == 0xCD) {
+          parent_env_seg = mem_readw(parent_psp + 0x2C);
+          if (parent_env_seg == 0) parent_env_seg = ENV_SEG;
+        }
+      }
+      for (uint32_t i = 0; i < ENV_BYTES; ++i) {
+        mem_writeb(child_env * 16u + i,
+                   mem_readb(parent_env_seg * 16u + i));
+      }
+
       // Build child PSP: INT 20h marker, top-of-memory, env pointer,
-      // empty command tail.  Environment stays shared with parent for
-      // simplicity -- real DOS copies, we alias.
+      // empty command tail.
       {
         const PhysPt psp = child_psp * 16u;
         for (int i = 0; i < 256; ++i) mem_writeb(psp + i, 0);
@@ -2523,8 +2553,8 @@ Bitu dosemu_int21() {
         mem_writeb(psp + 0x01, 0x20);
         mem_writeb(psp + 0x02, 0x00);
         mem_writeb(psp + 0x03, 0xA0);
-        mem_writeb(psp + 0x2C, ENV_SEG & 0xFF);
-        mem_writeb(psp + 0x2D, (ENV_SEG >> 8) & 0xFF);
+        mem_writeb(psp + 0x2C, child_env & 0xFF);
+        mem_writeb(psp + 0x2D, (child_env >> 8) & 0xFF);
         // Command tail: empty
         mem_writeb(psp + 0x80, 0);
         mem_writeb(psp + 0x81, 0x0D);
@@ -2543,6 +2573,7 @@ Bitu dosemu_int21() {
       ps.esi = reg_esi; ps.edi = reg_edi;
       ps.eflags = reg_flags;
       ps.child_data_seg = child_psp;
+      ps.child_env_seg  = child_env;
       s_process_stack.push_back(ps);
 
       // Switch CPU to child entry state (a real-mode CS load; shim's
@@ -2574,6 +2605,7 @@ Bitu dosemu_int21() {
       reg_flags = restored.eflags;
 
       mcb_free(child_psp);
+      if (restored.child_env_seg) mcb_free(restored.child_env_seg);
 
       // Expose the exit code via AH=4Dh and return it in AL for
       // callers that prefer the simpler "read AL after 4B" idiom.
