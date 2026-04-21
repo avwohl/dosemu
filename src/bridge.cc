@@ -1095,12 +1095,14 @@ Bitu do_rm_callback(int idx) {
   CPU_LIDT(IDT_LIMIT, IDT_SEG * 16u);
   CPU_SET_CRX(0, saved_cr0 | 1u);
 
+  bool cb_big = false;
   {
     Descriptor desc;
     cpu.gdt.GetDescriptor(cb.pm_cs, desc);
     Segs.val[cs]  = cb.pm_cs;
     Segs.phys[cs] = desc.GetBase();
-    cpu.code.big  = desc.Big() > 0;
+    cb_big        = desc.Big() > 0;
+    cpu.code.big  = cb_big;
   }
   CPU_SetSegGeneral(ds, cb.struct_sel);
   CPU_SetSegGeneral(es, cb.struct_sel);
@@ -1108,10 +1110,20 @@ Bitu do_rm_callback(int idx) {
   reg_edi = cb.struct_off;
   reg_esp = PM_CB_STACK_SIZE - 16;
 
+  // Push RETF frame pointing at our RM-stop callback.  Size depends
+  // on the callback's CS bitness: 16-bit RETF pops 4 bytes (IP:CS),
+  // 32-bit RETF pops 8 bytes (EIP:CS-zero-padded).
   const uint16_t stop_off = static_cast<uint16_t>(s_rm_stop_ptr & 0xFFFF);
-  reg_esp -= 4;
-  mem_writew(SegPhys(ss) + reg_esp + 0, stop_off);
-  mem_writew(SegPhys(ss) + reg_esp + 2, PM_CB_SEL);
+  if (cb_big) {
+    reg_esp -= 8;
+    mem_writed(SegPhys(ss) + reg_esp + 0, stop_off);
+    mem_writew(SegPhys(ss) + reg_esp + 4, PM_CB_SEL);
+    mem_writew(SegPhys(ss) + reg_esp + 6, 0);
+  } else {
+    reg_esp -= 4;
+    mem_writew(SegPhys(ss) + reg_esp + 0, stop_off);
+    mem_writew(SegPhys(ss) + reg_esp + 2, PM_CB_SEL);
+  }
 
   reg_eip = cb.pm_eip;
   DOSBOX_RunMachine();

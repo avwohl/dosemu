@@ -205,6 +205,18 @@ jobs:
           echo "$out" | grep -q 'child=ran'
           echo "$out" | grep -q 'spawn=ok'
 
+      - name: DPMI AX=0303/0304 real-mode callback (32-bit PM)
+        run: |
+          # Client allocates an LDT descriptor, AX=0007 sets its base to
+          # the client's code base, AX=0009 flips access rights to
+          # code-readable with D=1 (32-bit).  Registers a callback whose
+          # CS is that 32-bit alias; do_rm_callback's RETF-frame push
+          # must be 8 bytes (not 4) because 32-bit RETF pops EIP+CS as
+          # two dwords.
+          out=$(build/dosemu tests/DPMI_RMCB32.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-rmcb32=ok'
+
       - name: DPMI AX=0303/0304 real-mode callback addresses
         run: |
           # PM client registers a callback via 0303, calls a RM
