@@ -29,6 +29,7 @@
 #include "control.h"
 #include "cross.h"
 #include "callback.h"
+#include "cpu.h"
 #include "mem.h"
 #include "regs.h"
 #include "programs.h"
@@ -580,12 +581,91 @@ void return_error(uint16_t dos_err) {
 uint16_t                s_dpmi_entry_seg    = 0;
 uint16_t                s_dpmi_entry_off    = 0;
 
+// ---- DPMI stage 3: real -> protected-mode switch ------------------------
+//
+// Layout: a fixed guest segment holds our GDT.  Entries:
+//   [0] null descriptor
+//   [1] = 0x08  code segment for client's CS    (base = CS * 16, limit 64K, 16-bit)
+//   [2] = 0x10  data segment for client's DS    (base = DS * 16, limit 64K, 16-bit)
+//   [3] = 0x18  stack segment for client's SS   (base = SS * 16, limit 64K, 16-bit)
+//   [4] = 0x20  extra segment for client's ES   (base = ES * 16, limit 64K, 16-bit)
+// Descriptor selectors are the byte offsets (RPL=0, TI=0 for GDT).
+//
+// After the switch the client runs with those selectors in CS/DS/SS/ES.
+// Client IP is unchanged (linear address same as in real mode, reached
+// via the new selector).
+//
+// Limitations to be addressed in stages 4-7:
+//   - only four fixed descriptors; INT 31h AX=0000/0001 (alloc/free LDT)
+//     not implemented
+//   - no IDT: any INT from PM will triple-fault.  INT 21h reflection
+//     back to real mode is stage 5.
+//   - no memory allocation: INT 31h AX=0501 et al. return "unsupported".
+//   - 32-bit (AX=1) entry handled like 16-bit for now.
+constexpr uint16_t GDT_SEG    = 0x1800;       // physical 0x18000
+constexpr uint16_t GDT_LIMIT  = 0x3F;         // 8 entries * 8 bytes - 1
+constexpr uint16_t PM_CS_SEL  = 0x08;
+constexpr uint16_t PM_DS_SEL  = 0x10;
+constexpr uint16_t PM_SS_SEL  = 0x18;
+constexpr uint16_t PM_ES_SEL  = 0x20;
+
+void write_gdt_descriptor(int idx, uint32_t base, uint32_t limit,
+                          uint8_t access) {
+  const PhysPt p = GDT_SEG * 16u + idx * 8u;
+  mem_writeb(p + 0, limit & 0xFF);
+  mem_writeb(p + 1, (limit >> 8) & 0xFF);
+  mem_writeb(p + 2, base & 0xFF);
+  mem_writeb(p + 3, (base >> 8) & 0xFF);
+  mem_writeb(p + 4, (base >> 16) & 0xFF);
+  mem_writeb(p + 5, access);
+  mem_writeb(p + 6, ((limit >> 16) & 0x0F));   // flags high nibble = 0: 16-bit, byte-granular
+  mem_writeb(p + 7, (base >> 24) & 0xFF);
+}
+
 Bitu dosemu_dpmi_entry() {
   // Called via FAR CALL from real-mode DPMI clients after AX=1687h.
-  // Client expects on return: AX=0 for successful mode switch, else non-zero.
-  // We always return failure (stage 2 of the DPMI plan).
-  reg_ax = 0x8001;
-  set_cf(true);
+  // Stack layout at entry:  [SP] = client IP, [SP+2] = client CS
+  // (the stub's CB is 'retf', so we must leave those words there -- but we
+  // overwrite CS with our PM code selector so retf takes us into PM).
+  //
+  // This is DPMI stage 3 -- mode switch only.  Stages 4-7 (LDT management,
+  // INT 21h reflection from PM, linear memory allocation) are not yet
+  // implemented, so most real DPMI clients (DJGPP, DOS4GW) will still fail
+  // at the first interrupt after the switch.  The switch itself is
+  // verifiable; what breaks after reveals the next piece to build.
+
+  const uint16_t client_cs = mem_readb(SegValue(ss) * 16u + reg_sp + 2)
+                           | (mem_readb(SegValue(ss) * 16u + reg_sp + 3) << 8);
+  // Client IP is the word below (unused here -- we don't relocate it).
+
+  // Build GDT: code, data, stack, es segments all cover the corresponding
+  // 64K real-mode arena.  Access byte 0x9A = present, DPL=0, code,
+  // readable; 0x92 = present, DPL=0, data, writable.
+  write_gdt_descriptor(0, 0,              0,      0);               // null
+  write_gdt_descriptor(1, client_cs * 16, 0xFFFF, 0x9A);            // code
+  write_gdt_descriptor(2, SegValue(ds) * 16, 0xFFFF, 0x92);         // data
+  write_gdt_descriptor(3, SegValue(ss) * 16, 0xFFFF, 0x92);         // stack
+  write_gdt_descriptor(4, SegValue(es) * 16, 0xFFFF, 0x92);         // es
+
+  CPU_LGDT(GDT_LIMIT, GDT_SEG * 16u);
+
+  // Replace the stacked return-address CS with our PM code selector so the
+  // stub's retf lands in PM rather than at an invalid real-mode segment.
+  const PhysPt stacked_cs = SegValue(ss) * 16u + reg_sp + 2;
+  mem_writeb(stacked_cs,     PM_CS_SEL & 0xFF);
+  mem_writeb(stacked_cs + 1, (PM_CS_SEL >> 8) & 0xFF);
+
+  // Flip CR0.PE -- CPU is now in protected mode.  dosbox's CPU core
+  // respects the CR0 write.
+  CPU_SET_CRX(0, 0x00000001);      // PE=1, all other bits off
+
+  // Load PM selectors into DS/SS/ES (CS gets set by the retf).
+  CPU_SetSegGeneral(ds, PM_DS_SEL);
+  CPU_SetSegGeneral(ss, PM_SS_SEL);
+  CPU_SetSegGeneral(es, PM_ES_SEL);
+
+  reg_ax = 0;                       // success
+  set_cf(false);
   return CBRET_NONE;
 }
 

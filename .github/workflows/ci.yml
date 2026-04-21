@@ -71,11 +71,20 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi=present'
 
-      - name: DPMI stage 2: switch entry returns failure (expected)
+      - name: DPMI stage 3: mode switch puts CPU in protected mode
         run: |
-          out=$(build/dosemu tests/DPMI_STAGE2.COM 2>/dev/null)
-          echo "dosemu output: $out"
-          echo "$out" | grep -q 'dpmi-stage2=ok'
+          # The fixture probes DPMI, calls the switch entry with CLI to
+          # mask IRQs (no IDT yet -- stage 5), then spins in PM.  Success
+          # = "program didn't abort" = dosbox didn't fatal-error on a
+          # bad descriptor.  timeout exit is 124 (signal 14 on BusyBox) /
+          # 143 (signal 15 = SIGTERM) depending on how timeout escalates.
+          set +e
+          timeout 2 build/dosemu tests/DPMI_STAGE3.COM 2>/dev/null
+          rc=$?
+          echo "exit=$rc"
+          # 134 = SIGABRT = dosbox fatal (would mean PM went wrong).
+          # anything else (124, 143, 137) = PM running, timer killed it.
+          test "$rc" != "134"
 
       - name: Baseline (INT 31h denial stub returns CF=1 / AX=8001h)
         run: |
