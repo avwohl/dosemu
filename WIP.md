@@ -248,27 +248,37 @@ Ordered roughly by leverage / difficulty:
    `objects[tgt_obj-1].ldt_sel` into the selector field instead of
    writing 0. Should unblock any real LE binary that uses far
    function pointers or vtables.
-2. **Make wd.exe survive its first fault.** Progress ladder:
+2. **Watcom 32-bit binaries — completely different approach landed.**
+   Progress ladder:
    - Exception handlers installed (2087074).
    - Gate bitness matches entry BIG (63f0ef3).
    - BIG-bit misread fixed (4e4def8): was 0x4000, spec is 0x2000.
-   - set_cf frame-offset bug in 32-bit gates fixed (0b57f67):
-     was writing to [SP+4] (CS word) instead of [SP+8] (EFLAGS),
-     corrupting CS's RPL to 1 on every CF-returning INT 21h/31h.
-   - **Extender identified as Phar Lap, not DOS4G** (0930290).
-     Extending the INT 21h trace to dump full 32-bit EBX/ECX/EDX
-     revealed wd.exe's two pre-fault calls carry `EBX=0x50484152`
-     ("PHAR") and `EBX=0x50480000` ("PH").  The Watcom runtime is
-     probing for **Phar Lap 386|DOS-Extender**, not DOS4G.  Our
-     soft-fail on both calls is what forces the runtime into a
-     fallback that GP-faults ~0x135 bytes later.
-   Next piece: read up on the Phar Lap protocol (signatures,
-   INT 21h AH=FFh sub-calls, the fixed selector slots PharLap
-   fills in pre-entry).  Replicating the "yes PharLap present"
-   path is probably more tractable than the DOS4G setup was
-   going to be.  If instead we return "no extender" cleanly
-   enough, the Watcom runtime may have a bare-PM fallback that
-   would reveal yet another gap.
+   - set_cf frame-offset bug fixed (0b57f67): was corrupting CS's
+     RPL to 1 on every CF-returning PM INT 21h/31h.
+   - Extender identified as DOS/4GW (not PharLap -- the EBX="PHAR"
+     value is Watcom's pre-set "input signature", the actual
+     detection is AH=FFh DH=00 DL=78h per RBIL).
+   - DOS/4GW detection stub added (c738cd9): returns
+     EAX=0x4734FFFF for that probe.  Alone, insufficient.
+   - **DOSEMU_LE_AS_MZ flag landed (5975c42)**: skip the LE
+     loader and let the MZ stub run as-is.  For DOS/4GW-bound
+     binaries like wcc386.exe, the MZ stub IS the DOS/4GW
+     extender; running it means DOS/4GW does its own DPMI init
+     via AX=1687h, loads the embedded LE image itself, and sets
+     up the selector tables + transfer buffers the Watcom
+     runtime expects.
+   With DOSEMU_LE_AS_MZ=1 + `dos4gw.exe` in the workdir (the
+   extender looks for it by name), wcc386.exe now runs through
+   DOS/4GW's full init -- hundreds of INT 21h calls -- and
+   emits a real diagnostic: "DOS/16M error: [13] cannot
+   allocate transfer buffer".  That's a concrete, actionable
+   error, not a crash.
+   Next piece: debug the transfer-buffer allocation.  DOS/16M
+   (used internally by DOS/4GW for 16-bit-protected-mode data
+   shuttling) allocates the buffer via AH=48 in conventional
+   memory.  Our MCB arena may be exhausted by DOS/4GW's
+   prior resize calls, or AH=48's max-available report may be
+   inaccurate.  Straightforward once instrumented.
 
    Confirmed pattern: vi.exe (OW's vi, also LE CPU=2) fails with
    the exact same AH=30h/AH=FFh/GP trace, confirming this is a
