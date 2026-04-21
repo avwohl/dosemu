@@ -249,16 +249,19 @@ Ordered roughly by leverage / difficulty:
    writing 0. Should unblock any real LE binary that uses far
    function pointers or vtables.
 2. **Make wd.exe survive its first fault.** Exception handlers
-   now installed, gate bitness now matches the entry obj's BIG
-   flag (2087074 + 63f0ef3).  wd.exe (16-bit LE) takes an
-   exception immediately after entry and the frame is all zeros
-   -- a cascading fault inside our handler, not a clean single
-   exception.  Per-vector dispatch was prototyped but exceeded
-   dosbox's CB_MAX=128; would need PM_SHIM_SEG-style shims
-   instead of more dosbox callbacks.  Root cause is likely a
-   mismatch between our naive PM entry and what DOS4G/W's RM stub
-   normally primes (FS/GS = 0, PSP/env/arg pointers, TSS, maybe
-   more).  No quick win here -- this is full DPMI-host territory.
+   now installed, gate bitness matches entry BIG flag, AND the
+   BIG-bit misread was fixed (4e4def8: 0x2000 not 0x4000).
+   wd.exe now enters 32-bit PM correctly and executes code far
+   enough to hit a different failure: `IRET:Outer level:Stack
+   segment not writable` at ~0.23s in.  That's a CPL-transition
+   bug -- wd.exe did some push/call that stacked an SS, and the
+   matching IRET reads a value that doesn't satisfy the outer-
+   level writable-data-segment check.  Likely we never set up a
+   TSS so when an INT gate wants to stack SS:ESP, it either reads
+   garbage or dosbox synthesizes zeros.  Next step is probably
+   installing a minimal TSS (just SS0:ESP0 pointed at our PM
+   scratch stack) so inner-to-outer transitions have real values
+   to pop.
 3. **Cross-build a DJGPP tiny hello** (separate toolchain). Might
    give us a COFF-in-MZ path that's easier than LE for some
    targets.
@@ -333,6 +336,8 @@ External-tool integration:
 ## Commits since the original handoff (1222c44)
 
 ```
+4e4def8  LE loader: BIG bit is 0x2000, not 0x4000
+6a8933a  WIP.md: bitness-matched exception gates landed
 63f0ef3  LE: match exception-gate bitness to entry object's BIG flag
 c84de5b  WIP.md: LE catch-all exception handler landed
 2087074  LE: install catch-all exception handler for vectors 0x00..0x1F
@@ -377,5 +382,5 @@ ffcdbff  DPMI stage 4 (subset): INT 31h AX=0400 + get/set segment base
 bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 ```
 
-40 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
+41 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
