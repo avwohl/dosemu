@@ -125,6 +125,17 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-stage4b=ok'
 
+      - name: DPMI stage 4c: IVT read/write + free memory info
+        run: |
+          # AX=0204/0205 read/write the real-mode IVT through the DPMI
+          # host; AX=0500 fills a 0x30-byte buffer with memory info
+          # (largest-free-block derived from the MCB chain, most other
+          # fields 0xFFFFFFFF "not supported").  Real clients call these
+          # during init before doing anything interesting.
+          out=$(build/dosemu tests/DPMI_STAGE4C.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stage4c=ok'
+
       - name: DPMI stage 6: alloc, write/read round-trip, free
         run: |
           # INT 31h AX=0501 allocates 256 bytes from the MCB arena and

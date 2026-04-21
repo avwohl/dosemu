@@ -802,13 +802,13 @@ Bitu dosemu_int2f() {
   if (reg_ax == 0x1687) {
     // DPMI detection response:
     //   AX = 0    (DPMI host present)
-    //   BX = 0    (flags: bit 0 = 32-bit DPMI available -- we lie "no")
+    //   BX = 1    (flags: bit 0 = 32-bit DPMI available)
     //   CL = 3    (CPU type: 386)
     //   DH:DL = 0:90h  (DPMI 0.90 -- what DJGPP expects)
     //   SI = 1    (paragraphs of private data required by host)
     //   ES:DI = real-mode entry-point for the switch.
     reg_ax = 0;
-    reg_bx = 0;
+    reg_bx = 1;
     reg_cl = 3;
     reg_dh = 0;
     reg_dl = 0x5A;      // 0x5A = 90
@@ -1038,6 +1038,67 @@ Bitu dosemu_int31() {
 
     case 0x0003: {  // Get selector increment
       reg_ax = 8;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0204: {  // Get real-mode interrupt vector
+      // Input:  BL = vector number
+      // Output: CX:DX = real-mode seg:off from the IVT (physical 0..3FF)
+      const PhysPt v = static_cast<uint32_t>(reg_bl) * 4u;
+      reg_dx = mem_readw(v);
+      reg_cx = mem_readw(v + 2);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0205: {  // Set real-mode interrupt vector
+      // Input:  BL = vector, CX:DX = new seg:off.  Writes the real-mode
+      // IVT directly.  A real DPMI host would track per-client hooks and
+      // restore the IVT on client exit; our single-client model writes
+      // through and lets the client own the vector.
+      const PhysPt v = static_cast<uint32_t>(reg_bl) * 4u;
+      mem_writew(v,     reg_dx);
+      mem_writew(v + 2, reg_cx);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0500: {  // Get free memory information
+      // Writes a 0x30-byte buffer at ES:(E)DI.  Most fields we report as
+      // 0xFFFFFFFF ("not supported") except the largest-free-block byte
+      // count which we derive from the MCB chain and the handful of
+      // fields a minimal client will check.
+      const PhysPt buf = SegPhys(es) + reg_edi;
+      // Walk the MCB chain to find the largest free block in bytes.
+      // Lazy-init the chain: a DPMI client that calls AX=0500 before
+      // doing any AH=48/0501 allocation would otherwise see garbage.
+      if (!s_mcb_initialised) mcb_init();
+      uint32_t largest_paras = 0;
+      for (uint16_t seg = MCB_ARENA_START; seg < MCB_ARENA_END; ) {
+        const PhysPt m = seg * 16u;
+        const uint8_t  type = mem_readb(m);
+        const uint16_t owner = mem_readw(m + 1);
+        const uint16_t size  = mem_readw(m + 3);
+        if (owner == 0 && size > largest_paras) largest_paras = size;
+        if (type == 'Z') break;
+        seg = static_cast<uint16_t>(seg + 1 + size);
+      }
+      const uint32_t largest_bytes = largest_paras * 16u;
+      auto put32 = [&](uint32_t off, uint32_t v) {
+        mem_writed(buf + off, v);
+      };
+      put32(0x00, largest_bytes);                    // largest available block
+      put32(0x04, largest_bytes / 4096);             // max unlocked page alloc
+      put32(0x08, largest_bytes / 4096);             // max locked page alloc
+      put32(0x0C, 0xFFFFFFFF);                       // linear address space pages
+      put32(0x10, largest_bytes / 4096);             // free pages
+      put32(0x14, 0xFFFFFFFF);                       // free physical pages
+      put32(0x18, 0xFFFFFFFF);                       // total physical pages
+      put32(0x1C, 0xFFFFFFFF);                       // free page-file pages
+      put32(0x20, 0xFFFFFFFF);                       // total page-file pages
+      for (uint32_t off = 0x24; off < 0x30; off += 4)
+        put32(off, 0xFFFFFFFF);
       set_cf(false);
       return CBRET_NONE;
     }

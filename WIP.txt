@@ -78,9 +78,11 @@ DPMI stage status
                AX=0006/0007 (get/set seg base, GDT or LDT), AX=0000
                (alloc N LDT descriptors), AX=0001 (free), AX=0002
                (segment-to-descriptor with repeat-call cache), AX=0003
-               (selector increment=8).  LDT lives at 0x1B00 (256 slots,
-               installed via GDT[6]+LLDT).  INT 31h has IDT gates for
-               both 16-bit and 32-bit PM.
+               (selector increment=8), AX=0204/0205 (get/set real-mode
+               IVT), AX=0500 (get free memory info).  LDT lives at
+               0x1B00 (256 slots, installed via GDT[6]+LLDT).  INT 31h
+               has IDT gates for both 16-bit and 32-bit PM.  INT 2Fh/
+               1687h advertises 32-bit DPMI (BX=1).
     Stage 5 ✓  INT 21h from 16-bit PM reflects to host via IDT interrupt
                gate at 0x1A00 + GDT selector 0x28 for CB_SEG.  Handler uses
                SegPhys() so addressing works in either mode.
@@ -184,6 +186,26 @@ E. Find a non-spawning DPMI client.  Open Watcom ships DOS32A which is
 Recommended order: A + B (real INT 31h services) → E or built-DJGPP
 → iterate.
 
+DOS32A probe (2026-04-21 late afternoon)
+----------------------------------------
+
+~/ow/binw/dos32a.exe loads as MZ, completes its real-mode init, does
+the DPMI switch, then faults inside PM at an un-installed IDT slot:
+"INT:Gate Selector points to illegal descriptor with type 0x0".  The
+last INT 21h calls we see before the fault:
+
+    AH=FF AL=87 BX=0000 DX=0116     (DOS/32A custom probe; soft-fail ok)
+    AH=4A AL=81 BX=0981             (resize memory block)
+    AH=30 AL=04                     (get DOS version)
+    AH=4A AL=FD BX=06FD             (resize memory block)
+    AH=FF AL=88 BX=090C DX=0CB4     (DOS/32A custom probe)
+
+After that it enters PM and fires an interrupt we don't route.  The
+fix is broader PM-IDT reflection: every vector that isn't INT 21h/31h
+should reflect back to a real-mode handler that invokes the IVT.  That
+will almost certainly unblock DOS32A and most DPMI clients that issue
+BIOS INTs from PM.
+
 
 Fixture inventory (CI covers all these)
 ---------------------------------------
@@ -210,6 +232,8 @@ Fixture inventory (CI covers all these)
                                  the newly allocated linear region.
     DPMI_STAGE4B.COM         -- LDT AX=0000/0001/0002/0003 + alias
                                  load-into-ES verification.
+    DPMI_STAGE4C.COM         -- AX=0204/0205 IVT round-trip, AX=0500
+                                 free memory info buffer.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility
