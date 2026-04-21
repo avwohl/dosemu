@@ -1,18 +1,19 @@
-; dpmi_int31.asm — calls INT 31h AX=0400h (get DPMI version) without
-; having first probed via INT 2Fh.  With the stage-1 denial stub
-; installed, the return is CF=1 / AX=8001h ("unsupported DPMI function")
-; and the program continues.  Without the stub, the call dispatches
-; through an un-installed IVT entry and the CPU crashes or runs off into
-; unmapped memory.
+; dpmi_int31.asm — verifies the INT 31h default-deny path.
+;
+; Picks an unimplemented DPMI function (AX=FF00h, reserved/unknown)
+; so the default case of dosemu_int31 still returns CF=1 / AX=8001h
+; even after stage 4 landed real handlers for AX=0400/0006/0007.
+; Without the installed stub the call would dispatch through an
+; un-installed IVT entry and the CPU would fault.
 ;
 ; Prints "int31=denied" on CF=1/AX=8001h, "int31=handled" on anything
-; else (which would surprise us at stage 1).
+; else (which would surprise us: nothing should be handling AX=FF00).
 ;
 ; Assemble:  nasm -f bin dpmi_int31.asm -o DPMI_INT31.COM
 
     org 100h
 
-    mov ax, 0400h            ; DPMI get-version
+    mov ax, 0FF00h           ; reserved / unknown DPMI function
     int 31h
     jnc  not_denied
     cmp ax, 8001h

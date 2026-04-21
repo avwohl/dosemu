@@ -94,9 +94,24 @@ jobs:
 
       - name: Baseline (INT 31h denial stub returns CF=1 / AX=8001h)
         run: |
+          # DPMI_INT31.COM calls an unhandled sub-function (AX=FF00h) so
+          # the default-deny path is exercised even after stage 4 landed
+          # real handlers for AX=0400/0006/0007.
           out=$(build/dosemu tests/DPMI_INT31.COM 2>/dev/null)
           echo "dosemu output: $out"
           echo "$out" | grep -q 'int31=denied'
+
+      - name: DPMI stage 4: INT 31h version + seg base get/set from PM
+        run: |
+          # Enters 16-bit PM, then exercises INT 31h via the PM IDT gate:
+          #   AX=0400 Get DPMI version
+          #   AX=0007 Set segment base    -> writes GDT descriptor bytes 2-4,7
+          #   AX=0006 Get segment base    -> reads same bytes back
+          #   AX=0006 with an out-of-range selector returns CF=1/AX=8022h
+          # A regression in any sub-function prints a distinct fail tag.
+          out=$(build/dosemu tests/DPMI_STAGE4.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stage4=ok'
 
       - name: Real compiler output (Open Watcom 16-bit hello)
         run: |

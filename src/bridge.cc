@@ -562,9 +562,26 @@ int allocate_handle(int fd, bool text_mode) {
 // --- INT 21h dispatcher ----------------------------------------------------
 
 void set_cf(bool val) {
-  // Build the FLAGS word dosbox will pop on IRET by flipping bit 0 on the
-  // stacked copy at SS:SP+4 (IP:CS:FLAGS).  Uses the dosbox helper.
-  CALLBACK_SCF(val);
+  // Flip bit 0 (CF) on the FLAGS word the CPU will pop on IRET.  The
+  // frame layout depends on how we were entered:
+  //   real mode / 16-bit gate:  [SS:SP+4] = 16-bit FLAGS
+  //   32-bit interrupt gate:    [SS:SP+8] = low word of 32-bit EFLAGS
+  // `cpu.code.big` tracks the current CS descriptor's D flag, which
+  // matches the gate bitness we installed.  `cpu.stack.big` selects
+  // SP vs ESP as the frame pointer.  `SegPhys(ss)` returns the PM
+  // descriptor base (or seg*16 in real mode) so this works in every
+  // mode without conditioning on cpu.pmode.  dosbox's CALLBACK_SCF
+  // assumes a real-mode SS and hits the wrong memory in PM -- we
+  // hit that when DPMI stage 4 introduced INT 31h handlers that
+  // actually depend on CF propagating back to the client.
+  const PhysPt ss_base    = SegPhys(ss);
+  const uint32_t sp_val   = cpu.stack.big ? reg_esp : reg_sp;
+  const unsigned flags_off = cpu.code.big ? 8u : 4u;
+  const PhysPt addr = ss_base + sp_val + flags_off;
+  uint16_t f = mem_readw(addr);
+  if (val) f |=  0x0001;
+  else     f &= ~0x0001;
+  mem_writew(addr, f);
 }
 
 void return_error(uint16_t dos_err) {
@@ -629,6 +646,12 @@ uint16_t s_int21_cb_seg    = 0;
 uint16_t s_int21_cb_off    = 0;
 uint16_t s_int21_cb32_seg  = 0;
 uint16_t s_int21_cb32_off  = 0;
+
+// INT 31h (DPMI services) callback addresses -- both bitnesses, same as
+// INT 21h.  Needed because real DPMI clients call INT 31h from PM; the
+// stage-1 `Set_RealVec(0x31)` covers only the real-mode IVT.
+uint16_t s_int31_cb_off    = 0;
+uint16_t s_int31_cb32_off  = 0;
 
 void write_gdt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32 = false) {
@@ -707,9 +730,12 @@ Bitu dosemu_dpmi_entry() {
   // on the way out -- IRET popped CS from the high half of EIP (=0, the
   // null descriptor).  Hence s_int21_cb32_off for 32-bit clients.
   const uint16_t int21_cb_off = bits32 ? s_int21_cb32_off : s_int21_cb_off;
+  const uint16_t int31_cb_off = bits32 ? s_int31_cb32_off : s_int31_cb_off;
   for (int i = 0; i < 256; ++i) write_idt_gate(i, 0, 0, bits32);
   if (int21_cb_off)
     write_idt_gate(0x21, PM_CB_SEL, int21_cb_off, bits32);
+  if (int31_cb_off)
+    write_idt_gate(0x31, PM_CB_SEL, int31_cb_off, bits32);
   CPU_LIDT(IDT_LIMIT, IDT_SEG * 16u);
 
   // Replace the stacked return-address CS with our PM code selector so the
@@ -815,15 +841,79 @@ Bitu dosemu_int16() {
   }
 }
 
-// INT 31h (DPMI) stub.  Until stages 2-6 of the DPMI plan land, every DPMI
-// service returns CF=1 with AX=8001h ("unsupported DPMI function").  A
-// client that skipped INT 2Fh/1687h detection and called INT 31h anyway
-// now gets a defined failure instead of dispatching to an un-installed
-// vector.
+// INT 31h (DPMI) — stage 4 subset.
+//
+//   AX=0400  Get DPMI version.
+//   AX=0006  Get segment base address (BX=selector -> CX:DX=base).
+//   AX=0007  Set segment base address (BX=selector, CX:DX=base).
+//
+// Everything else still returns CF=1 / AX=8001h ("unsupported DPMI
+// function").  AX=0006/0007 read and write the base field of a GDT
+// descriptor in the GDT we installed at GDT_SEG; selectors outside
+// GDT_LIMIT return AX=8022h (invalid selector).  LDT management (LDT
+// descriptor allocation) is still stage 4 proper and not wired up.
 Bitu dosemu_int31() {
-  reg_ax = 0x8001;
-  set_cf(true);
-  return CBRET_NONE;
+  if (std::getenv("DOSEMU_TRACE")) {
+    std::fprintf(stderr, "[int31] AX=%04x BX=%04x CX=%04x DX=%04x\n",
+                 reg_ax, reg_bx, reg_cx, reg_dx);
+  }
+  switch (reg_ax) {
+
+    case 0x0400: {  // Get DPMI version
+      // Advertise DPMI 0.90 (matches the INT 2Fh/1687h detection response,
+      // which reports DH:DL = 0:5Ah = "DPMI 0.90").
+      reg_ax = 0x005A;         // major 0, minor 0x5A (= 90 decimal)
+      reg_bx = 0x0002;         // flags: bit 1 = reflect real-mode INTs
+      reg_cl = 3;              // CPU type: 386
+      reg_dh = 0x08;           // master PIC base interrupt
+      reg_dl = 0x70;           // slave PIC base interrupt
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0006: {  // Get segment base address
+      // Only GDT selectors in our 8-entry table are valid.  RPL/TI bits
+      // are masked off before indexing (host treats ring-0 GDT only).
+      const uint16_t idx = reg_bx >> 3;
+      if ((reg_bx & 0x4) || (idx * 8u + 7u) > GDT_LIMIT) {
+        reg_ax = 0x8022;
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const PhysPt p = GDT_SEG * 16u + idx * 8u;
+      const uint32_t base = mem_readb(p + 2)
+                          | (mem_readb(p + 3) << 8)
+                          | (mem_readb(p + 4) << 16)
+                          | (mem_readb(p + 7) << 24);
+      reg_cx = (base >> 16) & 0xFFFF;
+      reg_dx = base & 0xFFFF;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0007: {  // Set segment base address
+      const uint16_t idx = reg_bx >> 3;
+      if ((reg_bx & 0x4) || idx == 0 || (idx * 8u + 7u) > GDT_LIMIT) {
+        reg_ax = 0x8022;
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const uint32_t base = (static_cast<uint32_t>(reg_cx) << 16)
+                          | reg_dx;
+      const PhysPt p = GDT_SEG * 16u + idx * 8u;
+      mem_writeb(p + 2, base & 0xFF);
+      mem_writeb(p + 3, (base >> 8) & 0xFF);
+      mem_writeb(p + 4, (base >> 16) & 0xFF);
+      mem_writeb(p + 7, (base >> 24) & 0xFF);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    default:
+      reg_ax = 0x8001;
+      set_cf(true);
+      return CBRET_NONE;
+  }
 }
 
 Bitu dosemu_int21() {
@@ -1687,10 +1777,21 @@ void dosemu_startup() {
     s_int21_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
   }
 
-  // Explicit INT 31h denial stub (DPMI stage 1 -- see dpmi_plan.md).
+  // INT 31h callbacks: real-mode IVT entry + two PM entry points (16-bit
+  // IRET and 32-bit IRETD), wired into the PM IDT by dosemu_dpmi_entry.
   CALLBACK_HandlerObject int31_cb;
-  int31_cb.Install(&dosemu_int31, CB_IRET, "dosemu Int 31 (DPMI not yet)");
+  int31_cb.Install(&dosemu_int31, CB_IRET, "dosemu Int 31 (DPMI)");
   int31_cb.Set_RealVec(0x31);
+  {
+    const RealPt rp = int31_cb.Get_RealPointer();
+    s_int31_cb_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
+  CALLBACK_HandlerObject int31_cb32;
+  int31_cb32.Install(&dosemu_int31, CB_IRETD, "dosemu Int 31 (32-bit PM)");
+  {
+    const RealPt rp = int31_cb32.Get_RealPointer();
+    s_int31_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
 
   // INT 2Fh handler for DPMI detection (stage 2).  Reports DPMI present
   // with a real-mode entry point that currently fails the mode switch.

@@ -74,7 +74,10 @@ DPMI stage status
     Stage 3 ✓  Real → PM switch (both 16-bit AX=0 and 32-bit AX=1).
                Builds GDT at seg 0x1800, patches stacked CS to PM selector,
                CPU_SET_CRX(0, CR0_PE), loads PM selectors.
-    Stage 4 ✗  LDT descriptor management (INT 31h AX=0000-0009). NOT STARTED.
+    Stage 4 ~  Subset landed: AX=0400 (get DPMI version), AX=0006/0007
+               (get/set segment base).  INT 31h now has IDT gates in both
+               16-bit and 32-bit PM.  LDT descriptor alloc/free
+               (AX=0000-0003) still NOT STARTED.
     Stage 5 ✓  INT 21h from 16-bit PM reflects to host via IDT interrupt
                gate at 0x1A00 + GDT selector 0x28 for CB_SEG.  Handler uses
                SegPhys() so addressing works in either mode.
@@ -194,6 +197,7 @@ Fixture inventory (CI covers all these)
     DPMI_STAGE3.COM          -- enters PM, spins.  CI asserts no fatal abort.
     DPMI_STAGE5.COM          -- INT 21h from 16-bit PM → prints + exits.
     DPMI_STAGE5_32.COM       -- INT 21h from 32-bit PM → prints + exits.
+    DPMI_STAGE4.COM          -- INT 31h AX=0400/0006/0007 from PM.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility
