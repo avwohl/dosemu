@@ -149,6 +149,18 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-reflect=ok'
 
+      - name: DPMI reflection (32-bit): INT 10h AH=0F from 32-bit PM
+        run: |
+          # Same as DPMI_REFLECT.COM but enters PM with AX=1 (32-bit).
+          # The 32-bit gate pushes a 12-byte frame that plain `CF` (16-bit
+          # IRET) can't unwind, so dosemu now builds per-vector shims
+          # ending in `66 CF` (IRETD) at PM_SHIM_SEG and points 32-bit
+          # IDT gates at them.  Mines the existing RM stub for each
+          # vector's `FE 38 LL HH` native-call number.
+          out=$(build/dosemu tests/DPMI_REFLECT32.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-reflect32=ok'
+
       - name: DPMI stage 6: alloc, write/read round-trip, free
         run: |
           # INT 31h AX=0501 allocates 256 bytes from the MCB arena and

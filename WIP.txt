@@ -204,6 +204,13 @@ Next step: 32-bit PM reflection via per-vector CB_IRETD shims
 (stub = `FE 38 xx xx 66 CF`), one per vector, installed in the 32-bit
 PM IDT.  That should unblock DOS32A.
 
+[Update same day] 32-bit reflection landed.  DOS32A now completes
+the PM switch and runs silently in 32-bit PM (no more fault).  Without
+a client binary to load, it appears to sit in a wait loop -- the
+remaining gap is not dosemu's but "give DOS32A something to do".
+See dpmi_plan.md's "DOS32A probe after reflection" section for the
+detailed picture and next-session pick.
+
 
 Fixture inventory (CI covers all these)
 ---------------------------------------
@@ -235,6 +242,9 @@ Fixture inventory (CI covers all these)
     DPMI_REFLECT.COM         -- INT 10h AH=0F from 16-bit PM round-trips
                                  through the installed IVT-reflection
                                  IDT gate to the real-mode BIOS handler.
+    DPMI_REFLECT32.COM       -- Same, but 32-bit PM.  Exercises the
+                                 per-vector CB_IRETD shim path at
+                                 PM_SHIM_SEG=0x1C00.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility

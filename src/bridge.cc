@@ -621,12 +621,25 @@ uint16_t                s_dpmi_entry_off    = 0;
 //   - 32-bit (AX=1) entry handled like 16-bit for now.
 constexpr uint16_t GDT_SEG    = 0x1800;       // physical 0x18000
 constexpr uint16_t GDT_LIMIT  = 0x3F;         // 8 entries * 8 bytes - 1
-constexpr uint16_t PM_CS_SEL  = 0x08;
-constexpr uint16_t PM_DS_SEL  = 0x10;
-constexpr uint16_t PM_SS_SEL  = 0x18;
-constexpr uint16_t PM_ES_SEL  = 0x20;
-constexpr uint16_t PM_CB_SEL  = 0x28;         // selector for dosbox's CB_SEG
-constexpr uint16_t PM_LDT_SEL = 0x30;         // GDT[6]: LDT descriptor itself
+constexpr uint16_t PM_CS_SEL   = 0x08;
+constexpr uint16_t PM_DS_SEL   = 0x10;
+constexpr uint16_t PM_SS_SEL   = 0x18;
+constexpr uint16_t PM_ES_SEL   = 0x20;
+constexpr uint16_t PM_CB_SEL   = 0x28;        // selector for dosbox's CB_SEG
+constexpr uint16_t PM_LDT_SEL  = 0x30;        // GDT[6]: LDT descriptor itself
+constexpr uint16_t PM_SHIM_SEL = 0x38;        // GDT[7]: 32-bit reflection shim area
+
+// 32-bit PM reflection shims.  Each slot is an 8-byte 16-bit code
+// sequence that re-invokes the dosbox native callback for a real-mode
+// IVT vector and then does IRETD instead of plain IRET, so a 32-bit
+// interrupt gate's 12-byte EIP/CS/EFLAGS frame is correctly unwound.
+// Shim layout (6 meaningful bytes, padded to 8):
+//   FE 38 cb_lo cb_hi 66 CF 90 90
+// The `FE 38 LL HH` is dosbox's native-callback opcode with the cb_num
+// copied from the existing RM stub the real-mode IVT points at.
+constexpr uint16_t PM_SHIM_SEG        = 0x1C00;    // physical 0x1C000
+constexpr uint16_t PM_SHIM_SLOT_BYTES = 8;
+constexpr uint16_t PM_SHIM_TOTAL      = 256 * PM_SHIM_SLOT_BYTES;
 
 constexpr uint16_t IDT_SEG    = 0x1A00;       // physical 0x1A000
 constexpr uint16_t IDT_LIMIT  = 0x7FF;        // 256 entries * 8 bytes - 1
@@ -748,6 +761,10 @@ Bitu dosemu_dpmi_entry() {
   // LDT type; granularity byte has D=0 (system descriptors ignore D but
   // keep the nibble clean).
   write_gdt_descriptor(6, LDT_SEG * 16u, LDT_BYTES - 1, 0x82);
+  // GDT[7] = 32-bit reflection-shim code segment (always 16-bit CS --
+  // the shim bytes use 16-bit encodings with a `66` prefix to force
+  // IRETD).  Access byte 0x9A = present, DPL=0, code, readable.
+  write_gdt_descriptor(7, PM_SHIM_SEG * 16u, PM_SHIM_TOTAL - 1, 0x9A);
 
   // Zero the LDT so every unallocated slot reads as a not-present
   // descriptor (access byte 0), then reset the in-use bitmap to match.
@@ -772,28 +789,57 @@ Bitu dosemu_dpmi_entry() {
   const uint16_t int31_cb_off = bits32 ? s_int31_cb32_off : s_int31_cb_off;
   for (int i = 0; i < 256; ++i) write_idt_gate(i, 0, 0, bits32);
 
-  // PM→RM reflection for un-installed vectors: walk the real-mode IVT
-  // and, for every entry whose segment is dosbox's callback area
-  // (CB_SEG=0xF000), install a 16-bit PM IDT gate pointing at that
-  // offset.  Our PM_CB_SEL (0x28) covers 0xF0000.  The RM stub ends in
-  // `CF` (16-bit IRET) which correctly unwinds a 16-bit gate's 6-byte
-  // frame, so this works for 16-bit PM clients today.
+  // PM→RM reflection for un-installed vectors.
   //
-  // Skipped for 32-bit PM: the RM stub's 16-bit IRET can't unwind the
-  // 12-byte frame a 32-bit gate pushes (same hazard the stage 5' 32-bit
-  // work ran into for INT 21h).  32-bit reflection needs per-vector
-  // CB_IRETD shims and is a follow-up.
+  // 16-bit path: point the PM IDT gate directly at the RM stub in
+  // CB_SEG.  Its `CF` (16-bit IRET) correctly unwinds a 16-bit gate's
+  // 6-byte frame.
   //
-  // INT 21h/31h are handled by dedicated gates below, so we don't
-  // overwrite them during the walk.  (CB_SEG is a dosbox macro = 0xF000.)
-  if (!bits32) {
-    for (int v = 0; v < 256; ++v) {
-      if (v == 0x21 || v == 0x31) continue;
-      const uint32_t ivt = mem_readd(static_cast<uint32_t>(v) * 4u);
-      const uint16_t seg = (ivt >> 16) & 0xFFFF;
-      const uint16_t off = ivt & 0xFFFF;
-      if (seg == CB_SEG) write_idt_gate(v, PM_CB_SEL, off, false);
+  // 32-bit path: the same `CF` can't unwind a 32-bit gate's 12-byte
+  // frame, so we build a per-vector shim in PM_SHIM_SEG that re-does
+  // the native callback and ends in `66 CF` (IRETD).  The shim's CS
+  // (PM_SHIM_SEL) is 16-bit; the `66` prefix forces the trailing IRET
+  // to pop 32 bits.  cb_num comes from mining the `FE 38 LL HH` bytes
+  // inside the existing RM stub -- works because every dosbox callback
+  // type (CB_IRET, CB_INT21, CB_IRET_STI, etc.) includes that same
+  // 4-byte native-call invocation somewhere in its first handful of
+  // bytes, possibly preceded by a 1-byte `FB` (STI).
+  //
+  // INT 21h/31h keep their dedicated gates below, so we skip them.
+  // (CB_SEG is a dosbox macro = 0xF000.)
+  for (int v = 0; v < 256; ++v) {
+    if (v == 0x21 || v == 0x31) continue;
+    const uint32_t ivt = mem_readd(static_cast<uint32_t>(v) * 4u);
+    const uint16_t seg = (ivt >> 16) & 0xFFFF;
+    const uint16_t off = ivt & 0xFFFF;
+    if (seg != CB_SEG) continue;
+    if (!bits32) {
+      write_idt_gate(v, PM_CB_SEL, off, false);
+      continue;
     }
+    // 32-bit: scan the first 5 bytes of the stub for `FE 38` and copy
+    // the 2-byte cb_num that follows into our shim.
+    const PhysPt stub = static_cast<PhysPt>(seg) * 16u + off;
+    int scan = -1;
+    for (int i = 0; i < 5; ++i) {
+      if (mem_readb(stub + i) == 0xFE && mem_readb(stub + i + 1) == 0x38) {
+        scan = i; break;
+      }
+    }
+    if (scan < 0) continue;
+    const uint8_t cb_lo = mem_readb(stub + scan + 2);
+    const uint8_t cb_hi = mem_readb(stub + scan + 3);
+    const uint16_t slot_off = v * PM_SHIM_SLOT_BYTES;
+    const PhysPt shim = PM_SHIM_SEG * 16u + slot_off;
+    mem_writeb(shim + 0, 0xFE);
+    mem_writeb(shim + 1, 0x38);
+    mem_writeb(shim + 2, cb_lo);
+    mem_writeb(shim + 3, cb_hi);
+    mem_writeb(shim + 4, 0x66);
+    mem_writeb(shim + 5, 0xCF);
+    mem_writeb(shim + 6, 0x90);
+    mem_writeb(shim + 7, 0x90);
+    write_idt_gate(v, PM_SHIM_SEL, slot_off, true);
   }
 
   if (int21_cb_off)
