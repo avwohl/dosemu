@@ -75,8 +75,7 @@ constexpr uint16_t PSP_SEG          = 0x0100;
 constexpr uint16_t COM_ENTRY_OFFSET = 0x0100;
 constexpr uint32_t MAX_COM_SIZE     = 0xFF00;
 
-// .EXE image goes one paragraph past the PSP (PSP is 256 bytes = 16 paras).
-constexpr uint16_t EXE_LOAD_SEG     = PSP_SEG + 0x10;
+// (PSP is 256 bytes = 16 paragraphs, so .EXE images sit at psp_seg+0x10.)
 
 // Environment block sits in its own segment below the PSP.  Holds strings
 // "VAR=value\0" separated by NUL, terminated by an extra NUL, then a
@@ -88,6 +87,10 @@ constexpr uint32_t ENV_BYTES        = 0x0800;  // reserve 2KB -- fits average en
 struct InitialRegs {
   uint16_t cs, ip, ss, sp, ax;
 };
+// Forward declaration: defined near end of file; needed by AH=4Bh
+// handler inside dosemu_int21.
+bool load_program_at(const std::string &path, uint16_t psp_seg,
+                     InitialRegs &out);
 
 // --- Run-time state, reset by run_com() ------------------------------------
 
@@ -966,6 +969,22 @@ RealPt s_rm_stop_ptr = 0;
 // masking (no real IRQs wire in from the host), so this is a pure
 // shadow state the client can round-trip through 0900/0901/0902.
 bool s_virtual_if = true;    // clients assume interrupts enabled at start
+
+// Nested-process state for AH=4Bh (Load and Execute).  When a parent
+// calls AH=4B, our handler pushes one of these onto process_stack,
+// switches the CPU to the child, and invokes DOSBOX_RunMachine
+// recursively.  When the child does AH=4Ch, the nested-aware exit
+// handler returns CBRET_STOP to unwind that RunMachine and our AH=4B
+// handler pops the frame back off to restore parent state.
+struct ProcessState {
+  uint16_t cs, ds, ss, es;
+  uint32_t eip, esp, ebp;
+  uint32_t eax, ebx, ecx, edx, esi, edi;
+  uint32_t eflags;
+  uint16_t child_data_seg;   // MCB data seg of child's memory, for mcb_free
+  uint16_t child_exit_code;  // populated by AH=4C before CBRET_STOP
+};
+std::vector<ProcessState> s_process_stack;
 
 // PM exception handler table for AX=0202/0203.  Each entry is a
 // selector:offset pair.  We never actually *dispatch* exceptions to
@@ -2201,13 +2220,6 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
-    case 0x4B: {  // Load-and-execute.  Real implementation needs a full
-                  // child-process + CPU-state save/restore; stub returns
-                  // "file not found" so well-behaved callers just give up.
-      return_error(0x02);
-      break;
-    }
-
     case 0x50: {  // Set current PSP to BX.  We only ever have one process,
                   // so just accept it silently -- some C runtimes call
                   // this to register their own PSP.
@@ -2451,9 +2463,118 @@ Bitu dosemu_int21() {
     }
 
     case 0x4C: {  // Exit with code AL
+      // Nested under AH=4Bh: record the exit code in the top of the
+      // process stack and unwind the nested RunMachine so the parent's
+      // AH=4Bh handler resumes and restores its state.  Top-level exit
+      // halts the emulator.
+      if (!s_process_stack.empty()) {
+        s_process_stack.back().child_exit_code = reg_al;
+        return CBRET_STOP;
+      }
       s_exit_code = reg_al;
       shutdown_requested = true;
       return CBRET_STOP;
+    }
+
+    case 0x4B: {  // Load and Execute Program (subset: AL=0 only)
+      if (reg_al != 0) {
+        return_error(1);   // invalid function
+        break;
+      }
+      const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      const Resolved    r        = resolve_path(dos_path);
+      if (::access(r.host_path.c_str(), F_OK) != 0) {
+        return_error(2);   // file not found
+        break;
+      }
+
+      // Reserve 64KB for the child (0x1000 paragraphs), leaving room
+      // for PSP (0x10 paras), code, data, and stack.  Real DOS hands
+      // the child all free memory; 64KB is plenty for anything our
+      // test fixtures spawn.
+      if (!s_mcb_initialised) mcb_init();
+      uint16_t largest = 0;
+      const uint16_t child_psp = mcb_allocate(0x1000, largest);
+      if (child_psp == 0) {
+        return_error(8);   // insufficient memory
+        break;
+      }
+
+      InitialRegs child_regs;
+      if (!load_program_at(r.host_path, child_psp, child_regs)) {
+        mcb_free(child_psp);
+        return_error(2);
+        break;
+      }
+
+      // Build child PSP: INT 20h marker, top-of-memory, env pointer,
+      // empty command tail.  Environment stays shared with parent for
+      // simplicity -- real DOS copies, we alias.
+      {
+        const PhysPt psp = child_psp * 16u;
+        for (int i = 0; i < 256; ++i) mem_writeb(psp + i, 0);
+        mem_writeb(psp + 0x00, 0xCD);
+        mem_writeb(psp + 0x01, 0x20);
+        mem_writeb(psp + 0x02, 0x00);
+        mem_writeb(psp + 0x03, 0xA0);
+        mem_writeb(psp + 0x2C, ENV_SEG & 0xFF);
+        mem_writeb(psp + 0x2D, (ENV_SEG >> 8) & 0xFF);
+        // Command tail: empty
+        mem_writeb(psp + 0x80, 0);
+        mem_writeb(psp + 0x81, 0x0D);
+      }
+
+      // Snapshot parent CPU state before switching to child.  The
+      // shim's IRET-return frame (parent's client CS:IP:FLAGS) stays
+      // untouched on parent's stack; we restore these registers
+      // so the shim's IRET finds them where it left them.
+      ProcessState ps{};
+      ps.cs = SegValue(cs); ps.ds = SegValue(ds);
+      ps.ss = SegValue(ss); ps.es = SegValue(es);
+      ps.eip = reg_eip; ps.esp = reg_esp; ps.ebp = reg_ebp;
+      ps.eax = reg_eax; ps.ebx = reg_ebx;
+      ps.ecx = reg_ecx; ps.edx = reg_edx;
+      ps.esi = reg_esi; ps.edi = reg_edi;
+      ps.eflags = reg_flags;
+      ps.child_data_seg = child_psp;
+      s_process_stack.push_back(ps);
+
+      // Switch CPU to child entry state (a real-mode CS load; shim's
+      // current execution will "resume" child flow via the main loop's
+      // LOADIP reading these fresh values).
+      SegSet16(cs, child_regs.cs);
+      SegSet16(ds, child_psp);
+      SegSet16(es, child_psp);
+      SegSet16(ss, child_regs.ss);
+      reg_eip = child_regs.ip;
+      reg_esp = child_regs.sp;
+      reg_eax = child_regs.ax;
+
+      DOSBOX_RunMachine();
+
+      // Child exited via AH=4Ch; restore parent state.
+      const ProcessState restored = s_process_stack.back();
+      s_process_stack.pop_back();
+      SegSet16(cs, restored.cs);
+      SegSet16(ds, restored.ds);
+      SegSet16(ss, restored.ss);
+      SegSet16(es, restored.es);
+      reg_eip = restored.eip;
+      reg_esp = restored.esp;
+      reg_ebp = restored.ebp;
+      reg_eax = restored.eax; reg_ebx = restored.ebx;
+      reg_ecx = restored.ecx; reg_edx = restored.edx;
+      reg_esi = restored.esi; reg_edi = restored.edi;
+      reg_flags = restored.eflags;
+
+      mcb_free(child_psp);
+
+      // Child's exit code goes in our handler's AL; caller can read
+      // it via INT 21h AH=4Dh (not implemented yet, but the exit
+      // status is recorded for the first probe).
+      reg_al = restored.child_exit_code;
+      set_cf(false);
+      return CBRET_NONE;
     }
 
     case 0x6C: {  // Extended open/create.  BX=mode, CX=attr, DX=action,
@@ -2542,7 +2663,7 @@ std::vector<uint8_t> read_file(const std::string &path) {
 
 // Load a .COM image at PSP_SEG:0100.  .COM conventions: CS=DS=ES=SS=PSP_SEG,
 // IP=100h, SP=FFFEh.
-bool load_com(const std::string &path, InitialRegs &out) {
+bool load_com_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   const auto bytes = read_file(path);
   if (bytes.empty()) return false;
   if (bytes.size() > MAX_COM_SIZE) {
@@ -2550,11 +2671,14 @@ bool load_com(const std::string &path, InitialRegs &out) {
                  path.c_str(), bytes.size());
     return false;
   }
-  const PhysPt load_addr = PSP_SEG * 16 + COM_ENTRY_OFFSET;
+  const PhysPt load_addr = psp_seg * 16u + COM_ENTRY_OFFSET;
   for (size_t i = 0; i < bytes.size(); ++i)
     mem_writeb(load_addr + i, bytes[i]);
-  out = {PSP_SEG, COM_ENTRY_OFFSET, PSP_SEG, 0xFFFE, 0};
+  out = {psp_seg, COM_ENTRY_OFFSET, psp_seg, 0xFFFE, 0};
   return true;
+}
+bool load_com(const std::string &path, InitialRegs &out) {
+  return load_com_at(path, PSP_SEG, out);
 }
 
 // Helper: read a little-endian 16-bit word from a byte buffer.
@@ -2563,10 +2687,9 @@ uint16_t rdw(const std::vector<uint8_t> &b, size_t off) {
          (static_cast<uint16_t>(b[off + 1]) << 8);
 }
 
-// Load an MZ .EXE.  Parses the 32+ byte header, strips it, places the image
-// at EXE_LOAD_SEG:0, applies relocations by adding EXE_LOAD_SEG to each
-// fix-up target, and returns the initial register state.
-bool load_exe(const std::string &path, InitialRegs &out) {
+// Load an MZ .EXE at the given PSP segment (image goes at psp_seg + 0x10).
+bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
+  const uint16_t load_seg = psp_seg + 0x10;
   const auto f = read_file(path);
   if (f.size() < 0x1C) {
     std::fprintf(stderr, "dosemu: %s too small to be an MZ .EXE\n", path.c_str());
@@ -2597,12 +2720,12 @@ bool load_exe(const std::string &path, InitialRegs &out) {
   }
 
   const size_t image_bytes = total_image_bytes - header_size_bytes;
-  const PhysPt load_addr   = EXE_LOAD_SEG * 16;
+  const PhysPt load_addr   = load_seg * 16;
   for (size_t i = 0; i < image_bytes; ++i)
     mem_writeb(load_addr + i, f[header_size_bytes + i]);
 
   // Apply relocations: each entry is (offset, segment); the word at
-  // (EXE_LOAD_SEG + segment):offset needs EXE_LOAD_SEG added.
+  // (load_seg + segment):offset needs load_seg added.
   for (uint16_t i = 0; i < reloc_count; ++i) {
     const size_t entry = reloc_offset + i * 4u;
     if (entry + 3 >= f.size()) {
@@ -2611,37 +2734,46 @@ bool load_exe(const std::string &path, InitialRegs &out) {
     }
     const uint16_t r_off = rdw(f, entry);
     const uint16_t r_seg = rdw(f, entry + 2);
-    const PhysPt  target = (EXE_LOAD_SEG + r_seg) * 16 + r_off;
+    const PhysPt  target = (load_seg + r_seg) * 16 + r_off;
     const uint16_t val   = mem_readb(target) | (mem_readb(target + 1) << 8);
-    const uint16_t fixed = static_cast<uint16_t>(val + EXE_LOAD_SEG);
+    const uint16_t fixed = static_cast<uint16_t>(val + load_seg);
     mem_writeb(target,     static_cast<uint8_t>(fixed & 0xFF));
     mem_writeb(target + 1, static_cast<uint8_t>((fixed >> 8) & 0xFF));
   }
 
   out = {
-    static_cast<uint16_t>(EXE_LOAD_SEG + init_cs),
+    static_cast<uint16_t>(load_seg + init_cs),
     init_ip,
-    static_cast<uint16_t>(EXE_LOAD_SEG + init_ss),
+    static_cast<uint16_t>(load_seg + init_ss),
     init_sp,
     0,
   };
   return true;
 }
+bool load_exe(const std::string &path, InitialRegs &out) {
+  return load_exe_at(path, PSP_SEG, out);
+}
 
-// Dispatch .COM vs .EXE by extension (case-insensitive).
+// Dispatch .COM vs .EXE by extension (case-insensitive).  load_program
+// loads at the top-level PSP; load_program_at loads a child at a
+// caller-chosen PSP segment (AH=4Bh).
+bool iends_with(const std::string &path, const char *suffix) {
+  size_t n = std::strlen(suffix);
+  if (path.size() < n) return false;
+  for (size_t i = 0; i < n; ++i) {
+    char a = std::tolower(static_cast<unsigned char>(path[path.size() - n + i]));
+    char b = std::tolower(static_cast<unsigned char>(suffix[i]));
+    if (a != b) return false;
+  }
+  return true;
+}
+bool load_program_at(const std::string &path, uint16_t psp_seg,
+                     InitialRegs &out) {
+  if (iends_with(path, ".exe")) return load_exe_at(path, psp_seg, out);
+  return load_com_at(path, psp_seg, out);
+}
 bool load_program(const std::string &path, InitialRegs &out) {
-  auto iends_with = [&](const char *suffix) {
-    size_t n = std::strlen(suffix);
-    if (path.size() < n) return false;
-    for (size_t i = 0; i < n; ++i) {
-      char a = std::tolower(static_cast<unsigned char>(path[path.size() - n + i]));
-      char b = std::tolower(static_cast<unsigned char>(suffix[i]));
-      if (a != b) return false;
-    }
-    return true;
-  };
-  if (iends_with(".exe")) return load_exe(path, out);
-  return load_com(path, out);
+  return load_program_at(path, PSP_SEG, out);
 }
 
 // Fill the env block at ENV_SEG: sequence of "KEY=value\0" strings, an

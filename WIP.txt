@@ -267,6 +267,10 @@ Fixture inventory (CI covers all these)
     DPMI_STUBS.COM           -- AX=0202/0203 PM exception handler +
                                  0600/0601 lock/unlock + 0604 page
                                  size + 0800 phys addr mapping.
+    SPAWN.COM + CHILD.COM    -- INT 21h AH=4Bh Load and Execute.  Parent
+                                 mcb_allocates 64KB for child, loader
+                                 places child there, recursive
+                                 RunMachine, nested-aware AH=4C.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility

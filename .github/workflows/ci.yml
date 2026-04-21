@@ -163,6 +163,30 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-integration=ok'
 
+      - name: AH=4Bh Load and Execute Program (spawn child, resume parent)
+        run: |
+          # Parent (SPAWN.COM) calls AH=4Bh AL=0 with DS:DX = "CHILD.COM"
+          # + a minimal parameter block.  Our handler allocates 64KB
+          # from the MCB chain, loads CHILD.COM at that PSP seg, saves
+          # parent state on a process_stack, recursively enters
+          # DOSBOX_RunMachine.  Child's AH=4Ch is nested-aware: sets
+          # the child's exit code in the top process-stack frame and
+          # returns CBRET_STOP (not shutdown_requested) so only the
+          # nested RunMachine unwinds.  Parent AH=4Bh resumes, restores
+          # state, frees child memory, returns the child's exit code
+          # in AL.  CI combines parent+child output in one stream.
+          workdir=$(mktemp -d)
+          cp tests/CHILD.COM "$workdir/"
+          cp tests/SPAWN.COM "$workdir/"
+          cat > "$workdir/run.cfg" <<EOF
+          program = $workdir/SPAWN.COM
+          drive_C = $workdir
+          EOF
+          out=$(build/dosemu "$workdir/run.cfg" 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'child=ran'
+          echo "$out" | grep -q 'spawn=ok'
+
       - name: DPMI stubs AX=0202/0203/0600/0601/0604/0800
         run: |
           # PM exception handler get/set (0202/0203, 32-entry table),
