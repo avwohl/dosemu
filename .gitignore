@@ -42,3 +42,9 @@ dist/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Test artifacts dropped in the repo root when WRITE.COM is run bare
+# (no .cfg redirecting the output file).  CI always runs inside a
+# mktemp dir, so this only matters for developers running the
+# fixture straight from the command line.
+WROTE.TXT
