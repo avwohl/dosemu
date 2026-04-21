@@ -52,3 +52,13 @@ jobs:
           output=$(build/dosemu tests/HELLO.COM 2>/dev/null)
           echo "dosemu output: $output"
           echo "$output" | grep -q 'dosemu-hello-ok'
+
+      - name: Smoke (run WRITE.COM, verify file I/O + command tail)
+        run: |
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          "$GITHUB_WORKSPACE/build/dosemu" "$GITHUB_WORKSPACE/tests/WRITE.COM" ci-tail 2>/dev/null
+          echo "file contents:"
+          cat WROTE.TXT
+          grep -q 'dosemu-wrote-ok' WROTE.TXT
+          grep -q 'ci-tail' WROTE.TXT

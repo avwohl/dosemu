@@ -7,10 +7,16 @@ implementations running on the host. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
-**Status:** first end-to-end DOS program runs.
-`dosemu tests/HELLO.COM` → `dosemu-hello-ok`. dosbox-staging is linked
-in-process for CPU + PC hardware; DOS INT 21h is handled entirely by C++
-host code (currently AH=02 putchar, AH=09 print string, AH=4Ch exit).
+**Status:** basic .COM programs run.
+
+	dosemu tests/HELLO.COM           → prints dosemu-hello-ok
+	dosemu tests/WRITE.COM ci-tail   → creates WROTE.TXT in CWD
+
+dosbox-staging is linked in-process for CPU + PC hardware. DOS INT 21h is
+handled entirely by C++ host code: AH=02 (putchar), AH=09 (print string),
+AH=3Ch (create), AH=3Dh (open), AH=3Eh (close), AH=3Fh (read), AH=40h
+(write), AH=42h (seek), AH=4Ch (exit). PSP command tail at offset 80h is
+populated from argv. Files on the guest's `C:` map to the host CWD.
 No subprocess, no dosbox shell, no generated dosbox.conf.
 
 ## Building
