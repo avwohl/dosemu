@@ -1,0 +1,201 @@
+dosemu WIP — 2026-04-21 end of session
+=======================================
+
+All work is committed and pushed to github.com/avwohl/dosemu (main branch).
+No uncommitted changes anywhere you need to rescue.  The `dosbox-staging`
+submodule shows "modified content" because the Makefile patches its
+src/gui/sdlmain.cpp at build time from patches/sdlmain-expose-setup.patch;
+`make distclean` resets it.
+
+HEAD is at commit 647d3f5 "DPMI stage 5 (32-bit): 32-bit PM entry + 32-bit
+interrupt gates".
+
+
+How to resume on a fresh machine
+--------------------------------
+
+1. Clone with submodules:
+
+       git clone --recurse-submodules git@github.com:avwohl/dosemu.git
+       cd dosemu
+
+2. Install build deps:
+
+       sudo apt install -y build-essential cmake ninja-build meson \
+           pkg-config libsdl2-dev libsdl2-net-dev libpng-dev \
+           libopusfile-dev libspeexdsp-dev libfluidsynth-dev \
+           libslirp-dev libasound2-dev libxi-dev libglib2.0-dev \
+           patch nasm p7zip-full
+
+3. Install optional tools for compiling test fixtures:
+
+       sudo apt install -y bcc bin86 binutils-djgpp
+       sudo snap install --edge open-watcom
+
+4. Build:
+
+       make         # applies dosbox patch, runs meson+ninja, builds dosemu
+
+   First build takes ~5 minutes for dosbox-staging; incremental is fast.
+
+5. Verify:
+
+       build/dosemu tests/HELLO.COM        # prints dosemu-hello-ok
+       build/dosemu tests/DPMI_STAGE5.COM  # prints dpmi-stage5=hello-from-pm
+       build/dosemu tests/EXE2BIN.EXE      # prints Open Watcom banner
+
+   CI runs ~15 fixtures on every push via .github/workflows/ci.yml.
+
+
+Memory state
+------------
+
+Claude's project memory lives at
+~/.claude/projects/-home-wohl-src-dosemu/memory/
+
+Key files (read first if you want the summary):
+
+    MEMORY.md                  — index, always loaded into context
+    architecture.md            — strict cpmemu-style: dosbox linked in-process,
+                                 host C++ implements INT 21h.  No subprocess.
+    dpmi_plan.md               — DPMI stages 1-7 roadmap with current status.
+    dosbox_setstartup_seam.md  — how we override SHELL_Init without patching
+                                 dosbox core.
+    session_state_2026_04_21.md — snapshot after the big build-up.
+    feedback_no_subprocess.md  — rule: never fork/exec an emulator.
+
+
+DPMI stage status
+-----------------
+
+    Stage 1 ✓  INT 31h denial stub (CF=1 / AX=8001h)
+    Stage 2 ✓  INT 2Fh/1687h reports DPMI present with failing entry (flipped
+               to working entry in stage 3)
+    Stage 3 ✓  Real → PM switch (both 16-bit AX=0 and 32-bit AX=1).
+               Builds GDT at seg 0x1800, patches stacked CS to PM selector,
+               CPU_SET_CRX(0, CR0_PE), loads PM selectors.
+    Stage 4 ✗  LDT descriptor management (INT 31h AX=0000-0009). NOT STARTED.
+    Stage 5 ✓  INT 21h from 16-bit PM reflects to host via IDT interrupt
+               gate at 0x1A00 + GDT selector 0x28 for CB_SEG.  Handler uses
+               SegPhys() so addressing works in either mode.
+    Stage 5'  ✓ 32-bit PM infrastructure (D-flag descriptors + type 0x8E
+               gates) but no 32-bit-specific fixture yet.
+    Stage 6 ✗  PM linear memory allocation (INT 31h AX=0501-0503). NOT STARTED.
+    Stage 7 ✗  DJGPP hello.exe end-to-end. BLOCKED on 4+6.
+
+
+Current DPMI limitations
+------------------------
+
+1. Only INT 21h is reflected.  Other INT vectors in PM fault through an
+   uninitialised IDT slot.  Fixtures and clients must CLI before the switch
+   to mask IRQ0 (timer interrupt → INT 8 → fault).
+
+2. DOS4GW binaries (what Open Watcom's `owcc-dos4g` produces) don't use
+   DPMI directly -- they spawn DOS4GW.EXE via AH=4Bh.  So they also need
+   AH=4Bh load-and-execute before they'll work.
+
+3. DJGPP hello.exe needs stages 4 and 6 (LDT + PM memory alloc) before it
+   can complete startup.  This is the cleaner next target than DOS4GW.
+
+
+Where the Open Watcom tree is
+-----------------------------
+
+Not in the repo.  Downloaded to ~/ow on the current machine.  To get it
+on a new machine:
+
+    mkdir -p ~/ow && cd ~/ow
+    curl -sL -o ow.exe \
+      'https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/open-watcom-2_0-c-win-x86.exe'
+    7z x -y ow.exe 'binw/*' 'lib286/*' 'h/*'
+
+The binw/ directory has the real DOS-hosted Open Watcom tools.  Most are
+LE format (need DPMI to run -- wcc.exe, wcc386.exe, wlink.exe).  The
+real-mode MZ ones that run in dosemu today:
+
+    binw/owcc.exe       -- C compiler driver
+    binw/exe2bin.exe    -- EXE→COM converter (in repo as tests/EXE2BIN.EXE)
+    binw/cmdedit.exe
+    binw/dos32a.exe
+    binw/edbind.exe
+    binw/ms2wlink.exe
+
+
+Test compile flow I was using
+-----------------------------
+
+    mkdir -p ~/dosemu-watcom-test && cd ~/dosemu-watcom-test
+    cat > hello.c <<'EOF'
+    #include <stdio.h>
+    int main(void) { printf("hello from watcom\n"); return 0; }
+    EOF
+    snap run open-watcom.owcc-dos -o hello.exe hello.c       # 16-bit real mode
+    snap run open-watcom.owcc-dos4g -o hello32.exe hello.c   # 32-bit DOS4GW
+
+    ~/src/dosemu/build/dosemu hello.exe      # works: "hello from watcom"
+    ~/src/dosemu/build/dosemu hello32.exe    # "Can't run DOS/4G(W)" -- AH=4Bh
+                                              # needed to spawn DOS4GW.EXE,
+                                              # plus stages 4+6 for the actual
+                                              # 32-bit client
+
+
+Next-session picks
+------------------
+
+Pick one of these as the opening move:
+
+A. Stage 4 minimum: AX=0400 (version), AX=0006/0007 (get/set seg base).
+   Enough for many DPMI clients to initialise without allocating
+   descriptors.
+
+B. Stage 6 minimum: AX=0501 returning an MCB-allocated region as a
+   32-bit linear address.
+
+C. A hand-assembled 32-bit PM NASM fixture that exercises stage 5'
+   (32-bit interrupt gate path).  Would be the first 32-bit PM
+   fixture in CI.
+
+D. Skip DPMI work temporarily: AH=4Bh load-and-execute so DOS4GW
+   binaries can spawn their extender child.  Medium-large; needs CPU
+   state save/restore across recursive DOSBOX_RunMachine calls and
+   child PSP setup.
+
+E. Find a non-spawning DPMI client.  Open Watcom ships DOS32A which is
+   an alternative extender; might be self-contained.  Also a tiny
+   standalone DJGPP program (built elsewhere) linked against CWSDPMI
+   stub would be ideal.
+
+Recommended order: C (validate 32-bit infra) → A + B (real INT 31h
+services) → E or built-DJGPP → iterate.
+
+
+Fixture inventory (CI covers all these)
+---------------------------------------
+
+    HELLO.COM                -- hand-written .COM: print + exit
+    HELLO.EXE                -- hand-written MZ .EXE
+    WRITE.COM                -- AH=3C/40/3E/4C: create file, write, close
+    CAT.COM                  -- AH=3D/3F/40/3E: read file, echo to stdout
+    SIZE.COM                 -- AH=3D/42/3E: seek to EOF, print size
+    LISTDIR.COM              -- AH=4E/4F: findfirst/findnext + 8.3 mangle
+    ECHOIN.COM               -- AH=01: stdin char + echo
+    SYSCALLS.COM             -- AH=30/48/25/35: version/alloc/int vector
+    ENVDUMP.COM              -- PSP:[2Ch] env block walker
+    MCB_TEST.COM             -- alloc/free/alloc-same: MCB coalescing
+    SURVIVE.COM              -- AH=FD (unimplemented) -> soft-fail continues
+    DPMI_PROBE.COM           -- INT 2Fh AX=1687h -> "dpmi=present"
+    DPMI_INT31.COM           -- INT 31h AX=0400 -> CF=1/AX=8001h denial
+    DPMI_STAGE3.COM          -- enters PM, spins.  CI asserts no fatal abort.
+    DPMI_STAGE5.COM          -- INT 21h from PM → prints + exits.
+    HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
+    HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
+    EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility
+    FreeDOS xcopy.exe         -- real-world file copy (CI step)
+
+
+Global commits pushed today
+---------------------------
+
+30 commits from the subprocess teardown through DPMI stage 5.  `git log
+--oneline | head -30` shows them all on main.  Nothing is pending.
