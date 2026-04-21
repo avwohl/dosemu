@@ -86,8 +86,12 @@ DPMI stage status
                32-bit IDT gate, and exits via AH=4C.  Required a second
                INT 21h callback installed with CB_IRETD (`66 CF`) so the
                stub unwinds the 12-byte frame a 32-bit gate pushes.
-    Stage 6 ✗  PM linear memory allocation (INT 31h AX=0501-0503). NOT STARTED.
-    Stage 7 ✗  DJGPP hello.exe end-to-end. BLOCKED on 4+6.
+    Stage 6 ~  Minimal PM linear memory alloc: AX=0501 (allocate) +
+               AX=0502 (free) delegate to the MCB chain; handle = data
+               segment.  AX=0503 (resize) still NOT STARTED.
+    Stage 7 ✗  DJGPP hello.exe end-to-end. Stage 4 (subset) + Stage 6
+               (minimal) both in place -- next real-client attempt is
+               the closest it has ever been.
 
 
 Current DPMI limitations
@@ -198,6 +202,9 @@ Fixture inventory (CI covers all these)
     DPMI_STAGE5.COM          -- INT 21h from 16-bit PM → prints + exits.
     DPMI_STAGE5_32.COM       -- INT 21h from 32-bit PM → prints + exits.
     DPMI_STAGE4.COM          -- INT 31h AX=0400/0006/0007 from PM.
+    DPMI_STAGE6.COM          -- INT 31h AX=0501 alloc + 0502 free, with
+                                 a full write/read round-trip through
+                                 the newly allocated linear region.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility

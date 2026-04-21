@@ -909,6 +909,69 @@ Bitu dosemu_int31() {
       return CBRET_NONE;
     }
 
+    case 0x0501: {  // Allocate memory block (stage 6 minimal)
+      // Input:  BX:CX = size in bytes (BX high, CX low)
+      // Output: BX:CX = linear address of block
+      //         SI:DI = handle (opaque; must round-trip to 0x0502/0x0503)
+      // Error:  CF=1, AX=8012h (out of memory)
+      //
+      // We delegate to the real-mode MCB allocator: every byte we hand a
+      // DPMI client comes from the same 0x2000-0xA000 paragraph arena DOS
+      // memory management uses.  That caps allocations at ~600KB total --
+      // fine for small DPMI clients, nowhere near enough for a real
+      // 32-bit app.  Returning a linear address <1MB is legal per the
+      // DPMI spec; real hosts typically allocate above 1MB but the spec
+      // only requires that the address be valid for the client to
+      // read/write.
+      const uint32_t bytes = (static_cast<uint32_t>(reg_bx) << 16) | reg_cx;
+      if (bytes == 0) {
+        reg_ax = 0x8021;       // invalid value
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const uint32_t paras32 = (bytes + 15u) >> 4;
+      if (paras32 > 0xFFFFu) {
+        reg_ax = 0x8012;
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      uint16_t largest = 0;
+      const uint16_t data_seg = mcb_allocate(
+          static_cast<uint16_t>(paras32), largest);
+      if (data_seg == 0) {
+        reg_ax = 0x8012;       // physical memory unavailable
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const uint32_t linear = static_cast<uint32_t>(data_seg) * 16u;
+      reg_bx = (linear >> 16) & 0xFFFF;
+      reg_cx = linear & 0xFFFF;
+      // Handle = data_seg (16 bits, stashed in DI; SI=0).  0x0502/0x0503
+      // recover the MCB by reading (handle - 1).
+      reg_si = 0;
+      reg_di = data_seg;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0502: {  // Free memory block
+      // Input:  SI:DI = handle returned by 0x0501.
+      // SI must be zero (we never hand out handles with SI != 0) and
+      // DI must be a valid MCB data segment in our arena.
+      if (reg_si != 0 || reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
+        reg_ax = 0x8023;       // invalid handle
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      if (!mcb_free(reg_di)) {
+        reg_ax = 0x8023;
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
     default:
       reg_ax = 0x8001;
       set_cf(true);

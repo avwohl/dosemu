@@ -113,6 +113,17 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-stage4=ok'
 
+      - name: DPMI stage 6: alloc, write/read round-trip, free
+        run: |
+          # INT 31h AX=0501 allocates 256 bytes from the MCB arena and
+          # returns BX:CX = linear address + SI:DI = handle.  The fixture
+          # repoints the PM ES selector at the block (AX=0007), writes
+          # and reads back a pattern at offset 0 and 254 to verify the
+          # full 256-byte span is mapped, then frees via AX=0502.
+          out=$(build/dosemu tests/DPMI_STAGE6.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stage6=ok'
+
       - name: Real compiler output (Open Watcom 16-bit hello)
         run: |
           out=$(build/dosemu tests/HELLO_W.EXE 2>/dev/null)
