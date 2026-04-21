@@ -264,6 +264,9 @@ Fixture inventory (CI covers all these)
                                  with paired RM seg + PM selector.
     DPMI_PMIDT.COM           -- AX=0210/0212 PM IDT get/set + AX=
                                  0900/0901/0902 virtual IF state.
+    DPMI_STUBS.COM           -- AX=0202/0203 PM exception handler +
+                                 0600/0601 lock/unlock + 0604 page
+                                 size + 0800 phys addr mapping.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility

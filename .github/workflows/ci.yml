@@ -163,6 +163,17 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-integration=ok'
 
+      - name: DPMI stubs AX=0202/0203/0600/0601/0604/0800
+        run: |
+          # PM exception handler get/set (0202/0203, 32-entry table),
+          # lock/unlock linear region (0600/0601 -- no-op since no
+          # paging), get page size (0604 = 4096), physical address
+          # mapping (0800 -- linear=physical pass-through).  All
+          # probed by real clients during init.
+          out=$(build/dosemu tests/DPMI_STUBS.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stubs=ok'
+
       - name: DPMI AX=0210/0212 + 0900/0901/0902 PM IDT + virtual IF
         run: |
           # AX=0210 reads / AX=0212 writes a PM IDT gate.  Client

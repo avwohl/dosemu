@@ -967,6 +967,15 @@ RealPt s_rm_stop_ptr = 0;
 // shadow state the client can round-trip through 0900/0901/0902.
 bool s_virtual_if = true;    // clients assume interrupts enabled at start
 
+// PM exception handler table for AX=0202/0203.  Each entry is a
+// selector:offset pair.  We never actually *dispatch* exceptions to
+// these handlers (dosbox aborts on most CPU exceptions rather than
+// reflecting them), but clients install handlers for #DE/#UD/#GP in
+// their startup code and read back their own installs.  Defaulted to
+// (selector=0, offset=0) = "no handler".
+struct ExcHandler { uint16_t sel; uint32_t off; };
+ExcHandler s_pm_exc[32] = {};
+
 // INT 31h (DPMI) — stage 4 subset.
 //
 //   AX=0400  Get DPMI version.
@@ -1186,6 +1195,56 @@ Bitu dosemu_int31() {
       s_seg2desc_cache[data_seg] = 0;
       ldt_set(idx, false);
       write_ldt_descriptor(idx, 0, 0, 0);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0202: {  // Get Protected Mode Exception Handler
+      // Input:  BL = exception number (0..31)
+      // Output: CX:(E)DX = current handler
+      if (reg_bl >= 32) {
+        reg_ax = 0x8021; set_cf(true); return CBRET_NONE;
+      }
+      reg_cx  = s_pm_exc[reg_bl].sel;
+      reg_edx = s_pm_exc[reg_bl].off;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0203: {  // Set Protected Mode Exception Handler
+      if (reg_bl >= 32) {
+        reg_ax = 0x8021; set_cf(true); return CBRET_NONE;
+      }
+      s_pm_exc[reg_bl].sel = reg_cx;
+      s_pm_exc[reg_bl].off = reg_edx;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0600:   // Lock Linear Region (no-op -- no paging)
+    case 0x0601: { // Unlock Linear Region (no-op)
+      // Input BX:CX = linear addr, SI:DI = size.  Ignored: physical
+      // memory is never paged out in our model, so the "locked"
+      // promise is trivially satisfied.
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0604: {  // Get Page Size
+      reg_bx = 0;
+      reg_cx = 4096;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0800: {  // Physical Address Mapping
+      // Input:  BX:CX = physical address, SI:DI = size (ignored -- we
+      //                don't enforce any range on the mapping).
+      // Output: BX:CX = linear address
+      // Without a paging layer physical == linear, so we just echo
+      // the input.  Callers use this to get a linear address for
+      // framebuffer / memory-mapped-device ranges they already know
+      // the physical of.
       set_cf(false);
       return CBRET_NONE;
     }
