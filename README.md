@@ -17,14 +17,16 @@ CP/M BDOS.
 dosbox-staging is linked in-process for CPU + PC hardware. DOS INT 21h is
 handled entirely by C++ host code. Currently implemented:
 
-	02  putchar            25  set int vector     3F  read handle
-	09  print string       30  get DOS version    40  write handle
-	0E  set drive          35  get int vector     42  seek handle
-	19  get drive          3B  chdir              44  ioctl (basic)
-	1A  set DTA            3C  create handle      47  get cwd
-	3D  open handle        3E  close handle       48  allocate (bump)
-	49  free (no-op)       4A  resize (stub)      4C  exit
-	4E  findfirst          4F  findnext
+	01  stdin char+echo    0E  set drive          3E  close handle
+	02  putchar            0B  stdin ready?       3F  read handle
+	07  stdin char no-echo 19  get drive          40  write handle
+	08  stdin char no-echo 1A  set DTA            42  seek handle
+	09  print string       25  set int vector     44  ioctl (basic)
+	0A  buffered input     30  get DOS version    47  get cwd
+	3B  chdir              35  get int vector     48  allocate (bump)
+	3C  create handle      3D  open handle        49  free (no-op)
+	4A  resize (stub)      4C  exit               4E  findfirst
+	4F  findnext
 
 PSP command tail at offset 80h is populated from argv. Drive mounts and
 per-file / per-pattern mappings come from a `.cfg` file:

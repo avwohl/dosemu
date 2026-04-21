@@ -52,6 +52,7 @@ void RENDER_AddMessages();
 #include <dirent.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/select.h>
 #include <sys/stat.h>
 #include <ctime>
 #include <map>
@@ -365,9 +366,58 @@ void return_error(uint16_t dos_err) {
 Bitu dosemu_int21() {
   switch (reg_ah) {
 
+    case 0x01: {  // Read char from stdin, echo to stdout, return in AL.
+      uint8_t c;
+      if (::read(STDIN_FILENO, &c, 1) <= 0) { reg_al = 0; return CBRET_NONE; }
+      std::fputc(c, stdout);
+      std::fflush(stdout);
+      // DOS reports newlines as CR; the host sends LF.
+      reg_al = (c == '\n') ? '\r' : c;
+      return CBRET_NONE;
+    }
+
+    case 0x07:
+    case 0x08: {  // Read char from stdin, no echo, return in AL.
+      uint8_t c;
+      if (::read(STDIN_FILENO, &c, 1) <= 0) { reg_al = 0; return CBRET_NONE; }
+      reg_al = (c == '\n') ? '\r' : c;
+      return CBRET_NONE;
+    }
+
+    case 0x0B: {  // Check stdin status.  AL=0xFF if data ready, 0 if not.
+      fd_set rd;
+      FD_ZERO(&rd); FD_SET(STDIN_FILENO, &rd);
+      struct timeval zero = {0, 0};
+      const int n = ::select(STDIN_FILENO + 1, &rd, nullptr, nullptr, &zero);
+      reg_al = (n > 0 && FD_ISSET(STDIN_FILENO, &rd)) ? 0xFF : 0x00;
+      return CBRET_NONE;
+    }
+
     case 0x02: {  // Write character in DL to stdout
       std::fputc(reg_dl, stdout);
       std::fflush(stdout);
+      return CBRET_NONE;
+    }
+
+    case 0x0A: {  // Buffered input.  DS:DX -> [max_len][actual_len][data...]
+      const PhysPt buf = SegValue(ds) * 16u + reg_dx;
+      const uint8_t max = mem_readb(buf);
+      if (max == 0) {
+        mem_writeb(buf + 1, 0);
+        return CBRET_NONE;
+      }
+      uint8_t count = 0;
+      while (count < static_cast<uint8_t>(max - 1)) {
+        uint8_t c;
+        if (::read(STDIN_FILENO, &c, 1) <= 0) break;
+        const uint8_t stored = (c == '\n') ? '\r' : c;
+        mem_writeb(buf + 2 + count, stored);
+        std::fputc(c, stdout);
+        ++count;
+        if (stored == '\r') break;
+      }
+      std::fflush(stdout);
+      mem_writeb(buf + 1, count);
       return CBRET_NONE;
     }
 

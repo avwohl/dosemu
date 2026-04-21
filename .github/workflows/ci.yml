@@ -122,6 +122,12 @@ jobs:
           echo "$out" | grep -q '^THIRDF~1\.TST$'
           echo "$out" | grep -vq '^IGNORED'
 
+      - name: Smoke (stdin input via AH=01h)
+        run: |
+          out=$(echo 'hi-stdin' | build/dosemu tests/ECHOIN.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'hi-stdin'
+
       - name: Smoke (run WRITE.COM, verify file I/O + command tail)
         run: |
           workdir=$(mktemp -d)
