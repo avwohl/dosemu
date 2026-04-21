@@ -7,22 +7,25 @@ implementations running on the host. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
-**Status:** real DOS programs run. DOS-hosted toolchain binaries run.
-Cross-compiler-produced binaries run.
+**Status:** real DOS programs run.  DOS-hosted toolchain binaries run.
+Cross-compiler-produced binaries run.  DPMI 0.9 host complete (every
+INT 31h sub-function implemented or stubbed, 23 DPMI fixtures green).
+LE (Linear Executable) loader loads, applies fixups, installs LDT
+descriptors, and enters 32-bit protected mode end-to-end on
+hand-crafted fixtures; real DOS4G-hosted Watcom binaries load their
+full image + apply all fixups but stall on the runtime's DOS4G
+pre-entry environment convention (a DPMI-host-compatibility gap).
 
 	dosemu tests/EXE2BIN.EXE              → Open Watcom banner   (real DOS-hosted)
 	dosemu tests/HELLO_W.EXE              → hello from watcom    (Watcom cross-compiled)
 	dosemu tests/HELLO_B.COM              → hello from bcc       (bcc cross-compiled)
+	dosemu tests/LE_MIN.EXE               → exit 0                (hand-crafted LE)
 	echo F | dosemu xcopy.exe src dst     → copies src to dst    (FreeDOS xcopy)
 	dosemu mTCP-FTP.EXE                   → prints usage banner  (Open Watcom 16-bit, real DOS)
 
-	dosemu owcc.exe hello.c               → owcc runs, fails invoking wcc.exe
-	                                        (wcc is LE/DPMI -- stage 3+ blocker)
-	dosemu HELLO32.EXE (DOS/4G bound)     → "Can't run DOS/4G(W)" at DPMI switch
-	                                        (stage 3+ blocker, DJGPP same problem)
-
-The 32-bit DOS/4G and DJGPP path is gated on DPMI stages 3-7.  See
-`.claude/.../dpmi_plan.md` for the staged implementation path.
+	dosemu wd.exe / vi.exe                → enters 32-bit PM, runs ~0x135 bytes,
+	                                        GP-faults on DOS4G pre-entry selector
+	                                        setup we don't emulate
 
 dosbox-staging is linked in-process for CPU + PC hardware. DOS INT 21h is
 handled entirely by C++ host code. Currently implemented:
@@ -44,10 +47,32 @@ handled entirely by C++ host code. Currently implemented:
 	5D  network (stub)     62  get PSP            63  lead-byte (stub)
 	6C  extended open
 
-INT 31h installed as DPMI denial stub (CF=1 / AX=8001h "unsupported"),
-INT 2Fh's default handler correctly reports "no DPMI" for the AX=1687h
-probe.  See `.claude/.../dpmi_plan.md` for the staged implementation
-path.
+INT 2Fh AX=1687h reports DPMI 0.90 (32-bit capable).  INT 31h
+implements the full DPMI 0.9 spec: LDT descriptor mgmt (AX=0000..000C),
+DOS memory alloc (0100..0102), IVT get/set (0200..0201), PM exception
+handlers (0202..0203, live dispatch via IDT gate), PM IDT gates
+(0204..0205), simulate-RM-INT and call-RM-procedure (0300..0302),
+RM callbacks (0303..0304, 16-bit + 32-bit PM), state save/restore
+stubs (0305..0306), version (0400), memory info (0500), linear memory
+alloc/free/resize (0501..0503) with a two-tier MCB-under-1MB /
+pm_arena-above-1MB backing store, lock/unlock and paging stubs
+(0600..0604, 0702..0703), physical mapping pass-through (0800..0801),
+virtual IF state (0900..0902), and debug watchpoint stubs (0B00..0B03).
+
+RM<->PM mode switching is full-fidelity: 16-bit and 32-bit client
+entry both work, INT 21h from PM reflects to our host handler via
+PM IDT gate, INT 21h AH=09h string output works from PM, and
+per-vector reflection shims (`66 CF` IRETD) handle 32-bit-gate
+frames for INT 10h/etc. dispatched back to real-mode BIOS.
+
+LE binaries (the format Watcom's DOS4G and DOS4GW produce) are
+loaded, fixed up (source types 0x05/0x07/0x08 fully, 0x02/0x03/0x06
+with per-object LDT selectors), given one LDT descriptor per object
+(base/limit/access/D-bit from object flags), and launched directly
+into 32-bit PM at the LE header's entry_obj:entry_eip.  `LE_MIN.EXE`
+runs end-to-end through PM INT 21h AH=4Ch to rc=0.  Real Watcom
+binaries load + execute ~0.2s of PM code before hitting the DOS4G
+pre-entry environment convention.
 
 PSP:[2Ch] points at an env block populated with `COMSPEC`, `PATH`, and
 whichever of `HOME`/`USER`/`TMPDIR`/`LANG` are set on the host, followed
