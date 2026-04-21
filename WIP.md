@@ -6,8 +6,8 @@ shows "modified content" because the Makefile patches its
 `src/gui/sdlmain.cpp` at build time from
 `patches/sdlmain-expose-setup.patch`; `make distclean` resets it.
 
-HEAD is at `db1f0c6` "LE loader: tier object allocation into pm_arena
-for >1MB binaries".
+HEAD is at `cbefb92` "LE loader: install one LDT descriptor per
+object".
 
 ## Resume checklist (fresh machine)
 
@@ -146,14 +146,18 @@ Commits `dbbe111` + `b487526` + `98ce926` + `db1f0c6`:
   3 objects, 13655 fixups): all objects allocated, all fixups
   resolved, no crashes. Objects 1+3 land in pm_arena above 1MB;
   obj 2 lands in the MCB arena.
+- `le_install_descriptors` allocates a run of LDT slots and writes
+  one descriptor per object with base/limit/access/D-bit derived
+  from the object's flags.  Selector stashed in `LeObject.ldt_sel`.
+  Teardown path releases the slots.  Descriptors are syntactically
+  valid but not yet activated (loader doesn't enter PM).
 
 ### Still missing for LE execution
 
 | Piece | Sketch |
 |---|---|
-| PM descriptor install per object | One LDT entry per object. Access byte from object flags: code(0x0004)→0x9A code-read, else 0x92 data-rw. D-bit from BIG flag (0x4000). |
-| Entry point dispatch | Install descriptors, enter PM, set CS:EIP from `entry_obj`:`entry_eip` (LE header offset 0x18:0x1C), SS:ESP from `stack_obj`:`stack_esp` (0x20:0x24), DS from the automatic-data-object selector (LE header offset 0x94). Existing `dpmi_enter_pm_mode` has the GDT/IDT/CR0/LLDT plumbing; the LE path needs its own variant that swaps in per-object LDT descriptors first and jumps to a client-chosen CS:EIP instead of using the retf-to-caller trick. |
-| Selector-bearing fixups (0x02/0x03/0x06) | Once descriptors are installed, replace the zero-selector stub with the LDT selector of the target object. |
+| Entry point dispatch | After descriptor install, enter PM: set CS:EIP from `entry_obj_sel`:`entry_eip` (LE header offset 0x18:0x1C, selector from the corresponding `LeObject.ldt_sel`), SS:ESP from `stack_obj_sel`:`stack_esp` (0x20:0x24), DS from the auto-data-object selector (LE header offset 0x94). Existing `dpmi_enter_pm_mode` has the GDT/IDT/CR0/LLDT plumbing; the LE path needs its own variant that activates pre-installed LDT descriptors and jumps to a client-chosen CS:EIP (no retf-to-caller trick because there's no caller). |
+| Selector-bearing fixups (0x02/0x03/0x06) | Once entry dispatch works, replace the zero-selector stub in `le_apply_fixups` with `objects[tgt_obj-1].ldt_sel`. |
 | Test target | `LE_MIN.EXE` has working fixups but its "code" is `B8 imm32; INT 20h` -- INT 20h is RM terminate, not PM. Change to `B4 4C CD 21` (AH=4Ch INT 21h) and rely on the PM INT 21h handler once entry dispatch is up. |
 
 Roughly another ~200-400 lines to reach "hello-world LE binary runs
@@ -315,6 +319,8 @@ External-tool integration:
 ## Commits since the original handoff (1222c44)
 
 ```
+cbefb92  LE loader: install one LDT descriptor per object
+7d7c1b0  WIP.md: refresh for LE fixup walker + pm_arena landing
 db1f0c6  LE loader: tier object allocation into pm_arena for >1MB binaries
 2c63896  DPMI AX=0501: pm_arena tier above 1MB
 98ce926  LE loader: apply internal-reference fixups from fixup_page_table
@@ -348,5 +354,5 @@ ffcdbff  DPMI stage 4 (subset): INT 31h AX=0400 + get/set segment base
 bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 ```
 
-30 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
+32 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
