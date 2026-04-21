@@ -368,6 +368,18 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-stage6=ok'
 
+      - name: DPMI 1.0 extensions (AX=0401/000D/0506/0507/0508/0E00/0E01)
+        run: |
+          # Fixtures covering the DPMI 1.0 sub-functions CWSDPMI
+          # implements (and therefore the ones DJGPP clients actually
+          # call): Get Capabilities, Allocate Specific LDT Descriptor,
+          # Get/Set Page Attributes, Map Device (expected failure),
+          # Get/Set Coprocessor Status.  A green run proves every
+          # 1.0-path returns the correct CF+AX.
+          out=$(build/dosemu tests/DPMI_V10.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-v10=ok'
+
       - name: DPMI AX=0501: pm_arena tier (>1MB allocation above 1MB)
         run: |
           # Requesting >0xFFFFh paragraphs can't fit the MCB arena, so

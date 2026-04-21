@@ -1512,12 +1512,42 @@ Bitu dosemu_int31() {
 
     case 0x0400: {  // Get DPMI version
       // Advertise DPMI 0.90 (matches the INT 2Fh/1687h detection response,
-      // which reports DH:DL = 0:5Ah = "DPMI 0.90").
+      // which reports DH:DL = 0:5Ah = "DPMI 0.90").  Clients that want
+      // DPMI 1.0 extensions call AX=0401 (Get Capabilities) separately;
+      // we handle the 1.0 sub-functions CWSDPMI implements without
+      // bumping the version.
       reg_ax = 0x005A;         // major 0, minor 0x5A (= 90 decimal)
       reg_bx = 0x0002;         // flags: bit 1 = reflect real-mode INTs
       reg_cl = 3;              // CPU type: 386
       reg_dh = 0x08;           // master PIC base interrupt
       reg_dl = 0x70;           // slave PIC base interrupt
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0401: {  // DPMI 1.0: Get DPMI Capabilities
+      // Output: AX = host capability flags (bit0=paging, bit1=device
+      //              mapping, bit2=conventional-mem mapping, bit3=demand
+      //              zero-fill, bit4=write-protect on client, bit5=host
+      //              can exception-handle).
+      //         CX = 0, BX = 0 (reserved)
+      //         DH:DL = host version (major.minor)
+      //         ES:EDI = 128-byte buffer that receives the host vendor
+      //                  string: [major.byte][minor.byte][name ASCIIZ].
+      // We don't page, don't demand-fill, don't enforce write-protect.
+      // We *do* dispatch PM exceptions to client handlers (bit 5).
+      // Mirror CWSDPMI's buffer layout: 2-byte version + ASCIIZ vendor.
+      reg_ax = 0x0020;            // bit 5 only = exception handling
+      reg_bx = 0;
+      reg_cx = 0;
+      reg_dh = 0;
+      reg_dl = 0x5A;              // 0.90 host
+      const PhysPt buf = SegPhys(es) + reg_edi;
+      mem_writeb(buf + 0, 0);     // major
+      mem_writeb(buf + 1, 1);     // minor
+      const char name[] = "dosemu";
+      for (size_t i = 0; i < sizeof(name); ++i)
+        mem_writeb(buf + 2 + i, name[i]);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -1693,6 +1723,27 @@ Bitu dosemu_int31() {
       const PhysPt dst = selector_table_base(reg_bx) + idx * 8u;
       const PhysPt src = SegPhys(es) + reg_edi;
       for (int i = 0; i < 8; ++i) mem_writeb(dst + i, mem_readb(src + i));
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x000D: {  // DPMI 1.0: Allocate Specific LDT Descriptor
+      // Input:  BX = specific selector to allocate (must be LDT,
+      //              currently free, and RPL field unset).
+      // Output: CF=0 on success; CF=1 AX=8011 if unavailable.
+      // Used by clients that need a selector at a fixed value (e.g.
+      // for self-modifying code or DOS interop with a specific
+      // value).  CWSDPMI limits this to slots 0..15 with TI=1; we
+      // allow anywhere in the LDT bitmap.
+      if (!(reg_bx & 0x4)) {       // must be LDT (TI=1)
+        reg_ax = 0x8022; set_cf(true); return CBRET_NONE;
+      }
+      const uint16_t idx = reg_bx >> 3;
+      if (idx == 0 || idx >= LDT_COUNT || ldt_bit(idx)) {
+        reg_ax = 0x8011; set_cf(true); return CBRET_NONE;
+      }
+      ldt_set(idx, true);
+      write_ldt_descriptor(idx, 0, 0, 0x92);    // placeholder data r/w
       set_cf(false);
       return CBRET_NONE;
     }
@@ -2571,6 +2622,67 @@ Bitu dosemu_int31() {
       }
       reg_bx = (base >> 16) & 0xFFFF;
       reg_cx = base & 0xFFFF;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0506: {  // DPMI 1.0: Get Page Attributes
+      // Input:  SI:DI = handle, EBX = offset in block, CX = # pages,
+      //         ES:EDX = dest buffer (one 16-bit attr per page).
+      // Output: ES:EDX filled, CF=0.
+      // We don't page, so every page of a live block reads back as
+      // "type=1 committed, R/W, accessed, dirty" (0x39).  CWSDPMI
+      // returns similar for committed pages.
+      const uint32_t n = reg_cx;
+      const PhysPt buf = SegPhys(es) + reg_edx;
+      for (uint32_t i = 0; i < n; ++i)
+        mem_writew(buf + i * 2, 0x0039);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0507: {  // DPMI 1.0: Set Page Attributes
+      // Input:  SI:DI = handle, EBX = offset, CX = # pages,
+      //         ES:EDX = src buffer.  Client wants to change page
+      //         attributes (commit/uncommit/read-only).  We don't
+      //         page, so there's nothing to do -- accept the call
+      //         and succeed.  A client that expects uncommitted
+      //         pages to fault on access won't get that semantic,
+      //         but will at least not crash on the API call.
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0508:    // DPMI 1.0: Map Device in Memory Block
+    case 0x0509: {  // DPMI 1.0: Map Conventional Memory in Memory Block
+      // Input:  SI:DI = handle, EBX = offset, CX = # pages,
+      //         EDX = physical or conventional address to map.
+      // We don't remap; memory is linearly backed by dosbox's RAM.
+      // Return CF=1 AX=0x8025 "invalid address" -- spec-legal.
+      reg_ax = 0x8025;
+      set_cf(true);
+      return CBRET_NONE;
+    }
+
+    case 0x0E00: {  // DPMI 1.0: Get Coprocessor Status
+      // Output: AX bits:
+      //   0   MP bit (coprocessor present)
+      //   1   client emulation enabled
+      //   2   host emulation active
+      //   3   client's initialize bit
+      //   4-7 coprocessor type: 2=287, 3=387/later, 4=486DX+
+      // dosbox-emulated FPU is present; we don't emulate in the host,
+      // no client emulation, coprocessor type 387-class.
+      reg_ax = 0x31;      // bits 0 + 4 + 5 = MP + type=3 (387)
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x0E01: {  // DPMI 1.0: Set Coprocessor Emulation
+      // Input:  BX bits 0..3 (MP / EM / client-emulation / initialize).
+      // CWSDPMI mutates IDT[7] depending on whether the client
+      // provides an emulator; we don't switch FPU delivery at runtime
+      // so accept the call and succeed.
       set_cf(false);
       return CBRET_NONE;
     }
