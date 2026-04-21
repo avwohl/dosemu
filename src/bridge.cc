@@ -3214,6 +3214,19 @@ uint32_t rdd(const std::vector<uint8_t> &b, size_t off) {
 // image.  That's substantial follow-up work.  This scaffolding lets
 // dosemu recognize LE binaries and fail with a clear, parseable error
 // rather than the generic "header mismatch" the MZ path would give.
+// Per-object runtime record populated by load_le_at.  Enough metadata
+// for a future-session "enter PM at entry point" routine to install a
+// code/data descriptor per object and translate the LE's linear view
+// into our PM-mapped memory.
+struct LeObject {
+  uint32_t virt_base;       // client-visible linear base from the LE header
+  uint32_t virt_size;
+  uint32_t flags;           // copy of the object table's flags word
+  uint16_t host_seg;        // our MCB seg where we placed the object data
+  bool     is_code;
+  bool     is_big;          // 0x4000 "BIG" bit => 32-bit
+};
+
 bool load_le_inspect(const std::string &path,
                      const std::vector<uint8_t> &f,
                      size_t le_off) {
@@ -3262,6 +3275,91 @@ bool load_le_inspect(const std::string &path,
   return true;
 }
 
+// Copy the pages of each LE object into host memory allocated from
+// the MCB chain.  Populates `objects` with one entry per object,
+// including the host seg where the data ended up.  Caller is
+// responsible for freeing the host segments on failure or on
+// "client exit" (a future follow-up).
+//
+// Page types we handle:
+//   0 Legal         -- copy bytes from data_pages_off + (page-1)*4KB
+//   1 Iterated      -- TODO (compressed; uncommon)
+//   2 Invalid       -- leave zeros
+//   3 Zero-filled   -- leave zeros (we allocated zero-filled memory)
+//   4 Range-of-zeros (LX) -- leave zeros
+//
+// Last-page-size field on the LE header clips the very last page's
+// copy to the exact byte count.  No fixups are applied here; that's
+// a follow-up.  Returns true on success.
+bool le_load_objects(const std::vector<uint8_t> &f, size_t le_off,
+                     std::vector<LeObject> &objects) {
+  const uint32_t num_objects  = rdd(f, le_off + 0x44);
+  const uint32_t obj_tbl_off  = rdd(f, le_off + 0x40);
+  const uint32_t page_tbl_off = rdd(f, le_off + 0x48);
+  const uint32_t page_size    = rdd(f, le_off + 0x28);
+  const uint32_t last_page_sz = rdd(f, le_off + 0x2C);
+  const uint32_t total_pages  = rdd(f, le_off + 0x14);
+  const uint32_t data_pages   = rdd(f, le_off + 0x80);
+  objects.reserve(num_objects);
+  for (uint32_t i = 0; i < num_objects; ++i) {
+    const size_t e = le_off + obj_tbl_off + i * 24;
+    if (e + 24 > f.size()) return false;
+    LeObject o{};
+    o.virt_size = rdd(f, e + 0x00);
+    o.virt_base = rdd(f, e + 0x04);
+    o.flags     = rdd(f, e + 0x08);
+    o.is_code   = (o.flags & 0x0004) != 0;
+    o.is_big    = (o.flags & 0x4000) != 0;
+    const uint32_t page_idx    = rdd(f, e + 0x0C);   // 1-based
+    const uint32_t page_count  = rdd(f, e + 0x10);
+    // Allocate host memory (paragraphs) sized to cover virt_size.
+    const uint32_t paras = (o.virt_size + 15u) / 16u;
+    if (paras == 0 || paras > 0xFFFFu) {
+      std::fprintf(stderr, "dosemu: LE obj %u paras=%u out of range\n",
+                   i + 1, paras);
+      return false;
+    }
+    uint16_t largest = 0;
+    const uint16_t seg = mcb_allocate(static_cast<uint16_t>(paras), largest);
+    if (seg == 0) {
+      std::fprintf(stderr, "dosemu: LE obj %u alloc of %u paras failed "
+                   "(largest free = %u)\n", i + 1, paras, largest);
+      return false;
+    }
+    o.host_seg = seg;
+    // Zero-fill (mcb_allocate leaves whatever was there).
+    for (uint32_t j = 0; j < paras * 16u; ++j)
+      mem_writeb(seg * 16u + j, 0);
+    // Copy pages.
+    for (uint32_t p = 0; p < page_count; ++p) {
+      const uint32_t pt_entry_idx = page_idx - 1 + p;
+      if (pt_entry_idx >= total_pages) continue;
+      const size_t pt_entry = le_off + page_tbl_off + pt_entry_idx * 4;
+      if (pt_entry + 4 > f.size()) continue;
+      // LE page entry: 3-byte page number (big-endian) + 1-byte type.
+      const uint32_t pnum_be = (static_cast<uint32_t>(f[pt_entry]) << 16)
+                             | (static_cast<uint32_t>(f[pt_entry + 1]) << 8)
+                             |  static_cast<uint32_t>(f[pt_entry + 2]);
+      const uint8_t  ptype   = f[pt_entry + 3];
+      if (ptype != 0) continue;                       // only "legal" for now
+      if (pnum_be == 0) continue;
+      const uint32_t file_pg_off = data_pages + (pnum_be - 1) * page_size;
+      uint32_t copy_bytes = page_size;
+      if (pnum_be == total_pages && last_page_sz != 0)
+        copy_bytes = last_page_sz;
+      const uint32_t dst_off = p * page_size;
+      if (dst_off + copy_bytes > o.virt_size)
+        copy_bytes = o.virt_size - dst_off;
+      for (uint32_t j = 0; j < copy_bytes; ++j) {
+        if (file_pg_off + j >= f.size()) break;
+        mem_writeb(o.host_seg * 16u + dst_off + j, f[file_pg_off + j]);
+      }
+    }
+    objects.push_back(o);
+  }
+  return true;
+}
+
 // Load an MZ .EXE at the given PSP segment (image goes at psp_seg + 0x10).
 bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   const uint16_t load_seg = psp_seg + 0x10;
@@ -3287,10 +3385,26 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
         && ((f[le_off] == 'L' && f[le_off + 1] == 'E') ||
             (f[le_off] == 'L' && f[le_off + 1] == 'X'))) {
       load_le_inspect(path, f, le_off);
+      std::vector<LeObject> objects;
+      if (!s_mcb_initialised) mcb_init();
+      if (le_load_objects(f, le_off, objects)) {
+        std::fprintf(stderr, "dosemu: LE objects loaded to host segments:\n");
+        for (size_t i = 0; i < objects.size(); ++i) {
+          std::fprintf(stderr,
+                       "  obj %zu: host_seg=0x%04x size=0x%x %s %s\n",
+                       i + 1, objects[i].host_seg, objects[i].virt_size,
+                       objects[i].is_code ? "CODE" : "DATA",
+                       objects[i].is_big ? "32-bit" : "16-bit");
+        }
+      }
       std::fprintf(stderr,
-          "dosemu: %s is LE/LX -- DOS4G/W-style PM binary; executing an "
-          "LE image requires PM-descriptor setup + entry, not yet wired\n",
+          "dosemu: %s is LE/LX -- pages copied into MCB-allocated host "
+          "segments, but executing still requires fixup pass + PM-entry "
+          "descriptor setup (follow-up work).\n",
           path.c_str());
+      // Free objects we allocated -- caller doesn't know to.
+      for (auto &o : objects)
+        if (o.host_seg) mcb_free(o.host_seg);
       return false;
     }
   }
