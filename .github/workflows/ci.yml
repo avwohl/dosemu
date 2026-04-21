@@ -149,6 +149,16 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-reflect=ok'
 
+      - name: DPMI stage 6b: AX=0503 resize memory block (shrink + grow)
+        run: |
+          # Alloc 256 bytes, shrink to 64 (in-place split), grow back to
+          # 128 (reclaims the freshly-split free tail).  AX=0503 returns
+          # the same handle + base on in-place ops; a real DPMI spec
+          # host may relocate on grow but we explicitly don't.
+          out=$(build/dosemu tests/DPMI_STAGE6B.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stage6b=ok'
+
       - name: DPMI reflection (32-bit): INT 10h AH=0F from 32-bit PM
         run: |
           # Same as DPMI_REFLECT.COM but enters PM with AX=1 (32-bit).

@@ -1273,6 +1273,39 @@ Bitu dosemu_int31() {
       return CBRET_NONE;
     }
 
+    case 0x0503: {  // Resize memory block
+      // Input:  SI:DI = handle, BX:CX = new size in bytes.
+      // Output: BX:CX = linear address of the (possibly-relocated) block.
+      //         SI:DI = new handle.  We only resize in place, so handle
+      //         and base are unchanged on success -- the spec allows a
+      //         host to relocate on grow; we just fail instead.
+      if (reg_si != 0 || reg_di < MCB_ARENA_START || reg_di >= MCB_ARENA_END) {
+        reg_ax = 0x8023; set_cf(true); return CBRET_NONE;
+      }
+      const uint32_t new_bytes = (static_cast<uint32_t>(reg_bx) << 16) | reg_cx;
+      if (new_bytes == 0) {
+        reg_ax = 0x8021; set_cf(true); return CBRET_NONE;
+      }
+      const uint32_t new_paras32 = (new_bytes + 15u) >> 4;
+      if (new_paras32 > 0xFFFFu) {
+        reg_ax = 0x8012; set_cf(true); return CBRET_NONE;
+      }
+      uint16_t largest = 0;
+      const uint16_t got = mcb_resize(reg_di,
+          static_cast<uint16_t>(new_paras32), largest);
+      if (got != new_paras32) {
+        reg_ax = 0x8012;       // couldn't satisfy the new size
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const uint32_t linear = static_cast<uint32_t>(reg_di) * 16u;
+      reg_bx = (linear >> 16) & 0xFFFF;
+      reg_cx = linear & 0xFFFF;
+      // SI:DI unchanged (in-place resize = same handle).
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
     default:
       reg_ax = 0x8001;
       set_cf(true);
