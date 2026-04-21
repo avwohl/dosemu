@@ -21,9 +21,15 @@ Includes:
 
 ## Phase 2 — Headless / CLI integration ✅ (basic)
 
-SDL window suppressed by default via `SDL_VIDEODRIVER=dummy`.  Audio
-disabled via `SDL_AUDIODRIVER=dummy` + `[mixer] nosound=true`.  Use
-`--window` to get a normal SDL window for graphical programs.
+SDL window suppressed by default via `SDL_VIDEODRIVER=offscreen`.  Audio
+disabled via `SDL_AUDIODRIVER=dummy` + `[mixer] nosound=true`.  Mouse
+disabled in headless mode (offscreen driver can't capture).  Dosbox
+stderr redirected to /dev/null unless `--verbose`.  Use `--window` to
+get a normal SDL window for graphical programs.
+
+Verified end-to-end: `dosemu HELLO.COM` runs a hand-assembled INT 21h
+`.COM` file, and `ECHO foo > OUT.TXT` creates `OUT.TXT` visible to the
+host.
 
 Still open:
 - [ ] Surface DOS text-mode VRAM to stdout in real time (so a DOS compiler's

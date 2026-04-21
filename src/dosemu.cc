@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -132,6 +133,15 @@ int main(int argc, char **argv) {
     // renderer and panics on dummy.
     if (cfg.headless) setenv("SDL_VIDEODRIVER", "offscreen", 1);
     setenv("SDL_AUDIODRIVER", "dummy", 1);
+    // In headless mode, dosbox prints a steady stream of startup/shutdown
+    // log lines to stderr.  Suppress unless the user asked for --verbose.
+    if (cfg.headless && cfg.verbose == 0) {
+      int devnull = open("/dev/null", O_WRONLY);
+      if (devnull >= 0) {
+        dup2(devnull, STDERR_FILENO);
+        if (devnull > STDERR_FILENO) close(devnull);
+      }
+    }
     execvp(dosbox.c_str(), const_cast<char *const *>(cargv.data()));
     std::perror("dosemu: execvp");
     _exit(127);
