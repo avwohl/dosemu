@@ -3794,11 +3794,21 @@ bool le_apply_fixups(const std::vector<uint8_t> &f, size_t le_off,
                        src_type);
           break;
       }
-      std::fprintf(stderr,
-          "dosemu: LE fixup: page %u off 0x%04x type 0x%02x -> "
-          "obj%u+0x%x = 0x%08x (at host 0x%05x)\n",
-          page_1based, src_off_s & 0xFFFF, src_type,
-          tgt_obj, tgt_off, target_linear, src_addr);
+      // Per-fixup output: always print the first 16 (plenty for
+      // LE_MIN.EXE and for spotting early fixup-walker regressions);
+      // suppress the rest unless DOSEMU_TRACE is set.  Real LE
+      // binaries (wd.exe, vi.exe) have 13000+ fixups each.
+      if (total_fixups < 16 || std::getenv("DOSEMU_TRACE")) {
+        std::fprintf(stderr,
+            "dosemu: LE fixup: page %u off 0x%04x type 0x%02x -> "
+            "obj%u+0x%x = 0x%08x (at host 0x%05x)\n",
+            page_1based, src_off_s & 0xFFFF, src_type,
+            tgt_obj, tgt_off, target_linear, src_addr);
+      } else if (total_fixups == 16) {
+        std::fprintf(stderr,
+            "dosemu: LE fixup: (further entries suppressed; rerun "
+            "with DOSEMU_TRACE=1 for the full list)\n");
+      }
       ++total_fixups;
     }
   }
