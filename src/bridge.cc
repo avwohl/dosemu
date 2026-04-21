@@ -974,6 +974,55 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
+    case 0x38: {  // Get/set country info.  AL=0 DS:DX -> 32-byte buffer.
+                  // Report US defaults; real programs use this for date,
+                  // currency, and list-separator formatting.
+      if (reg_al != 0) { return_error(0x01); break; }
+      const PhysPt buf = SegValue(ds) * 16u + reg_dx;
+      for (int i = 0; i < 32; ++i) mem_writeb(buf + i, 0);
+      mem_writew(buf + 0, 0);       // date format MM/DD/YY
+      mem_writeb(buf + 2, '$');     // currency symbol "$"
+      mem_writeb(buf + 7, ',');     // thousands separator
+      mem_writeb(buf + 9, '.');     // decimal separator
+      mem_writeb(buf + 11, '/');    // date separator
+      mem_writeb(buf + 13, ':');    // time separator
+      mem_writeb(buf + 15, 0);      // currency format: symbol prefix, no space
+      mem_writeb(buf + 16, 2);      // currency decimal digits
+      mem_writeb(buf + 17, 0);      // time format: 12-hour
+      reg_bx = 1;                   // country code 1 = US
+      set_cf(false);
+      return CBRET_NONE;
+    }
+
+    case 0x43: {  // Get/set file attributes.  DS:DX = path, AL: 0 get, 1 set.
+      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string host_path = dos_to_host(dos_path);
+      if (reg_al == 0) {
+        struct stat st;
+        if (::stat(host_path.c_str(), &st) != 0) { return_error(0x02); break; }
+        uint16_t attr = 0;
+        if (S_ISDIR(st.st_mode))         attr |= 0x10;   // directory
+        if (!(st.st_mode & S_IWUSR))     attr |= 0x01;   // read-only
+        reg_cx = attr;
+        set_cf(false);
+        return CBRET_NONE;
+      }
+      if (reg_al == 1) {
+        // Set attributes: honour read-only bit, ignore hidden/system/archive.
+        struct stat st;
+        if (::stat(host_path.c_str(), &st) == 0) {
+          mode_t m = st.st_mode;
+          if (reg_cx & 0x01) m &= ~(S_IWUSR | S_IWGRP | S_IWOTH);
+          else               m |= S_IWUSR;
+          ::chmod(host_path.c_str(), m);
+        }
+        set_cf(false);
+        return CBRET_NONE;
+      }
+      return_error(0x01);
+      break;
+    }
+
     case 0x44: {  // IOCTL.  Only AL=0 (get device info) minimally supported.
       if (reg_al == 0x00) {
         // Report "file" (no device flag) for our handles.  Real DOS sets
@@ -1037,6 +1086,47 @@ Bitu dosemu_int21() {
       s_exit_code = reg_al;
       shutdown_requested = true;
       return CBRET_STOP;
+    }
+
+    case 0x6C: {  // Extended open/create.  BX=mode, CX=attr, DX=action,
+                  // DS:SI=path.  Returns AX=handle, CX=action-taken
+                  // (1=opened, 2=created, 3=truncated).
+      const std::string dos_path = read_dos_string(SegValue(ds), reg_si);
+      const Resolved    r        = resolve_path(dos_path);
+      const bool exists = (::access(r.host_path.c_str(), F_OK) == 0);
+      const uint16_t action = reg_dx;
+      const bool open_existing = (action & 0x01) != 0;
+      const bool truncate_existing = (action & 0x02) != 0;
+      const bool create_new    = (action & 0x10) != 0;
+
+      if (exists && !open_existing && !truncate_existing) {
+        return_error(0x50);  // file already exists
+        break;
+      }
+      if (!exists && !create_new) {
+        return_error(0x02);  // file not found
+        break;
+      }
+
+      int flags = O_RDONLY;
+      switch (reg_bx & 0x07) {
+        case 0: flags = O_RDONLY; break;
+        case 1: flags = O_WRONLY; break;
+        case 2: flags = O_RDWR;   break;
+      }
+      uint16_t action_taken;
+      if (!exists) { flags |= O_CREAT; action_taken = 2; }
+      else if (truncate_existing) { flags |= O_TRUNC; action_taken = 3; }
+      else { action_taken = 1; }
+
+      int fd = ::open(r.host_path.c_str(), flags, 0644);
+      if (fd < 0) { return_error(0x05); break; }
+      int h = allocate_handle(fd, r.text_mode);
+      if (h < 0) { ::close(fd); return_error(0x04); break; }
+      reg_ax = static_cast<uint16_t>(h);
+      reg_cx = action_taken;
+      set_cf(false);
+      return CBRET_NONE;
     }
 
     default:

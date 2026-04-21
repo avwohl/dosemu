@@ -22,16 +22,22 @@ handled entirely by C++ host code. Currently implemented:
 	07  stdin char no-echo 19  get drive          40  write handle
 	08  stdin char no-echo 1A  set DTA            41  unlink
 	09  print string       25  set int vector     42  seek handle
-	0A  buffered input     29  parse filename     44  ioctl (basic)
-	2A  get date           2C  get time           47  get cwd
-	30  get DOS version    33  ctrl-break         48  alloc (MCB)
-	35  get int vector     37  switchar           49  free + coalesce
-	39  mkdir              3A  rmdir              4A  resize (MCB)
-	3B  chdir              3C  create handle      4B  exec (stub err)
-	3D  open handle        4C  exit               4E  findfirst
-	4F  findnext           50  set PSP            51  get PSP
-	56  rename             5D  network (stub)     62  get PSP
-	63  lead-byte (stub)
+	0A  buffered input     29  parse filename     43  get/set attr
+	2A  get date           2C  get time           44  ioctl (basic)
+	30  get DOS version    33  ctrl-break         47  get cwd
+	35  get int vector     37  switchar           48  alloc (MCB)
+	38  country info       39  mkdir              49  free + coalesce
+	3A  rmdir              3B  chdir              4A  resize (MCB)
+	3C  create handle      3D  open handle        4B  exec (stub err)
+	4C  exit               4E  findfirst          4F  findnext
+	50  set PSP            51  get PSP            56  rename
+	5D  network (stub)     62  get PSP            63  lead-byte (stub)
+	6C  extended open
+
+INT 31h installed as DPMI denial stub (CF=1 / AX=8001h "unsupported"),
+INT 2Fh's default handler correctly reports "no DPMI" for the AX=1687h
+probe.  See `.claude/.../dpmi_plan.md` for the staged implementation
+path.
 
 PSP:[2Ch] points at an env block populated with `COMSPEC`, `PATH`, and
 whichever of `HOME`/`USER`/`TMPDIR`/`LANG` are set on the host, followed
