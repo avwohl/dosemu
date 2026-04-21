@@ -218,6 +218,19 @@ jobs:
             echo "FAIL: missing program should exit non-zero"; exit 1
           fi
 
+      - name: Smoke (AH=42h seek -> size reporting via SIZE.COM)
+        run: |
+          workdir=$(mktemp -d)
+          printf 'hello, world!' > "$workdir/small.bin"   # 13 bytes
+          cat > "$workdir/r.cfg" <<EOF
+          program = $GITHUB_WORKSPACE/tests/SIZE.COM
+          args = small.bin
+          drive_C = $workdir
+          EOF
+          out=$(build/dosemu "$workdir/r.cfg" 2>/dev/null)
+          echo "$out"
+          echo "$out" | grep -qx 'size=13'
+
       - name: Smoke (sidecar .cfg auto-loads next to executable)
         run: |
           workdir=$(mktemp -d)
