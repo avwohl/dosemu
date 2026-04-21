@@ -81,6 +81,17 @@ jobs:
           echo "dosemu output: $out"
           echo "$out" | grep -q 'dpmi-stage5=hello-from-pm'
 
+      - name: DPMI stage 5 (32-bit PM): INT 21h from 32-bit client reflects
+        run: |
+          # Same flow as the 16-bit fixture, but the client entered PM with
+          # AX=1 so CS has D=1 and the IDT gate is a 32-bit interrupt gate.
+          # Requires the IRETD callback stub (`66 CF`) to unwind the 12-byte
+          # frame the 32-bit gate pushes -- a 16-bit IRET pops CS from the
+          # high half of EIP (=0 = null descriptor) and the emulator aborts.
+          out=$(build/dosemu tests/DPMI_STAGE5_32.COM 2>/dev/null)
+          echo "dosemu output: $out"
+          echo "$out" | grep -q 'dpmi-stage5-32=hello-from-pm32'
+
       - name: Baseline (INT 31h denial stub returns CF=1 / AX=8001h)
         run: |
           out=$(build/dosemu tests/DPMI_INT31.COM 2>/dev/null)

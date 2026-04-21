@@ -618,8 +618,17 @@ constexpr uint16_t IDT_LIMIT  = 0x7FF;        // 256 entries * 8 bytes - 1
 // from protected-mode clients routes through the same host-C++ handler
 // (memory accesses use SegPhys(), which returns the descriptor base in PM
 // and seg*16 in RM -- transparent to the caller).
-uint16_t s_int21_cb_seg = 0;
-uint16_t s_int21_cb_off = 0;
+//
+// Two callbacks exist because the IRET at the end of the stub is
+// size-sensitive: a 32-bit DPMI entry installs a 32-bit IDT gate which
+// pushes a 32-bit EIP/CS/EFLAGS frame, and the stub must end in IRETD
+// (`66 CF`) to pop it correctly; the 16-bit path ends in plain IRET
+// (`CF`).  Both stubs run in the 16-bit compatibility selector 0x28 and
+// dispatch to the same native dosemu_int21 handler.
+uint16_t s_int21_cb_seg    = 0;
+uint16_t s_int21_cb_off    = 0;
+uint16_t s_int21_cb32_seg  = 0;
+uint16_t s_int21_cb32_off  = 0;
 
 void write_gdt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32 = false) {
@@ -690,9 +699,17 @@ Bitu dosemu_dpmi_entry() {
 
   // Build IDT: zero all 256 entries, install INT 21h at the requested
   // bitness.  CLI'd by the fixture/client -- other vectors would fault.
+  //
+  // The stub offset differs by bitness: the 16-bit stub ends in plain
+  // IRET (matches a 16-bit gate's 6-byte stack frame), the 32-bit stub
+  // ends in IRETD (matches a 32-bit gate's 12-byte frame).  Pointing a
+  // 32-bit gate at the 16-bit stub worked for the INT itself but faulted
+  // on the way out -- IRET popped CS from the high half of EIP (=0, the
+  // null descriptor).  Hence s_int21_cb32_off for 32-bit clients.
+  const uint16_t int21_cb_off = bits32 ? s_int21_cb32_off : s_int21_cb_off;
   for (int i = 0; i < 256; ++i) write_idt_gate(i, 0, 0, bits32);
-  if (s_int21_cb_seg || s_int21_cb_off)
-    write_idt_gate(0x21, PM_CB_SEL, s_int21_cb_off, bits32);
+  if (int21_cb_off)
+    write_idt_gate(0x21, PM_CB_SEL, int21_cb_off, bits32);
   CPU_LIDT(IDT_LIMIT, IDT_SEG * 16u);
 
   // Replace the stacked return-address CS with our PM code selector so the
@@ -1652,6 +1669,22 @@ void dosemu_startup() {
     const RealPt rp = int21_cb.Get_RealPointer();
     s_int21_cb_seg = static_cast<uint16_t>((rp >> 16) & 0xFFFF);
     s_int21_cb_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
+
+  // Second callback: same native handler, but the dosbox-emitted stub
+  // ends in IRETD (`66 CF`) so it can correctly unwind the 12-byte
+  // frame a 32-bit IDT gate pushes.  Used only by the 32-bit DPMI PM
+  // path; real-mode INT 21h still goes through CB_INT21 above.  The
+  // stub runs in the 16-bit CB_SEG selector (0x28): `66 CF` in 16-bit
+  // CS is IRETD, same bytes in a 32-bit CS would be plain IRET, so we
+  // deliberately keep the selector 16-bit and let the 66 prefix force
+  // the 32-bit pop.
+  CALLBACK_HandlerObject int21_cb32;
+  int21_cb32.Install(&dosemu_int21, CB_IRETD, "dosemu Int 21 (32-bit PM)");
+  {
+    const RealPt rp = int21_cb32.Get_RealPointer();
+    s_int21_cb32_seg = static_cast<uint16_t>((rp >> 16) & 0xFFFF);
+    s_int21_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
   }
 
   // Explicit INT 31h denial stub (DPMI stage 1 -- see dpmi_plan.md).

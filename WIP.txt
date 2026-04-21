@@ -78,8 +78,11 @@ DPMI stage status
     Stage 5 ✓  INT 21h from 16-bit PM reflects to host via IDT interrupt
                gate at 0x1A00 + GDT selector 0x28 for CB_SEG.  Handler uses
                SegPhys() so addressing works in either mode.
-    Stage 5'  ✓ 32-bit PM infrastructure (D-flag descriptors + type 0x8E
-               gates) but no 32-bit-specific fixture yet.
+    Stage 5'  ✓ 32-bit PM end-to-end: DPMI_STAGE5_32.COM enters PM with
+               AX=1, executes 32-bit-encoded code, does INT 21h through a
+               32-bit IDT gate, and exits via AH=4C.  Required a second
+               INT 21h callback installed with CB_IRETD (`66 CF`) so the
+               stub unwinds the 12-byte frame a 32-bit gate pushes.
     Stage 6 ✗  PM linear memory allocation (INT 31h AX=0501-0503). NOT STARTED.
     Stage 7 ✗  DJGPP hello.exe end-to-end. BLOCKED on 4+6.
 
@@ -152,9 +155,11 @@ A. Stage 4 minimum: AX=0400 (version), AX=0006/0007 (get/set seg base).
 B. Stage 6 minimum: AX=0501 returning an MCB-allocated region as a
    32-bit linear address.
 
-C. A hand-assembled 32-bit PM NASM fixture that exercises stage 5'
-   (32-bit interrupt gate path).  Would be the first 32-bit PM
-   fixture in CI.
+C. (done 2026-04-21) 32-bit PM fixture DPMI_STAGE5_32.COM exercises
+   the 32-bit interrupt-gate path end-to-end and is wired into CI.
+   While building it, uncovered + fixed that a 16-bit IRET stub can't
+   unwind the 12-byte frame a 32-bit gate pushes -- added a CB_IRETD
+   callback for the 32-bit path.
 
 D. Skip DPMI work temporarily: AH=4Bh load-and-execute so DOS4GW
    binaries can spawn their extender child.  Medium-large; needs CPU
@@ -166,8 +171,8 @@ E. Find a non-spawning DPMI client.  Open Watcom ships DOS32A which is
    standalone DJGPP program (built elsewhere) linked against CWSDPMI
    stub would be ideal.
 
-Recommended order: C (validate 32-bit infra) → A + B (real INT 31h
-services) → E or built-DJGPP → iterate.
+Recommended order: A + B (real INT 31h services) → E or built-DJGPP
+→ iterate.
 
 
 Fixture inventory (CI covers all these)
@@ -187,7 +192,8 @@ Fixture inventory (CI covers all these)
     DPMI_PROBE.COM           -- INT 2Fh AX=1687h -> "dpmi=present"
     DPMI_INT31.COM           -- INT 31h AX=0400 -> CF=1/AX=8001h denial
     DPMI_STAGE3.COM          -- enters PM, spins.  CI asserts no fatal abort.
-    DPMI_STAGE5.COM          -- INT 21h from PM → prints + exits.
+    DPMI_STAGE5.COM          -- INT 21h from 16-bit PM → prints + exits.
+    DPMI_STAGE5_32.COM       -- INT 21h from 32-bit PM → prints + exits.
     HELLO_W.EXE              -- Open Watcom 16-bit hello (cross-compiled)
     HELLO_B.COM              -- bcc 0.16.21 hello (cross-compiled)
     EXE2BIN.EXE              -- real Open Watcom DOS-hosted utility
