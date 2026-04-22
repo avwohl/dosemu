@@ -1114,10 +1114,25 @@ Bitu dosemu_dpmi_entry() {
     // gets the expected answer).  Slots 1..4 are a conventional
     // "starter set" per CWSDPMI's l_acode / l_adata / l_apsp.
     const uint16_t client_ip = mem_readw(SegValue(ss) * 16u + reg_sp);
-    const uint16_t cs_base  = client_cs  * 16u;
-    const uint16_t ds_base  = SegValue(ds) * 16u;
-    const uint16_t ss_base  = SegValue(ss) * 16u;
-    const uint16_t es_base  = SegValue(es) * 16u;
+    // These bases MUST be uint32_t.  uint16_t truncates for any RM segment
+    // value >= 0x1000 (since seg*16 then >= 0x10000) -- observed with
+    // DJGPP go32-v2 whose ES at DPMI entry was 0x2001, giving a truncated
+    // LDT[4] base of 0x0010 (= 0x20010 & 0xFFFF).  That sent DJGPP libc's
+    // psp_selector:0x2C reads into the RM IVT instead of the PSP, producing
+    // the 0xF4 DS-load mystery documented in the prior session.
+    const uint32_t cs_base  = client_cs  * 16u;
+    const uint32_t ds_base  = SegValue(ds) * 16u;
+    const uint32_t ss_base  = SegValue(ss) * 16u;
+    const uint32_t es_base  = SegValue(es) * 16u;
+    if (std::getenv("DOSEMU_DPMI_TRACE")) {
+      std::fprintf(stderr,
+          "[dpmi-entry] cs=%04x ip=%04x ds=%04x ss=%04x es=%04x sp=%04x -> bases "
+          "cs=%08x ds=%08x ss=%08x es=%08x\n",
+          (unsigned)client_cs, (unsigned)client_ip,
+          (unsigned)SegValue(ds), (unsigned)SegValue(ss),
+          (unsigned)SegValue(es), (unsigned)reg_sp,
+          cs_base, ds_base, ss_base, es_base);
+    }
 
     CPU_SET_CRX(0, 0x00000001);      // PE=1
     CPU_LLDT(PM_LDT_SEL);
@@ -1680,6 +1695,14 @@ Bitu dosemu_pm_exc_dispatch(int vec) {
     outer_ss  = static_cast<uint16_t>(mem_readd(r0_fp + 16) & 0xFFFF);
   }
 
+  if (std::getenv("DOSEMU_EXC_TRACE")) {
+    static int seq = 0;
+    std::fprintf(stderr,
+        "[exc#%d] vec=%d cs:eip=%04x:%08x err=0x%x outer_ss:esp=%04x:%08x eflags=%08x\n",
+        seq++, vec, (unsigned)cs_val, eip, err,
+        (unsigned)outer_ss, outer_esp, eflags);
+  }
+
   // Recursion guard.  If the user handler's exit cleanup re-faults
   // on the same vector at the same (or nearby) EIP, we're in an
   // infinite-dispatch loop that'd never terminate otherwise
@@ -2064,6 +2087,13 @@ inline bool selector_is_valid(uint16_t sel) {
 // slot) and AX=0002 (installs a real-mode-segment alias).
 void write_ldt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32) {
+  if (std::getenv("DOSEMU_LDT_TRACE")) {
+    std::fprintf(stderr,
+        "[ldt-write] LDT[%d] sel=0x%04x base=0x%08x limit=0x%08x access=0x%02x "
+        "bits32=%d (client cs:eip=%04x:%08x)\n",
+        idx, (unsigned)((idx << 3) | 0x07), base, limit, access, bits32,
+        (unsigned)SegValue(cs), (unsigned)reg_eip);
+  }
   const PhysPt p = LDT_BASE + idx * 8u;
   mem_writeb(p + 0, limit & 0xFF);
   mem_writeb(p + 1, (limit >> 8) & 0xFF);

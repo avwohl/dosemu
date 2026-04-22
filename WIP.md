@@ -37,6 +37,44 @@ Smoke tests green on arm64 Darwin:
 - A fresh-compiled djecho reaches the exact same `0xF4` DS-load state
   described below (see "the remaining mystery").
 
+## 0xF4 mystery SOLVED (2026-04-22, arm64 Mac)
+
+Traced via PSP[0x2C]/stubinfo/LDT dumps from inside the PM-exception
+dispatcher (env-gated debug: `DOSEMU_EXC_TRACE`, `DOSEMU_DPMI_TRACE`,
+`DOSEMU_LDT_TRACE`).
+
+**Root cause**: `dosemu_dpmi_entry`'s computation of the "starter set"
+LDT descriptor bases used `uint16_t` for `cs_base`/`ds_base`/`ss_base`/
+`es_base` (= RM_seg * 16).  Any RM segment value >= 0x1000 produces
+`seg*16 >= 0x10000`, which overflows uint16 and silently truncates.
+
+Observed with DJGPP go32-v2: at the DPMI entry far-call, its ES register
+held 0x2001 (a pre-allocated DOS block).  `0x2001 * 16 = 0x20010`, but
+uint16 truncated it to `0x0010`.  That made LDT[4] (the "psp_selector"
+per stubinfo[+0x26]) alias linear 0x0010..0x1000F -- i.e. the RM IVT.
+DJGPP libc's `_setup_environment` then did:
+
+    movedata(psp_selector, 0x2C, DS, local, 2);   // read PSP[0x2C]
+    movedata(*local, 0, DS, env_buf, env_size);   // copy env
+
+The first call reads from linear 0x3C = IVT[0x0F] low word, which holds
+`0x00F4` on the BIOS/IVT we expose.  DJGPP then used `0xF4` as a DPMI
+selector in the second call, producing the `#GP(err=0xF4)` documented
+in the prior session.
+
+**Fix (one-line effect, 4 lines of type changes)**: widen the four
+`_base` vars from `uint16_t` to `uint32_t`.  Now LDT[4] aliases
+0x20010 as go32-v2 intended, PSP[0x2C] reads no longer hit the IVT,
+and the 0xF4 GP is gone.
+
+**Next failure surfaced**: a new first-fault at `cs:eip=000f:0x0022
+err=0x400` very early in the go32-v2 stub's PM init.  This is a
+different bug that was previously masked -- with LDT[4] aliasing
+the IVT, go32-v2 was reading random IVT bytes that happened to keep
+the state machine alive until libc's movedata.  With the correct
+alias, an earlier code path in the stub now takes a real fault.
+That fault is the next investigation item.
+
 ## Watchpoint data point on [DS:0x19370] (2026-04-22, arm64 Mac)
 
 Added `mem_writed_inline` hook on linear `0x139370` (= client DS base
