@@ -1,5 +1,31 @@
 # dosemu WIP — end of session 2026-04-22 (DJGPP push + first green CI)
 
+## Current DJGPP state
+
+All 37 local fixtures + full 60-step CI pipeline green.  `djecho.exe`
+and `djasm.exe` now run through:
+ 1. go32 stub's DPMI init (all INT 31h calls succeed).
+ 2. COFF load + entry to COFF runtime.
+ 3. First SIGSEGV in DJGPP libc (DS=0xF4 / `mov ds, [ebp+8]` in a
+    movedata wrapper).
+ 4. DJGPP's PM signal handler runs **end-to-end**: prints the full
+    register dump with faulting eip/regs, selector dumps (base/limit
+    for cs/ds/es/fs/gs/ss), app-stack range, exception-stack range,
+    and call-frame traceback.
+ 5. Handler's exit cleanup re-faults (currently on a BOUND check at
+    0x7724, previously on `cli` at 0x1ACC / `mov ds, 0x37` at 0x7775).
+ 6. Recursion guard (5-same-fault threshold) catches the loop.
+ 7. dosemu exits rc=0 with readable SIGSEGV diagnostic on stderr.
+
+The cascade of fixes that got us here:
+
+    commit 09fd59b  CWSDPMI-style exception dispatch (+ring-3 CB alias)
+    commit 18d17bd  PM_CB_STACK descriptor D=1 (reg_esp truncation)
+    commit f00bd10  AX=0002 cache RPL fix + recursion guard
+    commit 2bafe81  IOPL=3 in initial EFLAGS + AX=0001 don't-zero-descriptor
+
+## CI: first fully green run in repo history
+
 ## CI: first fully green run in repo history
 
 Run `24779875503` (tag `ci-exe2bin-rc`, 2026-04-22) -- **60 steps,
