@@ -761,17 +761,42 @@ uint16_t                s_dpmi_entry_off    = 0;
 //   - no memory allocation: INT 31h AX=0501 et al. return "unsupported".
 //   - 32-bit (AX=1) entry handled like 16-bit for now.
 constexpr uint16_t GDT_SEG    = 0x1800;       // physical 0x18000
-constexpr uint16_t GDT_LIMIT  = 0x4F;         // 10 entries * 8 bytes - 1
-constexpr uint16_t PM_CS_SEL   = 0x08;
-constexpr uint16_t PM_DS_SEL   = 0x10;
-constexpr uint16_t PM_SS_SEL   = 0x18;
-constexpr uint16_t PM_ES_SEL   = 0x20;
-constexpr uint16_t PM_CB_SEL   = 0x28;        // selector for dosbox's CB_SEG
-constexpr uint16_t PM_LDT_SEL  = 0x30;        // GDT[6]: LDT descriptor itself
-constexpr uint16_t PM_SHIM_SEL   = 0x38;      // GDT[7]: 32-bit reflection shim area
-constexpr uint16_t PM_CB_STACK   = 0x40;      // GDT[8]: PM scratch stack for AX=0303 callbacks
-constexpr uint16_t PM_CB_STACK_SEG  = 0x1E00; // physical 0x1E000, 4KB
+// GDT layout: 16 entries.  First 9 are the historical ring-0 DPMI
+// selectors.  Remaining 7 are additions for CWSDPMI-style ring-3
+// operation (DOSEMU_DPMI_RING3=1): TSS for inter-ring transitions,
+// ring-3 aliases of code/data/stack, ring-3 scratch stack.  The
+// ring-3 entries are populated at DPMI-entry time only when the
+// flag is set; ring-0 path ignores them.
+constexpr uint16_t GDT_LIMIT  = 0x7F;         // 16 entries * 8 bytes - 1
+constexpr uint16_t PM_CS_SEL   = 0x08;        // ring-0 client code (legacy)
+constexpr uint16_t PM_DS_SEL   = 0x10;        // ring-0 client data
+constexpr uint16_t PM_SS_SEL   = 0x18;        // ring-0 client stack
+constexpr uint16_t PM_ES_SEL   = 0x20;        // ring-0 PSP/ES
+constexpr uint16_t PM_CB_SEL   = 0x28;        // CB_SEG 16-bit code
+constexpr uint16_t PM_LDT_SEL  = 0x30;        // GDT[6]: LDT descriptor
+constexpr uint16_t PM_SHIM_SEL = 0x38;        // GDT[7]: 32-bit reflection shim code
+constexpr uint16_t PM_CB_STACK = 0x40;        // GDT[8]: PM scratch stack (callbacks)
+constexpr uint16_t PM_CB_STACK_SEG  = 0x1E00;
 constexpr uint32_t PM_CB_STACK_SIZE = 0x1000;
+// Ring-3 DPMI additions (GDT slots 9..15).  Selector values include
+// the DPL-3 encoding: `idx*8 | 3`.  For example PM_CS3_SEL = 0x50+3
+// = 0x53; the RPL is baked in so the selector itself specifies ring.
+constexpr uint16_t PM_TSS_SEL  = 0x48;        // GDT[9]:  TSS descriptor (DPL=0)
+constexpr uint16_t PM_CS3_SEL  = 0x53;        // GDT[10]: ring-3 code (DPL=3)
+constexpr uint16_t PM_DS3_SEL  = 0x5B;        // GDT[11]: ring-3 data (DPL=3)
+constexpr uint16_t PM_SS3_SEL  = 0x63;        // GDT[12]: ring-3 stack (DPL=3)
+constexpr uint16_t PM_ES3_SEL  = 0x6B;        // GDT[13]: ring-3 ES/PSP (DPL=3)
+// GDT[14..15] reserved for future BIOS-data / aux selectors.
+
+// TSS lives at fixed physical address.  Only SS0:ESP0 field matters
+// for our ring-3 use (ring-3 -> ring-0 stack switch on interrupts).
+constexpr uint16_t TSS_SEG   = 0x1F00;         // physical 0x1F000
+constexpr uint32_t TSS_SIZE  = 104;            // 32-bit TSS minimum
+// Ring-0 stack: reuse CB_STACK area (4KB) that's otherwise used for
+// AX=0303 callback scratch.  During a ring-3-client ring transition
+// the CPU will load SS=PM_SS_SEL, ESP=PM_CB_STACK_SEG*16+PM_CB_STACK_SIZE.
+constexpr uint32_t PM_RING0_STACK_TOP =
+    static_cast<uint32_t>(PM_CB_STACK_SEG) * 16u + PM_CB_STACK_SIZE;
 
 // 32-bit PM reflection shims.  Each slot is an 8-byte 16-bit code
 // sequence that re-invokes the dosbox native callback for a real-mode
@@ -885,6 +910,32 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   write_gdt_descriptor(6, LDT_SEG * 16u, LDT_BYTES - 1, 0x82);
   write_gdt_descriptor(7, PM_SHIM_SEG * 16u, PM_SHIM_TOTAL - 1, 0x9A);
   write_gdt_descriptor(8, PM_CB_STACK_SEG * 16u, PM_CB_STACK_SIZE - 1, 0x92);
+  // Ring-3 DPMI descriptors.  Populated unconditionally so the GDT
+  // table has consistent state, but only ACTIVATED (via segment
+  // loads + CPU_JMP) on the DOSEMU_DPMI_RING3 path.  Existing ring-0
+  // clients ignore these slots.
+  // TSS: 32-bit TSS (access byte 0x89 = present, DPL=0, system, type 9).
+  write_gdt_descriptor(9, TSS_SEG * 16u, TSS_SIZE - 1, 0x89);
+  // Ring-3 code: access 0xFA = P=1, DPL=3, S=1, type=1010 (code, r).
+  write_gdt_descriptor(10, client_cs * 16, 0xFFFF, 0xFA, bits32);
+  // Ring-3 data: access 0xF2 = P=1, DPL=3, S=1, type=0010 (data, rw).
+  write_gdt_descriptor(11, client_ds * 16, 0xFFFF, 0xF2);
+  // Ring-3 stack (alias of ring-0 stack for now).
+  write_gdt_descriptor(12, client_ss * 16, 0xFFFF, 0xF2);
+  // Ring-3 ES (PSP alias).
+  write_gdt_descriptor(13, client_es * 16, 0xFFFF, 0xF2);
+  // Slots 14..15: zero until needed.
+  write_gdt_descriptor(14, 0, 0, 0);
+  write_gdt_descriptor(15, 0, 0, 0);
+
+  // TSS body: zero-fill, then set SS0=PM_SS_SEL / ESP0=top-of-ring0-stack
+  // so the CPU can switch stacks when transitioning ring 3 -> ring 0 on
+  // an interrupt.  Only those two fields matter for our use.
+  for (uint32_t i = 0; i < TSS_SIZE; ++i)
+    mem_writeb(TSS_SEG * 16u + i, 0);
+  mem_writed(TSS_SEG * 16u + 4, PM_RING0_STACK_TOP);   // ESP0
+  mem_writew(TSS_SEG * 16u + 8, PM_SS_SEL);            // SS0
+
   CPU_LGDT(GDT_LIMIT, GDT_SEG * 16u);
 
   const uint16_t int21_cb_off = bits32 ? s_int21_cb32_off : s_int21_cb_off;
