@@ -120,26 +120,36 @@ is functional under our DPMI host.
    `pushl %ss; ... DPMI(0x0300); ... LEAVEP(... popl %ss; popl %es)`,
    where the macro LEAVEP is from /tmp/djgpp/include/libc/asmdefs.h.)
 
-   Err code = 0xF4.  Decoded: EXT=0, IDT=0, TI=1 (LDT), idx=30.  So
-   the `popl %ss` is trying to load LDT[30] (a selector that isn't
-   allocated) into SS.  The PUSHED value should have been 0x0037
-   (client's DS = SS, since DJGPP's crt0.S does `movw %ds, %dx; movw
-   %dx, %ss` at line 317 during stack setup).  Something corrupted
-   the pushed value on the stack to 0xF4 between `pushl %ss` and
-   `popl %ss`.  The only code that runs between them is our AX=0300
-   (simulate real-mode interrupt) implementation, which does the
-   RM round-trip via CALLBACK_RunRealInt.  Likely culprits:
-     (a) AX=0300 handler modifies client's outer SS:ESP slot in the
-         ring-change frame somehow, so the IRETD pops wrong ESP.
-     (b) Something during the RM phase writes to memory at the
-         client's stack linear address (stack_base + ESP - 4).
-     (c) Our CPU_SetSegGeneral(ss, saved_ss) after the RM call
-         accidentally changes the CLIENT's stack, not our ring-0
-         stack.
-   Next-session starting point: log, for a single AX=0300 call,
-   every memory write in the range [client_outer_ss_base +
-   client_outer_esp - 16, client_outer_ss_base + client_outer_esp]
-   to pinpoint the corruption.
+   The faulting instruction is `8e 5d 08` (`mov ss, [ebp+8]`) -- NOT
+   a `popl %ss`.  This is some function in DJGPP libc that takes a
+   new SS selector as its first argument and loads it.  Err=0xF4
+   decodes to "the passed-in SS value was 0x00F4" (LDT[30], RPL=0),
+   which isn't a valid selector for the client.  So the CALLER of
+   this function passed a bogus SS.
+
+   **AX=0300 ruled out (2026-04-22 end-of-session probe).**
+   Instrumented AX=0300 to checksum the ring-change frame's
+   outer_SS:outer_ESP slots before and after the RM round-trip.
+   Across 303,000+ AX=0300 calls during djecho's run, ZERO frame
+   mutations were observed ("CHANGED!" never fires).  The simulate-
+   RM-INT path preserves the ring-change frame correctly; the
+   corruption is elsewhere.
+
+   Remaining suspects:
+   - AX=0301/0302 (call RM procedure) -- similar mode-switch code,
+     might have a bug AX=0300 doesn't.
+   - AX=0303/0304 (RM callback) -- do_rm_callback runs every time a
+     registered RM IVT vector fires; DJGPP registers timer/kbd/INT 0.
+   - Our PSP / command-line setup feeding DJGPP libc garbage that
+     its exception-dispatch/signal path propagates as a bogus SS.
+     (Register dump shows `program=<**UNKNOWN**>`, i.e. __dos_argv0
+     is NULL.)
+   - A data-segment limit mismatch between our starter LDT[3] SS
+     (set up in dosemu_dpmi_entry with base = client_rm_ss*16) and
+     LDT[7] (the client's eventually-used SS, base = client_memory).
+     DJGPP crt0.S does `movw %ds, %ss` (line 317), but that only
+     switches SELECTOR; if the starter LDT[3] descriptor is ever
+     consulted for something else, base mismatch bites.
 
 2. **Secondary fault in exit path.**  After the handler prints the
    dump it calls `_exit(-1)` -> `__exit` -> INT 21h AH=4C.  Inside
