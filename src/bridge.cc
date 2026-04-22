@@ -4530,14 +4530,22 @@ Bitu dosemu_int21() {
           mem_writeb(base + i++, 1);
           mem_writeb(base + i++, 0);
         }
-        // argv[0] = uppercase "C:\<BASENAME>"
-        const size_t slash = dos_path.find_last_of("/\\:");
-        std::string basename = (slash == std::string::npos)
-                               ? dos_path
-                               : dos_path.substr(slash + 1);
-        for (auto &c : basename)
+        // argv[0] = uppercase full DOS path.  The DJGPP go32-v2 stub
+        // and Watcom DOS/4GW both re-open argv[0] at startup to load
+        // the COFF/LE payload, so stripping the directory here breaks
+        // any child spawned via an absolute or relative-to-root path
+        // (DJGPP spawnlp "C:\TESTS\DJ_WRITE.EXE" -> child looks for
+        // "C:\DJ_WRITE.EXE" and fails).
+        std::string argv0 = dos_path;
+        // Normalise: ensure drive letter + backslashes + uppercase.
+        for (auto &c : argv0) {
+          if (c == '/') c = '\\';
           c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-        std::string argv0 = "C:\\" + basename;
+        }
+        if (argv0.size() < 2 || argv0[1] != ':') {
+          if (!argv0.empty() && argv0.front() == '\\') argv0.erase(0, 1);
+          argv0 = std::string("C:\\") + argv0;
+        }
         for (char c : argv0) {
           if (i >= ENV_BYTES - 1) break;
           mem_writeb(base + i++, static_cast<uint8_t>(c));
