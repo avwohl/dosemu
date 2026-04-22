@@ -961,7 +961,8 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   write_gdt_descriptor(5, 0xF0000, 0xFFFF, 0x9A);                    // cb
   write_gdt_descriptor(6, LDT_BASE, LDT_BYTES - 1, 0x82);
   write_gdt_descriptor(7, PM_SHIM_BASE, PM_SHIM_TOTAL - 1, 0x9A);
-  write_gdt_descriptor(8, PM_CB_STACK_BASE, PM_CB_STACK_SIZE - 1, 0x92);
+  write_gdt_descriptor(8, PM_CB_STACK_BASE, PM_CB_STACK_SIZE - 1, 0x92,
+                       /*bits32=*/true);  // D=1 so reg_esp is 32-bit
   // Ring-3 DPMI descriptors.  Populated unconditionally so the GDT
   // table has consistent state, but only ACTIVATED (via segment
   // loads + CPU_JMP) on the DOSEMU_DPMI_RING3 path.  Existing ring-0
