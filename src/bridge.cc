@@ -274,7 +274,14 @@ std::vector<PmBlock> s_pm_busy;   // allocated blocks, unsorted
 bool     s_pm_initialised = false;
 uint32_t s_pm_end         = 0;    // 1-past-last valid host byte
 
-constexpr uint32_t PM_ARENA_START = 0x100000u;   // 1MB
+// pm_arena for DPMI-allocated linear blocks.  Starts at 1.125MB, leaving
+// the first 128KB of extended memory (0x100000..0x11FFFF) for our kernel
+// structures (GDT/IDT/LDT/TSS/shims/stacks -- see *_BASE constants below).
+// Placing kernel above 1MB is required for ring-3 DPMI: if those tables
+// sit in conventional memory, a ring-3 client's 16-bit RM-aliased selectors
+// (base + 64KB limit) can reach them and overwrite them -- which is exactly
+// what DJGPP's go32 stub does when it zeros its transfer buffer.
+constexpr uint32_t PM_ARENA_START = 0x120000u;   // 1.125MB
 constexpr uint32_t PM_PAGE        = 4096u;
 
 void pm_init() {
@@ -766,7 +773,16 @@ uint16_t                s_dpmi_entry_off    = 0;
 //     back to real mode is stage 5.
 //   - no memory allocation: INT 31h AX=0501 et al. return "unsupported".
 //   - 32-bit (AX=1) entry handled like 16-bit for now.
-constexpr uint16_t GDT_SEG    = 0x1800;       // physical 0x18000
+// Kernel structure bases sit above 1MB so a ring-3 client's 16-bit
+// RM-aliased selectors (max reach = seg_base + 0xFFFF <= 0x10FFEF) cannot
+// overwrite them.  Pre-refactor these were at 0x18000-0x1F000 in
+// conventional memory; DJGPP/go32 corrupted our IDT during startup.
+constexpr uint32_t GDT_BASE        = 0x100000u;
+constexpr uint32_t IDT_BASE        = 0x102000u;
+constexpr uint32_t LDT_BASE        = 0x104000u;
+constexpr uint32_t PM_SHIM_BASE    = 0x106000u;
+constexpr uint32_t PM_CB_STACK_BASE= 0x108000u;
+constexpr uint32_t TSS_BASE        = 0x109000u;
 // GDT layout: 16 entries.  First 9 are the historical ring-0 DPMI
 // selectors.  Remaining 7 are additions for CWSDPMI-style ring-3
 // operation (DOSEMU_DPMI_RING3=1): TSS for inter-ring transitions,
@@ -782,7 +798,6 @@ constexpr uint16_t PM_CB_SEL   = 0x28;        // CB_SEG 16-bit code
 constexpr uint16_t PM_LDT_SEL  = 0x30;        // GDT[6]: LDT descriptor
 constexpr uint16_t PM_SHIM_SEL = 0x38;        // GDT[7]: 32-bit reflection shim code
 constexpr uint16_t PM_CB_STACK = 0x40;        // GDT[8]: PM scratch stack (callbacks)
-constexpr uint16_t PM_CB_STACK_SEG  = 0x1E00;
 constexpr uint32_t PM_CB_STACK_SIZE = 0x1000;
 // Ring-3 DPMI additions (GDT slots 9..15).  Selector values include
 // the DPL-3 encoding: `idx*8 | 3`.  For example PM_CS3_SEL = 0x50+3
@@ -796,13 +811,11 @@ constexpr uint16_t PM_ES3_SEL  = 0x6B;        // GDT[13]: ring-3 ES/PSP (DPL=3)
 
 // TSS lives at fixed physical address.  Only SS0:ESP0 field matters
 // for our ring-3 use (ring-3 -> ring-0 stack switch on interrupts).
-constexpr uint16_t TSS_SEG   = 0x1F00;         // physical 0x1F000
 constexpr uint32_t TSS_SIZE  = 104;            // 32-bit TSS minimum
 // Ring-0 stack: reuse CB_STACK area (4KB) that's otherwise used for
 // AX=0303 callback scratch.  During a ring-3-client ring transition
-// the CPU will load SS=PM_SS_SEL, ESP=PM_CB_STACK_SEG*16+PM_CB_STACK_SIZE.
-constexpr uint32_t PM_RING0_STACK_TOP =
-    static_cast<uint32_t>(PM_CB_STACK_SEG) * 16u + PM_CB_STACK_SIZE;
+// the CPU will load SS=PM_CB_STACK, ESP=PM_CB_STACK_BASE+PM_CB_STACK_SIZE.
+constexpr uint32_t PM_RING0_STACK_TOP = PM_CB_STACK_BASE + PM_CB_STACK_SIZE;
 
 // 32-bit PM reflection shims.  Each slot is an 8-byte 16-bit code
 // sequence that re-invokes the dosbox native callback for a real-mode
@@ -812,20 +825,16 @@ constexpr uint32_t PM_RING0_STACK_TOP =
 //   FE 38 cb_lo cb_hi 66 CF 90 90
 // The `FE 38 LL HH` is dosbox's native-callback opcode with the cb_num
 // copied from the existing RM stub the real-mode IVT points at.
-constexpr uint16_t PM_SHIM_SEG        = 0x1C00;    // physical 0x1C000
 constexpr uint16_t PM_SHIM_SLOT_BYTES = 16;   // fits err-code discard + IRETD
 constexpr uint16_t PM_SHIM_TOTAL      = 256 * PM_SHIM_SLOT_BYTES;
 
-constexpr uint16_t IDT_SEG    = 0x1A00;       // physical 0x1A000
 constexpr uint16_t IDT_LIMIT  = 0x7FF;        // 256 entries * 8 bytes - 1
 
 // LDT for DPMI client-allocated descriptors (INT 31h AX=0000/0001/0002).
-// 256 entries * 8 bytes = 2KB, placed between the IDT and the MCB arena.
+// 256 entries * 8 bytes = 2KB, placed at LDT_BASE above 1MB.
 // Index 0 in the LDT is reserved null, so client selectors start at 0x000C
-// (idx=1, TI=1, RPL=0 -- we run the client at ring 0 to keep the host
-// simple; DPMI spec nominally wants RPL=3 but nothing we care about
-// distinguishes the two in dosbox's PM core).
-constexpr uint16_t LDT_SEG    = 0x1B00;       // physical 0x1B000
+// (idx=1, TI=1, RPL=0 -- ring-0 default; DOSEMU_DPMI_RING3=1 promotes
+// selector RPLs to 3 so clients run at ring 3).
 constexpr uint16_t LDT_BYTES  = 256u * 8u;    // 2KB
 constexpr uint16_t LDT_COUNT  = 256;
 
@@ -874,7 +883,7 @@ inline void ldt_set(uint16_t idx, bool v);
 
 void write_gdt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32 = false) {
-  const PhysPt p = GDT_SEG * 16u + idx * 8u;
+  const PhysPt p = GDT_BASE + idx * 8u;
   mem_writeb(p + 0, limit & 0xFF);
   mem_writeb(p + 1, (limit >> 8) & 0xFF);
   mem_writeb(p + 2, base & 0xFF);
@@ -891,7 +900,7 @@ void write_gdt_descriptor(int idx, uint32_t base, uint32_t limit,
 // control transfers when INT idx fires in PM.  Type byte 0x86 = 16-bit
 // interrupt gate, 0x8E = 32-bit interrupt gate.
 void write_idt_gate(int idx, uint16_t sel, uint32_t off, bool bits32) {
-  const PhysPt p = IDT_SEG * 16u + idx * 8u;
+  const PhysPt p = IDT_BASE + idx * 8u;
   mem_writeb(p + 0, off & 0xFF);
   mem_writeb(p + 1, (off >> 8) & 0xFF);
   mem_writeb(p + 2, sel & 0xFF);
@@ -917,21 +926,30 @@ void write_idt_gate(int idx, uint16_t sel, uint32_t off, bool bits32) {
 void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
                           uint16_t client_ds, uint16_t client_ss,
                           uint16_t client_es) {
+  // Enable A20 so writes to our kernel structures (GDT/IDT/LDT/TSS/
+  // shims/stack at 0x100000+) actually land there instead of wrapping
+  // to 0x00000-0x0FFFF.  Default DOS state has A20 disabled (hence the
+  // "A20 wrap" required by real-mode 8086 compat).  Real DPMI hosts
+  // enable A20 during their init for the same reason.  Without this,
+  // our CPU_LIDT points at 0x100000 but writes to that address actually
+  // corrupt the RM IVT / BIOS data area.
+  MEM_A20_Enable(true);
+
   write_gdt_descriptor(0, 0,              0,      0);                 // null
   write_gdt_descriptor(1, client_cs * 16, 0xFFFF, 0x9A, bits32);      // code
   write_gdt_descriptor(2, client_ds * 16, 0xFFFF, 0x92);              // data
   write_gdt_descriptor(3, client_ss * 16, 0xFFFF, 0x92);              // stack
   write_gdt_descriptor(4, client_es * 16, 0xFFFF, 0x92);              // es
   write_gdt_descriptor(5, 0xF0000, 0xFFFF, 0x9A);                    // cb
-  write_gdt_descriptor(6, LDT_SEG * 16u, LDT_BYTES - 1, 0x82);
-  write_gdt_descriptor(7, PM_SHIM_SEG * 16u, PM_SHIM_TOTAL - 1, 0x9A);
-  write_gdt_descriptor(8, PM_CB_STACK_SEG * 16u, PM_CB_STACK_SIZE - 1, 0x92);
+  write_gdt_descriptor(6, LDT_BASE, LDT_BYTES - 1, 0x82);
+  write_gdt_descriptor(7, PM_SHIM_BASE, PM_SHIM_TOTAL - 1, 0x9A);
+  write_gdt_descriptor(8, PM_CB_STACK_BASE, PM_CB_STACK_SIZE - 1, 0x92);
   // Ring-3 DPMI descriptors.  Populated unconditionally so the GDT
   // table has consistent state, but only ACTIVATED (via segment
   // loads + CPU_JMP) on the DOSEMU_DPMI_RING3 path.  Existing ring-0
   // clients ignore these slots.
   // TSS: 32-bit TSS (access byte 0x89 = present, DPL=0, system, type 9).
-  write_gdt_descriptor(9, TSS_SEG * 16u, TSS_SIZE - 1, 0x89);
+  write_gdt_descriptor(9, TSS_BASE, TSS_SIZE - 1, 0x89);
   // Ring-3 code: access 0xFA = P=1, DPL=3, S=1, type=1010 (code, r).
   write_gdt_descriptor(10, client_cs * 16, 0xFFFF, 0xFA, bits32);
   // Ring-3 data: access 0xF2 = P=1, DPL=3, S=1, type=0010 (data, rw).
@@ -948,11 +966,11 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   // stacks when transitioning ring 3 -> ring 0 on an interrupt.
   // ESP0 is an offset WITHIN the SS0 segment (stack top).
   for (uint32_t i = 0; i < TSS_SIZE; ++i)
-    mem_writeb(TSS_SEG * 16u + i, 0);
-  mem_writed(TSS_SEG * 16u + 4, PM_CB_STACK_SIZE);     // ESP0 = 0x1000 (top)
-  mem_writew(TSS_SEG * 16u + 8, PM_CB_STACK);          // SS0 = PM_CB_STACK
+    mem_writeb(TSS_BASE + i, 0);
+  mem_writed(TSS_BASE + 4, PM_CB_STACK_SIZE);     // ESP0 = 0x1000 (top)
+  mem_writew(TSS_BASE + 8, PM_CB_STACK);          // SS0 = PM_CB_STACK
 
-  CPU_LGDT(GDT_LIMIT, GDT_SEG * 16u);
+  CPU_LGDT(GDT_LIMIT, GDT_BASE);
 
   const uint16_t int21_cb_off = bits32 ? s_int21_cb32_off : s_int21_cb_off;
   const uint16_t int31_cb_off = bits32 ? s_int31_cb32_off : s_int31_cb_off;
@@ -979,7 +997,7 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
     const uint8_t cb_lo = mem_readb(stub + scan + 2);
     const uint8_t cb_hi = mem_readb(stub + scan + 3);
     const uint16_t slot_off = v * PM_SHIM_SLOT_BYTES;
-    const PhysPt shim = PM_SHIM_SEG * 16u + slot_off;
+    const PhysPt shim = PM_SHIM_BASE + slot_off;
     // Exceptions 8, 10..14, 17 push a 4-byte error code AFTER
     // EIP/CS/EFLAGS in 32-bit mode.  If we run the plain shim
     // (FE 38 LL HH; 66 CF) on one of those, our IRETD pops the
@@ -1008,7 +1026,7 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
     write_idt_gate(0x21, PM_CB_SEL, int21_cb_off, bits32);
   if (int31_cb_off)
     write_idt_gate(0x31, PM_CB_SEL, int31_cb_off, bits32);
-  CPU_LIDT(IDT_LIMIT, IDT_SEG * 16u);
+  CPU_LIDT(IDT_LIMIT, IDT_BASE);
 }
 
 Bitu dosemu_dpmi_entry() {
@@ -1038,7 +1056,7 @@ Bitu dosemu_dpmi_entry() {
   // Zero the LDT so every unallocated slot reads as a not-present
   // descriptor (access byte 0), then reset the in-use bitmap to match.
   for (uint32_t off = 0; off < LDT_BYTES; ++off)
-    mem_writeb(LDT_SEG * 16u + off, 0);
+    mem_writeb(LDT_BASE + off, 0);
   for (auto &b : s_ldt_in_use) b = 0;
   s_ldt_in_use[0] |= 0x01;   // slot 0 reserved (null)
   for (auto &c : s_seg2desc_cache) c = 0;
@@ -1088,7 +1106,7 @@ Bitu dosemu_dpmi_entry() {
     s_ldt_in_use[0] |= 0x01;   // slot 0 reserved (null)
     for (auto &c : s_seg2desc_cache) c = 0;
     for (uint32_t off = 0; off < LDT_BYTES; ++off)
-      mem_writeb(LDT_SEG * 16u + off, 0);
+      mem_writeb(LDT_BASE + off, 0);
     // CWSDPMI convention (CONTROL.C ~L469): initial client CS is
     // 16-bit regardless of AX=1 entry.  Stubs that request 32-bit
     // DPMI still start in 16-bit code and far-jump to their 32-bit
@@ -1585,8 +1603,8 @@ RmCallback s_rm_callbacks[RM_CALLBACK_COUNT];
 // the base out of the raw 8 bytes.
 PhysPt pm_selector_linear(uint16_t sel, uint32_t off) {
   const uint16_t idx = sel >> 3;
-  const PhysPt p = (sel & 0x4) ? (LDT_SEG * 16u + idx * 8u)
-                               : (GDT_SEG * 16u + idx * 8u);
+  const PhysPt p = (sel & 0x4) ? (LDT_BASE + idx * 8u)
+                               : (GDT_BASE + idx * 8u);
   const uint32_t base = mem_readb(p + 2)
                       | (mem_readb(p + 3) << 8)
                       | (mem_readb(p + 4) << 16)
@@ -1672,7 +1690,7 @@ Bitu do_rm_callback(int idx) {
   const Bitu saved_idt_b = CPU_SIDT_base();
   const Bitu saved_idt_l = CPU_SIDT_limit();
 
-  CPU_LIDT(IDT_LIMIT, IDT_SEG * 16u);
+  CPU_LIDT(IDT_LIMIT, IDT_BASE);
   CPU_SET_CRX(0, saved_cr0 | 1u);
 
   bool cb_big = false;
@@ -1782,16 +1800,16 @@ ExcHandler s_pm_exc[32] = {};
 //
 // Everything else still returns CF=1 / AX=8001h ("unsupported DPMI
 // function").  AX=0006/0007 read and write the base field of a GDT
-// descriptor in the GDT we installed at GDT_SEG; selectors outside
+// descriptor in the GDT we installed at GDT_BASE; selectors outside
 // GDT_LIMIT return AX=8022h (invalid selector).  LDT management (LDT
 // descriptor allocation) is still stage 4 proper and not wired up.
 // Descriptor helpers shared by AX=0000/0001/0002 and AX=0006/0007.
-// `selector_table_base` returns LDT_SEG*16 if TI=1, GDT_SEG*16 otherwise.
+// `selector_table_base` returns LDT_BASE if TI=1, GDT_BASE otherwise.
 // `selector_is_valid` rejects selectors whose index is out of range for
 // the chosen table (GDT: 8 entries, LDT: 256 entries), or slot 0 for
 // LDT (reserved null).
 inline PhysPt selector_table_base(uint16_t sel) {
-  return (sel & 0x4) ? LDT_SEG * 16u : GDT_SEG * 16u;
+  return (sel & 0x4) ? LDT_BASE : GDT_BASE;
 }
 inline bool selector_is_valid(uint16_t sel) {
   const uint16_t idx = sel >> 3;
@@ -1808,7 +1826,7 @@ inline bool selector_is_valid(uint16_t sel) {
 // slot) and AX=0002 (installs a real-mode-segment alias).
 void write_ldt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32) {
-  const PhysPt p = LDT_SEG * 16u + idx * 8u;
+  const PhysPt p = LDT_BASE + idx * 8u;
   mem_writeb(p + 0, limit & 0xFF);
   mem_writeb(p + 1, (limit >> 8) & 0xFF);
   mem_writeb(p + 2, base & 0xFF);
@@ -1844,6 +1862,10 @@ uint16_t ldt_find_run(uint16_t count) {
 }
 
 Bitu dosemu_int31() {
+  if (std::getenv("DOSEMU_TRACE")) {
+    std::fprintf(stderr, "[int31] AX=%04x BX=%04x CX=%04x DX=%04x EDI=%08x ESI=%08x\n",
+                 reg_ax, reg_bx, reg_cx, reg_dx, reg_edi, reg_esi);
+  }
   switch (reg_ax) {
 
     case 0x0400: {  // Get DPMI version
@@ -2140,7 +2162,7 @@ Bitu dosemu_int31() {
       if (!ldt_bit(idx)) {
         reg_ax = 0x8022; set_cf(true); return CBRET_NONE;
       }
-      const PhysPt p = LDT_SEG * 16u + idx * 8u;
+      const PhysPt p = LDT_BASE + idx * 8u;
       const uint32_t base = mem_readb(p + 2)
                           | (mem_readb(p + 3) << 8)
                           | (mem_readb(p + 4) << 16)
@@ -2175,7 +2197,7 @@ Bitu dosemu_int31() {
       }
       // Recover the RM segment this selector was aliasing from the
       // descriptor's base, then free both the MCB and the LDT slot.
-      const PhysPt p = LDT_SEG * 16u + idx * 8u;
+      const PhysPt p = LDT_BASE + idx * 8u;
       const uint32_t base = mem_readb(p + 2)
                           | (mem_readb(p + 3) << 8)
                           | (mem_readb(p + 4) << 16)
@@ -2336,7 +2358,7 @@ Bitu dosemu_int31() {
     // and used 0210/0212 for PM; this commit renumbers to match the
     // spec.  Fixtures updated alongside.)
     case 0x0204: {  // Get Protected Mode Interrupt Vector
-      const PhysPt gate = IDT_SEG * 16u + reg_bl * 8u;
+      const PhysPt gate = IDT_BASE + reg_bl * 8u;
       const uint32_t off = mem_readb(gate + 0)
                          | (mem_readb(gate + 1) << 8)
                          | (mem_readb(gate + 6) << 16)
@@ -4462,12 +4484,15 @@ bool le_apply_fixups(const std::vector<uint8_t> &f, size_t le_off,
 // on success.  Caller is responsible for freeing the descriptors (via
 // the existing LDT bitmap machinery) if it tears the load down.
 bool le_install_descriptors(std::vector<LeObject> &objects) {
-  // Reuse the DPMI PM infrastructure: the LDT lives at LDT_SEG, the
+  // Reuse the DPMI PM infrastructure: the LDT lives at LDT_BASE, the
   // in-use bitmap tracks free slots, and write_ldt_descriptor writes
   // the 8-byte descriptor with the right base/limit/access layout.
   // This does *not* enter PM -- clients loading an LE that are going
   // to execute in PM must do that separately.  The descriptors we
   // install are valid for an already-running DPMI-style PM session.
+  // LDT_BASE is above 1MB so A20 must be on before we write; default
+  // DOS state has A20 off and writes would wrap to low memory.
+  MEM_A20_Enable(true);
   const uint16_t need = static_cast<uint16_t>(objects.size());
   const uint16_t start = ldt_find_run(need);
   if (start == 0) {

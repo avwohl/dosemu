@@ -1,3 +1,69 @@
+# dosemu WIP — end of session 2026-04-22 (DJGPP push)
+
+Ring-3 DPMI progressed substantially.  Two new bug categories fixed:
+
+1. **Kernel structures moved above 1MB.**  `GDT_SEG=0x1800`,
+   `IDT_SEG=0x1A00`, `LDT_SEG=0x1B00`, `PM_SHIM_SEG=0x1C00`,
+   `PM_CB_STACK_SEG=0x1E00`, `TSS_SEG=0x1F00` were in conventional
+   memory — a ring-3 DPMI client's 16-bit-RM-aliased selector (base +
+   64KB limit) could reach them and corrupt them.  DJGPP's go32 stub
+   hit this by memset'ing its transfer buffer (ES=some low seg, limit
+   0xFFFF) which included our IDT at 0x1A000.  Renamed to `GDT_BASE`
+   etc. at `0x100000..0x109000`; `PM_ARENA_START` moved from 0x100000
+   to 0x120000 so the DPMI linear-memory arena sits above the new
+   kernel region.
+
+2. **A20 line.**  DOS boots with A20 disabled, which wraps linear
+   addresses 0x100000..0x10FFFF back to 0x00000..0x0FFFF (real-mode
+   compat).  Writes to our newly-relocated kernel were silently
+   landing in the RM IVT and BIOS data area; reads returned bogus
+   values (observed: IVT[0x10] = 0x80000FFF instead of F000:xxxx,
+   which made the PM-IDT walker skip installing the INT 10h gate).
+   `MEM_A20_Enable(true)` is now called both at DPMI entry (in
+   `pm_setup_gdt_and_idt`) and at LE launch (in
+   `le_install_descriptors`).  All 37 fixtures stay green; LE_MIN
+   runs to exit code 0 in the new layout.
+
+**DJGPP djecho.exe now runs:**
+- ~76 INT 31h calls successfully (up from ~13 pre-fix).
+- go32 stub fully initializes PM, enters COFF code, installs its
+  own exception handlers via AX=0202/0203 for vectors 0x00..0x11,
+  allocates DPMI memory (128KB + 512KB + 60KB), does several
+  sim-RM INT 21h round-trips.
+- Blocks on a deeper issue: the client extends its CS/DS/SS limits
+  to 1.5MB via AX=0008 after allocating only 700KB across three
+  non-contiguous blocks.  When the client's legit data-access
+  pattern hits offset 0xE3FF8 of DS (base 0x20030), linear address
+  is 0x104028 — our LDT[5].  The client writes garbage there, then
+  dispatches #GP via IDT[0x0D] (which they installed at 0x2F:0x7744),
+  CPU reads LDT[5] (now zeros), aborts.
+
+**Why this is hard to fix without paging:** DPMI clients legitimately
+point their own selectors at arbitrary linear addresses.  With no
+page tables, any such write lands at the corresponding physical
+memory.  Without a mapping layer that can make our host memory
+*inaccessible* to ring-3 clients, the client can always trash the
+host.  Real DPMI hosts (CWSDPMI, HDPMI, WINOS2) all use paging.
+
+**For next session:**
+- **Add paging to our DPMI host.**  CWSDPMI's approach: every
+  selector the client uses (their CS/DS/SS/etc. LDT entries) maps
+  linearly onto their own allocated pages via a page table.  Writes
+  through those selectors to "unowned" linear addresses (like our
+  kernel) page-fault; the page fault handler catches it and either
+  reports an error to the client or silently ignores.  Alternatively
+  `#define run_ring 0` + drop ring-3 entirely, since ring-0 already
+  works (23+ fixtures pass) — but that makes real DPMI programs
+  (DJGPP, Windows 3.x, FoxPro) impossible.
+- **Lower-leverage:** DPMI_DOSMEM fixtures cover AX=0100/0101 which
+  DJGPP uses — all pass.  INT 10h reflection works in 16-bit and
+  32-bit PM (both fixtures green).  Most of the surface is
+  exercised; remaining gaps are mostly edge cases.
+
+---
+
+(Prior-session notes follow.)
+
 # dosemu WIP — end of session 2026-04-21 (continued)
 
 All work is committed and pushed to `github.com/avwohl/dosemu` (main).
