@@ -4403,7 +4403,20 @@ Bitu dosemu_int21() {
                      "invalid-function, program continues\n",
                      reg_ah, reg_al, reg_bx, reg_cx, reg_dx);
       }
-      return_error(0x01);  // invalid function
+      if (reg_ah == 0x71) {
+        // AH=71 is the DOS LFN (Long File Name) API.  DJGPP's libc
+        // wraps every LFN call with a "was LFN available?" check:
+        //   if (AX == 0x7100) fall back to SFN (AH=0x3C etc.)
+        //   else if (CF=1) report error.
+        // Returning plain AX=1 makes DJGPP think the file op really
+        // failed (EINVAL) and it never tries the SFN version.  By
+        // returning AX=0x7100 we tell DJGPP "LFN not supported" --
+        // and it retries with the short-filename API we do handle.
+        reg_ax = 0x7100;
+        set_cf(true);
+      } else {
+        return_error(0x01);  // invalid function
+      }
       break;
   }
   return CBRET_NONE;
