@@ -67,6 +67,7 @@ run_one DJ_ENV    "dj-env=ok"    0 ""
 run_one DJ_FILE   "dj-file=ok"   0 ""
 run_one DJ_MALLOC "dj-malloc=ok" 0 ""
 run_one DJ_STDIN  "dj-stdin=ok"  0 "pipe-payload"
+run_one DJ_SIGNAL "dj-signal=ok" 0 ""
 
 # Extra assertion: DJ_ARGV called with a quoted multi-word arg must
 # deliver it as a single argv entry (regression gate for the PSP

@@ -50,5 +50,6 @@ make                    # build dosemu if not already
 | DJ_FILE     | fopen/fprintf/fclose/fgets (LFN-fallback → AH=3C)    |
 | DJ_MALLOC   | malloc/free stress (64 blocks × varying sizes)       |
 | DJ_STDIN    | fread from piped stdin                               |
+| DJ_SIGNAL   | SIGFPE handler + siglongjmp recovery (#DE → POSIX)   |
 | DJ_QUOTED   | quoted multi-word args survive PSP cmd-tail encoding |
 | BANNER      | real third-party DJGPP tool (banner.exe, 2005)       |
