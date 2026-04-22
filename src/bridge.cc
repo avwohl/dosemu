@@ -810,7 +810,13 @@ constexpr uint16_t PM_CS3_SEL  = 0x53;        // GDT[10]: ring-3 code (DPL=3)
 constexpr uint16_t PM_DS3_SEL  = 0x5B;        // GDT[11]: ring-3 data (DPL=3)
 constexpr uint16_t PM_SS3_SEL  = 0x63;        // GDT[12]: ring-3 stack (DPL=3)
 constexpr uint16_t PM_ES3_SEL  = 0x6B;        // GDT[13]: ring-3 ES/PSP (DPL=3)
-// GDT[14..15] reserved for future BIOS-data / aux selectors.
+// GDT[14] = ring-3 CB alias; LRET target for user_exception_return.
+constexpr uint16_t PM_CB3_SEL  = 0x73;        // GDT[14]: CB_SEG at DPL=3
+// GDT[15] = ring-3 data alias of the host exception-handler stack.
+// CWSDPMI-style: the client's SS/ESP may be corrupt at the moment the
+// exception fires, so we never trust them -- the trampoline switches
+// SS:ESP to this private stack before dispatching to the user handler.
+constexpr uint16_t PM_EXC_STACK_SEL = 0x7B;   // GDT[15]: DPL=3 data
 
 // TSS lives at fixed physical address.  Only SS0:ESP0 field matters
 // for our ring-3 use (ring-3 -> ring-0 stack switch on interrupts).
@@ -877,6 +883,15 @@ uint16_t s_int31_cb_off    = 0;
 uint16_t s_int31_cb32_off  = 0;
 uint16_t s_le_exc_cb16_off = 0;    // CB_IRET  shared handler
 uint16_t s_le_exc_cb32_off = 0;    // CB_IRETD shared handler
+
+// Per-vector PM exception trampoline offsets, and the
+// user_exception_return trampoline -- all in CB_SEG.  Built at startup
+// so AX=0203 just has to install the corresponding IDT gate pointing at
+// the per-vector trampoline.  The trampoline constructs the CWSDPMI-
+// style 8-dword exception frame on the client's stack so DJGPP's
+// exception_handler sees its expected layout.
+uint16_t s_pm_exc_cb32_off[32] = {};
+uint16_t s_pm_exc_ret_off      = 0;    // user_exception_return trampoline
 
 // Forward decls for LDT helpers defined deeper in the file, used by
 // dpmi_enter_pm_mode's ring-3 starter-set.
@@ -961,9 +976,17 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   write_gdt_descriptor(12, client_ss * 16, 0xFFFF, 0xF2);
   // Ring-3 ES (PSP alias).
   write_gdt_descriptor(13, client_es * 16, 0xFFFF, 0xF2);
-  // Slots 14..15: zero until needed.
-  write_gdt_descriptor(14, 0, 0, 0);
-  write_gdt_descriptor(15, 0, 0, 0);
+  // GDT[14] = ring-3 alias of the CB_SEG (0xF000) code segment.  Used
+  // as user_exception_return's CS when the CWSDPMI-style exception
+  // trampoline hands off to the user handler: the handler (ring-3)
+  // LRETs through (PM_CB3_SEL:s_pm_exc_ret_off); LRET can't transfer
+  // to lower-DPL CS, so user_ret_CS must be DPL=3.  Access 0xFA =
+  // P=1, DPL=3, S=1, type=1010 (code, readable, non-conforming).
+  write_gdt_descriptor(14, 0xF0000, 0xFFFF, 0xFA);
+  // GDT[15] = ring-3 data alias of the PM callback stack.  Used by
+  // the PM-exception trampoline as a known-good stack regardless of
+  // how mangled the client's SS:ESP is at fault time.
+  write_gdt_descriptor(15, PM_CB_STACK_BASE, PM_CB_STACK_SIZE - 1, 0xF2);
 
   // TSS body: zero-fill, then set SS0 / ESP0 so the CPU can switch
   // stacks when transitioning ring 3 -> ring 0 on an interrupt.
@@ -1064,17 +1087,13 @@ Bitu dosemu_dpmi_entry() {
   s_ldt_in_use[0] |= 0x01;   // slot 0 reserved (null)
   for (auto &c : s_seg2desc_cache) c = 0;
 
-  // Replace CPU-exception vectors that don't double as BIOS/DOS
-  // interrupts with our le_exc handler (logs + terminates).  The
-  // default reflection path (call dosbox's RM CB for the vector +
-  // IRETD back) infinite-loops for genuine faults because the RM
-  // stub is a no-op and the IRETD returns to the same faulting IP.
-  //
-  // Vectors 0x00-0x0F are CPU-only in practice on DOS.  0x10-0x1F
-  // overlap with BIOS video/disk/kbd services (INT 10h..1Fh) which
-  // programs actually call as interrupts, so we keep the RM-reflection
-  // gates for those.  Clients that register real exception handlers
-  // via AX=0203 will overwrite these gates at that point.
+  // Default PM exception handling: catch-all le_exc gate for vectors
+  // 0x00-0x0F that terminates + logs.  Clients override per-vector via
+  // AX=0203; for 32-bit clients the AX=0203 handler upgrades the gate
+  // to our CWSDPMI-style trampoline (see s_pm_exc_cb32_off / the
+  // dosemu_pm_exc_dispatch dispatcher).  16-bit clients keep the
+  // direct-to-handler gate since their IRET frame is the plain
+  // CPU-pushed 6-byte form.
   const uint16_t exc_cb = bits32 ? s_le_exc_cb32_off : s_le_exc_cb16_off;
   if (exc_cb) {
     for (int v = 0; v < 0x10; ++v)
@@ -1582,6 +1601,193 @@ RealPt s_rm_stop_ptr = 0;
 Bitu dosemu_noop_retf() { return CBRET_NONE; }
 RealPt s_noop_retf_ptr = 0;
 
+// PM exception handler table forward-declared here; the trampoline
+// below needs to read it.  Populated by AX=0203; defaulted to all-zero
+// (selector=0 means "no user handler; fall back to terminate").
+struct ExcHandler { uint16_t sel; uint32_t off; };
+extern ExcHandler s_pm_exc[32];
+
+// --- DPMI AX=0203 exception dispatch (CWSDPMI-compatible frame) ------
+//
+// DJGPP and other DPMI clients install PM exception handlers via
+// AX=0203 and assume CWSDPMI's specific stack layout when the handler
+// is entered: a 32-byte frame of
+//   [SP+0]  user_exception_return_EIP
+//   [SP+4]  user_exception_return_CS
+//   [SP+8]  err code
+//   [SP+12] EIP (of faulting insn)
+//   [SP+16] CS
+//   [SP+20] EFLAGS
+//   [SP+24] outer ESP
+//   [SP+28] outer SS
+// The +0/+4 slot (user_exception_return) is what the handler LRETs
+// through to unwind; the +8..+28 part is the CPU-pushed state the
+// handler can inspect/modify before returning.
+// A naive "install IDT gate directly at the user handler" dispatch only
+// delivers the CPU-pushed 12/16-byte frame -- DJGPP reads garbage at
+// [ebp+4]/[ebp+8] and eventually LRETs to it.
+//
+// Our implementation: one per-vector trampoline callback that (a) reads
+// the CPU-pushed frame, (b) constructs the CWSDPMI-style 32-byte frame
+// + 12-byte IRETD frame on the client's stack, (c) lets the callback
+// stub's IRETD pop the IRETD frame and jump to the user handler with
+// the CWSDPMI frame sitting at [SP+0] beneath.  When the user handler
+// finishes and does LRET, control lands at user_exception_return
+// (another trampoline) which restores the outer SS:ESP/CS:EIP/EFLAGS
+// and IRETDs back to the faulting instruction (potentially modified).
+bool pm_exc_has_err_code(int vec) {
+  return vec == 8 || (vec >= 10 && vec <= 14) || vec == 17;
+}
+
+Bitu dosemu_pm_exc_dispatch(int vec) {
+  // Runs at ring-0 via the IDT gate (PM_CB_SEL has DPL=0).  The
+  // ring-3 client was at cpl=3 when the exception fired, so CPU did a
+  // ring-change dispatch: ring-0 SS:ESP is our PM_CB_STACK scratch,
+  // and the pushed frame is 20 bytes (plus 4 for err-code excs):
+  //   [ring0_ESP + 0]  err   (if has_err)
+  //   [ring0_ESP + 4]  EIP     (or +0 if no err)
+  //   [ring0_ESP + 8]  CS      (or +4)
+  //   [ring0_ESP +12]  EFLAGS  (or +8)
+  //   [ring0_ESP +16]  outer ESP   (or +12)
+  //   [ring0_ESP +20]  outer SS    (or +16)
+  const bool has_err = pm_exc_has_err_code(vec);
+  const uint32_t r0_esp = reg_esp;          // ring-0 ESP at callback entry
+  const PhysPt r0_fp = SegPhys(ss) + r0_esp;
+
+  uint32_t err, eip, cs_val, eflags, outer_esp;
+  uint16_t outer_ss;
+  if (has_err) {
+    err       = mem_readd(r0_fp + 0);
+    eip       = mem_readd(r0_fp + 4);
+    cs_val    = mem_readd(r0_fp + 8);
+    eflags    = mem_readd(r0_fp + 12);
+    outer_esp = mem_readd(r0_fp + 16);
+    outer_ss  = static_cast<uint16_t>(mem_readd(r0_fp + 20) & 0xFFFF);
+  } else {
+    err       = 0;
+    eip       = mem_readd(r0_fp + 0);
+    cs_val    = mem_readd(r0_fp + 4);
+    eflags    = mem_readd(r0_fp + 8);
+    outer_esp = mem_readd(r0_fp + 12);
+    outer_ss  = static_cast<uint16_t>(mem_readd(r0_fp + 16) & 0xFFFF);
+  }
+
+  const uint16_t user_sel = s_pm_exc[vec].sel;
+  const uint32_t user_off = s_pm_exc[vec].off;
+
+  if (user_sel == 0) {
+    std::fprintf(stderr,
+        "dosemu: PM exception vec=%d at %04x:%08x err=0x%x "
+        "(no user handler installed, terminating)\n",
+        vec, (unsigned)cs_val, eip, err);
+    return CBRET_STOP;
+  }
+
+  // Build the CWSDPMI exception frame on our private exception stack
+  // (PM_EXC_STACK_SEL, ring-3 alias of PM_CB_STACK_BASE), NOT on the
+  // client's outer stack: the client's SS:ESP may be corrupt at fault
+  // time (e.g. an IRET that popped garbage SS=0 is exactly the failure
+  // mode that triggers this path in the first place).  The frame goes
+  // at the top of our private stack so the handler's own pushes grow
+  // downward without clobbering the frame.
+  const uint16_t handler_ss = PM_EXC_STACK_SEL;
+  const uint32_t handler_esp_base = PM_CB_STACK_SIZE - 32u;   // top-of-stack
+  const uint32_t client_new_esp   = handler_esp_base;
+  {
+    // PM_CB_STACK_BASE is the linear base; write frame directly at the
+    // linear address (saves a descriptor lookup).
+    const PhysPt sbase = PM_CB_STACK_BASE;
+    mem_writed(sbase + client_new_esp + 0,  s_pm_exc_ret_off);
+    mem_writed(sbase + client_new_esp + 4,  PM_CB3_SEL);    // DPL=3 CS
+    mem_writed(sbase + client_new_esp + 8,  err);
+    mem_writed(sbase + client_new_esp + 12, eip);
+    mem_writed(sbase + client_new_esp + 16, cs_val);
+    mem_writed(sbase + client_new_esp + 20, eflags);
+    mem_writed(sbase + client_new_esp + 24, outer_esp);
+    mem_writed(sbase + client_new_esp + 28, outer_ss);
+  }
+
+  // Rewrite the ring-change IRETD frame on our ring-0 stack so the
+  // stub's 66 CF IRETDs into the user handler (ring-3), with the
+  // client's new SS:ESP pointing at the CWSDPMI frame above.  For
+  // err-code exceptions, the CPU placed the err code at r0_fp+0;
+  // IRETD doesn't pop err code, so we skip it by writing the IRETD
+  // frame at r0_fp+4 and advancing reg_esp by 4.  For non-err-code
+  // exceptions the IRETD frame starts at r0_fp directly.
+  const uint32_t iret_off = has_err ? 4u : 0u;
+  const uint16_t user_cs_rpl3 = (user_sel & 0xFFFC) | 3;
+  mem_writed(r0_fp + iret_off + 0,  user_off);
+  mem_writed(r0_fp + iret_off + 4,  user_cs_rpl3);
+  mem_writed(r0_fp + iret_off + 8,  eflags & ~0x200u);   // IF=0
+  mem_writed(r0_fp + iret_off + 12, client_new_esp);
+  mem_writed(r0_fp + iret_off + 16, handler_ss);
+  if (has_err) reg_esp = r0_esp + 4u;
+
+  return CBRET_NONE;
+}
+
+Bitu dosemu_pm_exc_ret() {
+  // User handler has just done LRET after processing the exception.
+  // Stack at entry (after the handler's LRET popped user_ret_EIP/CS):
+  //   [SP+0]  err         (discard)
+  //   [SP+4]  EIP         (possibly modified to resume elsewhere)
+  //   [SP+8]  CS
+  //   [SP+12] EFLAGS
+  //   [SP+16] outer_ESP
+  //   [SP+20] outer_SS
+  // Restore SS:ESP to outer, push (EIP/CS/EFLAGS) on the outer stack
+  // for the stub's IRETD, which will then jump back to the faulting
+  // (or handler-chosen-resume) CS:EIP.
+  const PhysPt ss_base = SegPhys(ss);
+  const uint32_t esp = cpu.stack.big ? reg_esp : reg_sp;
+  const PhysPt fp = ss_base + esp;
+
+  const uint32_t eip    = mem_readd(fp + 4);
+  const uint32_t cs_val = mem_readd(fp + 8);
+  const uint32_t eflags = mem_readd(fp + 12);
+  const uint32_t oesp   = mem_readd(fp + 16);
+  const uint16_t oss    = static_cast<uint16_t>(mem_readd(fp + 20) & 0xFFFF);
+
+  // Switch to the client's outer stack and lay down a 12-byte IRETD
+  // frame for the stub to pop.
+  CPU_SetSegGeneral(ss, oss);
+  uint32_t new_esp = oesp - 12u;
+  mem_writed(SegPhys(ss) + new_esp + 0, eip);
+  mem_writed(SegPhys(ss) + new_esp + 4, cs_val);
+  mem_writed(SegPhys(ss) + new_esp + 8, eflags);
+  if (cpu.stack.big) reg_esp = new_esp;
+  else               reg_sp  = new_esp & 0xFFFF;
+
+  return CBRET_NONE;
+}
+
+// Per-vector trampolines so each exception vector has its own callback
+// entry the IDT gate can point at.  Each knows its vector statically
+// and just delegates to dosemu_pm_exc_dispatch(N).
+#define PMEXC_TRAMP(n) \
+  Bitu dosemu_pm_exc_##n() { return dosemu_pm_exc_dispatch(n); }
+PMEXC_TRAMP(0)  PMEXC_TRAMP(1)  PMEXC_TRAMP(2)  PMEXC_TRAMP(3)
+PMEXC_TRAMP(4)  PMEXC_TRAMP(5)  PMEXC_TRAMP(6)  PMEXC_TRAMP(7)
+PMEXC_TRAMP(8)  PMEXC_TRAMP(9)  PMEXC_TRAMP(10) PMEXC_TRAMP(11)
+PMEXC_TRAMP(12) PMEXC_TRAMP(13) PMEXC_TRAMP(14) PMEXC_TRAMP(15)
+PMEXC_TRAMP(16) PMEXC_TRAMP(17) PMEXC_TRAMP(18) PMEXC_TRAMP(19)
+PMEXC_TRAMP(20) PMEXC_TRAMP(21) PMEXC_TRAMP(22) PMEXC_TRAMP(23)
+PMEXC_TRAMP(24) PMEXC_TRAMP(25) PMEXC_TRAMP(26) PMEXC_TRAMP(27)
+PMEXC_TRAMP(28) PMEXC_TRAMP(29) PMEXC_TRAMP(30) PMEXC_TRAMP(31)
+#undef PMEXC_TRAMP
+
+using PmExcFn = Bitu(*)();
+static PmExcFn s_pm_exc_tramps[32] = {
+  dosemu_pm_exc_0,  dosemu_pm_exc_1,  dosemu_pm_exc_2,  dosemu_pm_exc_3,
+  dosemu_pm_exc_4,  dosemu_pm_exc_5,  dosemu_pm_exc_6,  dosemu_pm_exc_7,
+  dosemu_pm_exc_8,  dosemu_pm_exc_9,  dosemu_pm_exc_10, dosemu_pm_exc_11,
+  dosemu_pm_exc_12, dosemu_pm_exc_13, dosemu_pm_exc_14, dosemu_pm_exc_15,
+  dosemu_pm_exc_16, dosemu_pm_exc_17, dosemu_pm_exc_18, dosemu_pm_exc_19,
+  dosemu_pm_exc_20, dosemu_pm_exc_21, dosemu_pm_exc_22, dosemu_pm_exc_23,
+  dosemu_pm_exc_24, dosemu_pm_exc_25, dosemu_pm_exc_26, dosemu_pm_exc_27,
+  dosemu_pm_exc_28, dosemu_pm_exc_29, dosemu_pm_exc_30, dosemu_pm_exc_31,
+};
+
 // AX=0303/0304 real-mode callback pool.  Each slot corresponds to a
 // CB_RETF callback installed during dosemu_startup.  When RM code
 // FAR-CALLs the callback's RM address, its native handler looks up
@@ -1786,13 +1992,11 @@ std::vector<ProcessState> s_process_stack;
 // (and effectively latched, spec allows consumption) by AH=4Dh.
 uint16_t s_last_child_exit = 0;
 
-// PM exception handler table for AX=0202/0203.  Each entry is a
-// selector:offset pair.  We never actually *dispatch* exceptions to
-// these handlers (dosbox aborts on most CPU exceptions rather than
-// reflecting them), but clients install handlers for #DE/#UD/#GP in
-// their startup code and read back their own installs.  Defaulted to
-// (selector=0, offset=0) = "no handler".
-struct ExcHandler { uint16_t sel; uint32_t off; };
+// PM exception handler table for AX=0202/0203.  (Forward-declared
+// earlier so the per-vector dispatch trampolines can reference it.)
+// Populated by AX=0203; AX=0202 reads it back.  Dispatch happens in
+// dosemu_pm_exc_dispatch which uses the CWSDPMI stack layout that
+// DJGPP's exception_handler assumes.
 ExcHandler s_pm_exc[32] = {};
 
 // INT 31h (DPMI) — stage 4 subset.
@@ -2232,12 +2436,34 @@ Bitu dosemu_int31() {
       }
       s_pm_exc[reg_bl].sel = reg_cx;
       s_pm_exc[reg_bl].off = reg_edx;
-      // Also install the IDT gate so dosbox's CPU_Interrupt path
-      // actually dispatches exceptions to the client's handler.
-      // Gate bitness follows the caller's CS D-flag, matching the
-      // convention we use for AX=0205 (set PM IDT vector).
-      const bool bits32 = cpu.code.big;
-      write_idt_gate(reg_bl, reg_cx, reg_edx, bits32);
+      // IDT gate wiring depends on the user handler's CS bitness:
+      //
+      //   32-bit handler  -> point the gate at our per-vector CWSDPMI
+      //                      trampoline.  CPU dispatches to the
+      //                      trampoline, which constructs the 32-byte
+      //                      CWSDPMI exception frame on the client's
+      //                      stack before jumping to the user handler.
+      //                      Required by DJGPP-style clients that LRET
+      //                      through user_exception_return and assume
+      //                      [SP+12..+28] = err/EIP/CS/EFLAGS/ESP/SS.
+      //
+      //   16-bit handler  -> direct gate-to-handler; CPU-pushed 6-byte
+      //                      IRET frame matches what pre-CWSDPMI 16-bit
+      //                      DPMI clients (and our DPMI_EXC fixture)
+      //                      expect.  These clients IRET directly.
+      //
+      // Bitness is read from the user handler's CS descriptor (D bit).
+      Descriptor cs_desc;
+      bool handler_bits32 = false;
+      if (cpu.gdt.GetDescriptor(reg_cx, cs_desc)) {
+        handler_bits32 = cs_desc.Big() != 0;
+      }
+      if (handler_bits32 && s_pm_exc_cb32_off[reg_bl]) {
+        write_idt_gate(reg_bl, PM_CB_SEL, s_pm_exc_cb32_off[reg_bl],
+                       /*bits32=*/true);
+      } else {
+        write_idt_gate(reg_bl, reg_cx, reg_edx, handler_bits32);
+      }
       set_cf(false);
       return CBRET_NONE;
     }
@@ -4924,10 +5150,9 @@ void dosemu_startup() {
   }
 
   // LE exception handlers: one 16-bit + one 32-bit callback shared
-  // by all 32 vectors.  Per-vector dispatch would need 64 callbacks
-  // which exhausts dosbox's CB_MAX (128 total, most pre-consumed by
-  // dosbox itself + our DPMI infrastructure).  Vector info lost; we
-  // still report CS:EIP and a stack dump so the user can diagnose.
+  // by all 32 vectors.  Used by the LE loader's direct-PM-entry path
+  // (le_launch_pm_prep) to catch faults before the client has a
+  // chance to install real handlers.
   CALLBACK_HandlerObject le_exc_cb32, le_exc_cb16;
   le_exc_cb32.Install(&dosemu_le_exc_any32, CB_IRETD,
                       "dosemu LE exception (32-bit)");
@@ -4937,6 +5162,28 @@ void dosemu_startup() {
                       "dosemu LE exception (16-bit)");
   s_le_exc_cb16_off = static_cast<uint16_t>(
       le_exc_cb16.Get_RealPointer() & 0xFFFF);
+
+  // Per-vector PM exception trampolines (32-bit) + user_exception_return.
+  // Used by the DPMI path: AX=0203 records the user's sel:off; the
+  // IDT gate (installed at DPMI entry) points at the trampoline, which
+  // builds the CWSDPMI-style 32-byte exception frame before jumping to
+  // the user handler.  When the user handler LRETs, it lands in the
+  // user_exception_return trampoline which restores outer SS:ESP and
+  // IRETDs back to the faulting instruction.  Required by DJGPP and
+  // anything else that was coded against CWSDPMI's frame layout.
+  static CALLBACK_HandlerObject pm_exc_cb_objs[32];
+  for (int v = 0; v < 32; ++v) {
+    char name[48];
+    std::snprintf(name, sizeof(name), "dosemu PM exc vec %d", v);
+    pm_exc_cb_objs[v].Install(s_pm_exc_tramps[v], CB_IRETD, name);
+    s_pm_exc_cb32_off[v] = static_cast<uint16_t>(
+        pm_exc_cb_objs[v].Get_RealPointer() & 0xFFFF);
+  }
+  static CALLBACK_HandlerObject pm_exc_ret_cb;
+  pm_exc_ret_cb.Install(&dosemu_pm_exc_ret, CB_IRETD,
+                        "dosemu PM exc return trampoline");
+  s_pm_exc_ret_off = static_cast<uint16_t>(
+      pm_exc_ret_cb.Get_RealPointer() & 0xFFFF);
 
   // INT 2Fh handler for DPMI detection (stage 2).  Reports DPMI present
   // with a real-mode entry point that currently fails the mode switch.
