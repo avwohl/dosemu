@@ -5176,13 +5176,21 @@ bool build_env_block(const std::string &program_path) {
   if (off + 2 > ENV_BYTES) return false;
   mem_writeb(base + off++, 1);
   mem_writeb(base + off++, 0);
-  // argv[0] as ASCIIZ.  Use the DOS-style uppercase of the last path segment.
+  // argv[0] as ASCIIZ.  Use the DOS-style uppercase of the full path
+  // relative to the host's cwd (which our C: drive is mounted at).
+  // The go32-v2 stub opens this file to load the COFF payload -- just
+  // the basename wouldn't find programs in subdirectories.
   std::string argv0 = "C:\\";
-  const size_t slash = program_path.find_last_of("/\\");
-  std::string basename = (slash == std::string::npos) ? program_path
-                                                      : program_path.substr(slash + 1);
-  for (auto &c : basename) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-  argv0 += basename;
+  std::string rel = program_path;
+  // Strip leading "./" or "/" prefixes; forward slashes become
+  // backslashes for DOS convention.
+  if (rel.size() >= 2 && rel[0] == '.' && (rel[1] == '/' || rel[1] == '\\'))
+    rel.erase(0, 2);
+  for (auto &c : rel) {
+    if (c == '/') c = '\\';
+    else c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+  }
+  argv0 += rel;
   return put_string(argv0);
 }
 
@@ -5208,11 +5216,21 @@ void build_psp(const std::string &program_path,
   mem_writeb(psp + 0x2C, ENV_SEG & 0xFF);
   mem_writeb(psp + 0x2D, (ENV_SEG >> 8) & 0xFF);
 
-  // Command tail: " arg1 arg2 ..." + 0x0D
+  // Command tail: " arg1 arg2 ..." + 0x0D.  Arguments containing
+  // whitespace are quoted so DOS programs that split the tail on
+  // spaces (e.g. DJGPP's crt0 argv parser) reconstruct the same
+  // argv we got from the host shell.  Any existing double-quote in
+  // the arg is backslash-escaped -- DJGPP's parser honors this.
   std::string tail;
   for (const auto &a : args) {
     tail += ' ';
-    tail += a;
+    const bool needs_quote = a.find_first_of(" \t") != std::string::npos;
+    if (needs_quote) tail += '"';
+    for (char c : a) {
+      if (c == '"' || c == '\\') tail += '\\';
+      tail += c;
+    }
+    if (needs_quote) tail += '"';
   }
   if (tail.size() > 126) tail.resize(126);
   mem_writeb(psp + 0x80, static_cast<uint8_t>(tail.size()));

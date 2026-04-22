@@ -56,6 +56,36 @@ etc.); the default "invalid function" reply made it incorrectly
 report EINVAL and never fall back.  `fopen("...", "w")` now creates
 files.
 
+**Seventh fix**: `build_env_block` now puts the full relative program
+path into argv[0] (DOS-style slashes, uppercase), not just the
+basename.  The go32-v2 stub opens argv[0] to read its own COFF
+payload; a basename-only path meant programs in subdirectories
+(`tests/DJ_*.EXE`) couldn't find themselves.
+
+**Eighth fix**: `build_psp`'s command-tail writer wraps any arg that
+contains whitespace in double-quotes, backslash-escaping any
+existing `"` or `\`.  DJGPP's crt0 argv parser honors this
+convention, so multi-word args passed from the host shell arrive
+as single argv entries.
+
+## DJGPP regression test suite
+
+`tests/djgpp/` contains seven DJGPP-compiled smoke tests covering
+the features above.  `tests/djgpp/run.sh` runs all of them from
+the repo root and prints `PASS`/`FAIL` per test:
+
+  DJ_WRITE    direct write() to stdout
+  DJ_PRINTF   printf with %d %s %.*f %lX + exit-code propagation
+  DJ_ARGV     argc/argv from PSP cmd tail (also verifies quoted args)
+  DJ_ENV      getenv(COMSPEC), getenv(PATH)
+  DJ_FILE     fopen/fprintf/fclose/fgets round-trip (needs LFN fix)
+  DJ_MALLOC   malloc/free stress (64 blocks × varying sizes)
+  DJ_STDIN    fread from stdin piped in
+
+Rebuild the binaries with `tests/djgpp/build.sh` (needs DJGPP
+cross-compiler on PATH); the committed binaries are what CI runs.
+CI step `DJGPP integration suite` drives `run.sh`.
+
 ---
 
 (older notes follow)

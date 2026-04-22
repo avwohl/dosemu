@@ -16,6 +16,11 @@ src/dosemu
 src/dosemu.exe
 *.exe
 
+# Re-include committed DOS test fixtures (pre-built binaries under
+# tests/ are part of the repo so CI doesn't need a cross-compiler).
+!tests/*.exe
+!tests/*.EXE
+
 # CMake
 CMakeCache.txt
 CMakeFiles/

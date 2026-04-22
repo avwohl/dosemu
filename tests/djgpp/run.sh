@@ -1,0 +1,87 @@
+#!/bin/bash
+# run.sh -- run every DJGPP test fixture and verify its marker.
+#
+# Each test program prints "dj-<name>=ok" on success.  This harness
+# invokes each from the repo root (so C: = repo root and the DJGPP
+# stub can find its own .exe at C:\tests\DJ_*.EXE), captures stdout,
+# strips DOS CR bytes, and greps for the expected marker.
+#
+# Specific invocations:
+#   DJ_ARGV: passed the args "hello world" and additionally validates
+#            argc=3 and argv[1]=hello in the output.
+#   DJ_STDIN: fed "pipe-payload\n" on stdin; validates the program
+#             echoed it back.
+#   DJ_PRINTF: expects exit code 7 (the program returns 7 to verify
+#              exit-code propagation).
+#
+# Run `./tests/djgpp/run.sh` from the repo root.  Prints one line per
+# test and exits 0 iff every test passed.
+
+set -eu
+cd "$(dirname "$0")/../.."
+
+if [[ ! -x build/dosemu ]]; then
+    echo "error: build/dosemu not found; run 'make' first" >&2
+    exit 1
+fi
+
+rm -f tests/djfile.tmp
+
+export DOSEMU_DPMI_RING3=1
+
+pass=0
+fail=0
+run_one() {
+    local name="$1"; shift
+    local marker="$1"; shift
+    local expect_rc="$1"; shift
+    local input="$1"; shift
+    # remaining args are program args
+    local exe=$(ls tests/${name}.* 2>/dev/null | head -1)
+    if [[ -z "$exe" ]]; then
+        printf "  %-12s MISSING (no binary)\n" "$name"
+        fail=$((fail + 1))
+        return
+    fi
+    local out rc
+    if [[ -n "$input" ]]; then
+        out=$(printf '%s' "$input" | ./build/dosemu "$exe" "$@" 2>/dev/null) && rc=$? || rc=$?
+    else
+        out=$(./build/dosemu "$exe" "$@" 2>/dev/null) && rc=$? || rc=$?
+    fi
+    local got_marker=$(echo "$out" | tr -d '\r' | grep -F "$marker" || true)
+    if [[ "$rc" == "$expect_rc" && -n "$got_marker" ]]; then
+        printf "  %-12s PASS\n" "$name"
+        pass=$((pass + 1))
+    else
+        printf "  %-12s FAIL (rc=%s expect=%s marker=%s)\n" \
+            "$name" "$rc" "$expect_rc" "${got_marker:-missing}"
+        fail=$((fail + 1))
+    fi
+}
+
+run_one DJ_WRITE  "dj-write=ok"  0 ""
+run_one DJ_PRINTF "dj-printf=ok" 7 ""
+run_one DJ_ARGV   "dj-argv=ok"   0 ""   hello world
+run_one DJ_ENV    "dj-env=ok"    0 ""
+run_one DJ_FILE   "dj-file=ok"   0 ""
+run_one DJ_MALLOC "dj-malloc=ok" 0 ""
+run_one DJ_STDIN  "dj-stdin=ok"  0 "pipe-payload"
+
+# Extra assertion: DJ_ARGV called with a quoted multi-word arg must
+# deliver it as a single argv entry (regression gate for the PSP
+# cmd-tail quoting fix).
+qout=$(./build/dosemu tests/DJ_ARGV.exe "a b c" simple 2>/dev/null | tr -d '\r')
+if echo "$qout" | grep -q "^\[1\]=a b c$" && echo "$qout" | grep -q "^argc=3$"; then
+    printf "  %-12s PASS\n" "DJ_QUOTED"
+    pass=$((pass + 1))
+else
+    printf "  %-12s FAIL\n" "DJ_QUOTED"
+    echo "output was:"
+    echo "$qout" | sed 's/^/    /'
+    fail=$((fail + 1))
+fi
+
+echo ""
+echo "  ${pass} passed, ${fail} failed"
+exit "$fail"
