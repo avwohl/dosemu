@@ -4840,14 +4840,51 @@ Bitu dosemu_int21() {
     }
 
     case 0x71: {
-      // AH=71 is the DOS LFN (Long File Name) API.  DJGPP's libc
-      // wraps every LFN call with a "was LFN available?" check:
-      //   if (AX == 0x7100) fall back to SFN (AH=0x3C etc.)
-      //   else if (CF=1) report error.
-      // Returning plain AX=1 makes DJGPP think the file op really
-      // failed (EINVAL) and it never tries the SFN version.  By
-      // returning AX=0x7100 we tell DJGPP "LFN not supported" --
-      // and it retries with the short-filename API we do handle.
+      // AH=71 is the DOS LFN (Long File Name) API.  For most
+      // sub-functions we signal "LFN not supported" so DJGPP falls
+      // back to the SFN API we handle (AH=3C, 3D, 4E, etc.).
+      //
+      // Exception: AL=60h or A0h (truename, long-form canonicalize)
+      // has no SFN equivalent -- GNU flex with `-o out.c` calls
+      // AL=A0 on its output file path and bails if we return "LFN
+      // not supported" instead of giving it a canonicalized path.
+      // Delegate to the AH=60 logic (builds a "C:\...\" path).
+      if (reg_al == 0x60 || reg_al == 0xA0) {
+        const std::string src = read_dos_string(SegValue(ds), reg_si);
+        std::string path = src;
+        char drive = s_current_drive;
+        if (path.size() >= 2 && path[1] == ':') {
+          drive = static_cast<char>(std::toupper(
+                      static_cast<unsigned char>(path[0])));
+          path.erase(0, 2);
+        }
+        if (path.empty() || (path[0] != '\\' && path[0] != '/')) {
+          const std::string &cwd = s_drive_cwd[drive];
+          if (!cwd.empty() && cwd.front() != '\\' && cwd.front() != '/')
+            path = "\\" + cwd + "\\" + path;
+          else
+            path = (cwd.empty() ? "\\" : cwd + "\\") + path;
+        }
+        for (auto &c : path) {
+          if (c == '/') c = '\\';
+          c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        std::string canon;
+        canon += drive;
+        canon += ':';
+        canon += path;
+        // LFN buffer is 260 bytes; leave room for NUL.
+        if (canon.size() > 259) canon.resize(259);
+        const PhysPt dst = SegPhys(es) + reg_di;
+        for (size_t i = 0; i < canon.size(); ++i)
+          mem_writeb(dst + i, static_cast<uint8_t>(canon[i]));
+        mem_writeb(dst + canon.size(), 0);
+        reg_ax = 0;
+        set_cf(false);
+        return CBRET_NONE;
+      }
+      // Other LFN sub-functions: signal not-supported so callers
+      // fall back to SFN.
       reg_ax = 0x7100;
       set_cf(true);
       return CBRET_NONE;
