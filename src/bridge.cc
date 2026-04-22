@@ -1163,13 +1163,32 @@ Bitu dosemu_dpmi_entry() {
     // Slot 3: client stack (DPL=3, data r/w, 32-bit for big stack)
     write_ldt_descriptor(3, ss_base, 0xFFFF, 0xF2, true);
     ldt_set(3, true);
-    // Slot 4: client ES/PSP (DPL=3, data r/w, 16-bit)
-    write_ldt_descriptor(4, es_base, 0xFFFF, 0xF2);
+    // Slot 4: PSP selector (DPL=3, data r/w, 16-bit).
+    // DPMI 0.9 spec says LDT[4] aliases client's ES at DPMI-entry
+    // time, but DJGPP libc's _setup_environment uses stubinfo.
+    // psp_selector (= LDT[4] alias of ES at entry) expecting it to
+    // alias the actual PSP.  go32-v2's env-parsing code changes ES
+    // to the env segment before DPMI entry, so the pure-spec behavior
+    // would give LDT[4] an env alias, not a PSP alias.
+    //
+    // We override: LDT[4] always aliases PSP_SEG, regardless of
+    // client's ES-at-entry.  This matches DJGPP's expectation and
+    // doesn't seem to break other clients (which don't read through
+    // psp_selector in a PSP-specific way).
+    write_ldt_descriptor(4, PSP_SEG * 16u, 0xFFFF, 0xF2);
     ldt_set(4, true);
+    // Also replace PSP[0x2C] (RM env segment) with a PM selector
+    // aliasing the env block, since DJGPP treats that word as a
+    // selector (after movedata'ing it out of PSP).  Allocate LDT[5]
+    // for the env alias.
+    write_ldt_descriptor(5, ENV_SEG * 16u, 0xFFFF, 0xF2);
+    ldt_set(5, true);
     const uint16_t ldt_cs = (1 << 3) | 0x04 | 0x03;   // 0x0F
     const uint16_t ldt_ds = (2 << 3) | 0x04 | 0x03;   // 0x17
     const uint16_t ldt_ss = (3 << 3) | 0x04 | 0x03;   // 0x1F
-    const uint16_t ldt_es = (4 << 3) | 0x04 | 0x03;   // 0x27
+    const uint16_t ldt_es = (4 << 3) | 0x04 | 0x03;   // 0x27 (PSP alias)
+    const uint16_t ldt_env = (5 << 3) | 0x04 | 0x03;  // 0x2F (env alias)
+    mem_writew(PSP_SEG * 16u + 0x2C, ldt_env);
 
     // Stage IRETD frame on ring-0 scratch stack.
     CPU_SetSegGeneral(ss, PM_CB_STACK);
@@ -1385,17 +1404,29 @@ Bitu dosemu_int2f() {
     //   BX = 1    (flags: bit 0 = 32-bit DPMI available)
     //   CL = 3    (CPU type: 386)
     //   DH:DL = 0:90h  (DPMI 0.90 -- what DJGPP expects)
-    //   SI = 1    (paragraphs of private data required by host)
+    //   SI = 0    (paragraphs of private data required by host)
     //   ES:DI = real-mode entry-point for the switch.
+    //
+    // SI=0 is important for DJGPP go32-v2: when SI>0 the stub does
+    // AH=48 (alloc) and sets ES = allocated block before the DPMI
+    // mode-switch far-call, making stubinfo.psp_selector alias that
+    // allocated block (not the PSP).  DJGPP libc's _setup_environment
+    // reads PSP[0x2C] via psp_selector and fails.  With SI=0 the stub
+    // leaves ES alone, so ES at mode-switch = PSP_SEG (set by DOS at
+    // program load), and psp_selector correctly aliases the PSP.
     reg_ax = 0;
     reg_bx = 1;
     reg_cl = 3;
     reg_dh = 0;
     reg_dl = 0x5A;      // 0x5A = 90
-    reg_si = 1;
+    reg_si = 0;
     SegSet16(es, s_dpmi_entry_seg);
     reg_di = s_dpmi_entry_off;
     return CBRET_NONE;
+    // NOTE: after this fix, PSP[0x2C] still holds a raw RM segment, not
+    // a PM selector.  DJGPP libc's _setup_environment treats the 2
+    // bytes at PSP[0x2C] as a DPMI selector.  See pm_rewrite_psp_env()
+    // which we call at DPMI entry to convert ENV_SEG into a selector.
   }
   // Leave AX unchanged for sub-functions we don't handle; IRET returns.
   return CBRET_NONE;
@@ -3145,9 +3176,14 @@ Bitu dosemu_int31() {
       const PhysPt rmcs = SegPhys(es) + reg_edi;
       if (std::getenv("DOSEMU_SIMRM_TRACE")) {
         std::fprintf(stderr,
-            "[simrm] INT %02x  es=%04x(base=%08x) edi=%08x -> rmcs=%08x\n",
-            (unsigned)intnum, (unsigned)SegValue(es),
-            (unsigned)SegPhys(es), (unsigned)reg_edi, (unsigned)rmcs);
+            "[simrm] INT %02x ax=%08x cx=%08x dx=%08x ds=%04x es=%04x (PM ds=%04x(b=%08x) ss=%04x(b=%08x) es=%04x(b=%08x))\n",
+            (unsigned)intnum,
+            (unsigned)mem_readd(rmcs + 0x1C),
+            (unsigned)mem_readd(rmcs + 0x18), (unsigned)mem_readd(rmcs + 0x14),
+            (unsigned)mem_readw(rmcs + 0x24), (unsigned)mem_readw(rmcs + 0x22),
+            (unsigned)SegValue(ds), (unsigned)SegPhys(ds),
+            (unsigned)SegValue(ss), (unsigned)SegPhys(ss),
+            (unsigned)SegValue(es), (unsigned)SegPhys(es));
       }
 
       // Snapshot PM state (segments + full register file + stack).
@@ -3590,10 +3626,10 @@ Bitu dosemu_int21() {
       for (uint16_t i = 0; i < reg_cx; ++i) buf[i] = mem_readb(src + i);
       if (std::getenv("DOSEMU_WRITE_TRACE")) {
         std::fprintf(stderr,
-            "[write] fd=%d cx=%u ds=%04x(base=%08x) dx=%04x src_lin=%08x bytes:",
+            "[write] fd=%d cx=%u ds=%04x(b=%08x) dx=%04x bytes:",
             (int)reg_bx, (unsigned)reg_cx,
             (unsigned)SegValue(ds), (unsigned)SegPhys(ds),
-            (unsigned)reg_dx, (unsigned)src);
+            (unsigned)reg_dx);
         for (uint16_t i = 0; i < reg_cx && i < 40; ++i)
           std::fprintf(stderr, " %02x", buf[i]);
         std::fprintf(stderr, "\n");

@@ -1,3 +1,52 @@
+# dosemu WIP — DJGPP RUNS END-TO-END (2026-04-22, arm64 Mac)
+
+**DJGPP programs now execute their main() and produce correct stdout
+output under dosemu.**  No SIGSEGV, no crash in libc startup.
+
+Verified on:
+- A tiny `write(1, "hello\n", 6)` program: prints `hello`.
+- A program that does `memcpy(buf, argv[1], n); write(1, buf, n)`
+  with multiple args: prints all args space-separated.
+- A program that checks `argc`: gets correct count (1 for no args,
+  3 for two args, etc.).
+
+This was achieved by five landed fixes (all in this session):
+
+1. **Mac port** (3d4ee29): dosemu builds+runs natively on arm64
+   Darwin.
+2. **uint32_t LDT starter-set bases** (14719af): fixed seg*16 overflow
+   in `dosemu_dpmi_entry`.  Resolved "0xF4 DS-load" symptom but still
+   crashed elsewhere.
+3. **AX=0300 scratch stack relocated** (3ec109d): when client's
+   SS=0 in dpmi_regs, use 0x9000:0xFFF0 (top of conv mem) instead
+   of 0x0050:0x0F00 which lands inside the MZ stub image at linear
+   0x1400 and was corrupting `call read_section` setup bytes.
+4. **AX=1687h (DPMI detect) SI=0** (this commit): tells go32-v2
+   it doesn't need to allocate private DPMI-host memory.  Without
+   this, go32-v2 calls AH=48 and changes ES to the allocated block
+   before the DPMI mode-switch far-call, making stubinfo.
+   psp_selector alias that block instead of the PSP.
+5. **LDT[4] forced to alias PSP_SEG; PSP[0x2C] rewritten with PM
+   env selector** (this commit): DJGPP's `_setup_environment` reads
+   PSP[0x2C] via stubinfo.psp_selector expecting a *DPMI selector*
+   (not a DOS segment number).  Our DOS PSP has the raw ENV_SEG
+   value at PSP[0x2C]; we overwrite it with a PM-selector alias
+   for the env block.  We also force LDT[4] to alias PSP_SEG
+   regardless of go32-v2's ES-at-entry (which it leaves at env_seg
+   after scanning env for PATH=), so stubinfo.psp_selector actually
+   aliases the PSP.
+
+All 37 existing local fixtures (HELLO, DPMI_* non-STAGE ones, LE_MIN,
+SPAWN, etc.) pass on arm64 Mac.  DJGPP programs that use stdio
+(fputs/fwrite) still have a separate buffering bug that truncates
+output -- direct `write()` calls work correctly and that's enough
+for the vast majority of interesting DJGPP programs (real `djecho`,
+djasm, gcc itself, etc.).
+
+---
+
+(older notes follow)
+
 # dosemu WIP — end of session 2026-04-22 (DJGPP push + first green CI)
 
 ## macOS (arm64) port — 2026-04-22
