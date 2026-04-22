@@ -5012,6 +5012,13 @@ int run_program(const dosemu::Config &cfg) {
       if (auto *s = control->GetSection("mixer"))   s->HandleInputline("nosound=true");
       if (auto *s = control->GetSection("sblaster")) s->HandleInputline("sbtype=none");
     }
+    // Keep the interpreter core for tracing.  dosbox auto-switches
+    // to the dynamic JIT when a program enters PM; that's fine for
+    // speed but bypasses core_normal where DOSEMU_CPU_TRACE is
+    // instrumented.  Force core=normal when the trace flag is set.
+    if (std::getenv("DOSEMU_CPU_TRACE")) {
+      if (auto *s = control->GetSection("cpu")) s->HandleInputline("core=normal");
+    }
 
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
       std::fprintf(stderr, "dosemu: SDL_Init failed: %s\n", SDL_GetError());
