@@ -231,7 +231,10 @@ fi
 # GNU gzip 1.10 (gzip110b).  Compress then decompress the same
 # data and verify round-trip -- gate for binary-safe stdio and
 # that the compressor's deterministic state machine survives
-# the AH=3F/AH=40 paths without spurious CR/LF insertion.
+# the AH=3F/AH=40 paths without spurious CR/LF insertion.  Also
+# verify host gunzip (if available) can decompress our gzip's
+# output -- catches TZ/format-compat bugs that would round-trip
+# within dosemu but produce non-standard files.
 zdir=$(mktemp -d)
 cp build/dosemu tests/GZIP.EXE "$zdir/"
 printf "alpha beta gamma delta epsilon alpha beta gamma delta epsilon\n" > "$zdir/in.txt"
@@ -239,12 +242,18 @@ orig=$(tr -d '\r' < "$zdir/in.txt")
 (cd "$zdir" && DOSEMU_DPMI_RING3=1 ./dosemu GZIP.EXE -c in.txt 2>/dev/null) > "$zdir/in.gz" && zrc=$? || zrc=$?
 (cd "$zdir" && DOSEMU_DPMI_RING3=1 ./dosemu GZIP.EXE -dc in.gz 2>/dev/null) > "$zdir/out" && zrc2=$? || zrc2=$?
 roundtrip=$(tr -d '\r' < "$zdir/out")
+host_unzip_ok=1
+if command -v gunzip >/dev/null; then
+    host_out=$(gunzip -kc "$zdir/in.gz" 2>/dev/null | tr -d '\r' || true)
+    [[ "$host_out" == "$orig" ]] || host_unzip_ok=0
+fi
 rm -rf "$zdir"
-if [[ "$zrc" == "0" && "$zrc2" == "0" && "$roundtrip" == "$orig" ]]; then
+if [[ "$zrc" == "0" && "$zrc2" == "0" && "$roundtrip" == "$orig" && "$host_unzip_ok" == 1 ]]; then
     printf "  %-12s PASS\n" "GZIP"
     pass=$((pass + 1))
 else
-    printf "  %-12s FAIL (zip-rc=%s unzip-rc=%s out=%q)\n" "GZIP" "$zrc" "$zrc2" "$roundtrip"
+    printf "  %-12s FAIL (zip-rc=%s unzip-rc=%s host-ok=%s out=%q)\n" \
+        "GZIP" "$zrc" "$zrc2" "$host_unzip_ok" "$roundtrip"
     fail=$((fail + 1))
 fi
 
