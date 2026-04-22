@@ -1,4 +1,23 @@
-# dosemu WIP — end of session 2026-04-22 (DJGPP push)
+# dosemu WIP — end of session 2026-04-22 (DJGPP push + first green CI)
+
+## CI: first fully green run in repo history
+
+Run `24779875503` (tag `ci-exe2bin-rc`, 2026-04-22) -- **60 steps,
+all green**.  This is the first time any workflow in this repo has
+executed past the meson-setup step.  History:
+
+- `7eed164` unjammed the YAML parser (unquoted colons in step names).
+- `7eef7d8` fixed `meson setup BUILD --buildtype=X SRC` arg order
+  -- newer meson rejects that pattern ("unrecognized arguments:
+  SRC"); put SRC before the option.
+- `5b86668` (`|| true` on the EXE2BIN subshell) got past `bash -e`
+  eating EXE2BIN.EXE's rc=255 banner-usage exit.
+
+Triggered by tagging: `git tag ci-<something>; git push origin
+ci-<something>`.  Regular `main` pushes don't fire CI (deliberate;
+saves 6-10 min per push).
+
+
 
 Ring-3 DPMI progressed substantially.  Two new bug categories fixed:
 
