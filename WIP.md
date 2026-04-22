@@ -1,5 +1,60 @@
 # dosemu WIP — end of session 2026-04-22 (DJGPP push + first green CI)
 
+## macOS (arm64) port — 2026-04-22
+
+Dev host moved Linux x86-64 → Darwin arm64 (Apple Silicon, 32GB).  dosemu
+now builds and runs natively.  Changes:
+
+- `src/CMakeLists.txt`: `if(APPLE)` branch.  Drops GNU-ld
+  `--start-group`/`--end-group` (ld64 does multi-pass arch resolution),
+  `stdc++fs`/`atomic` (libc++), and Linux-only deps
+  (SDL2_net, slirp, fluidsynth, asound, Xi, libGL).  Adds Mac frameworks
+  (CoreFoundation, CoreAudio, AudioUnit/Toolbox, CoreMIDI, IOKit,
+  OpenGL) and a BUILD_RPATH for meson's `libmt32emu.dylib`.
+- `src/CMakeLists.txt`: `link_directories(${GLIB_LIBRARY_DIRS})` so
+  Homebrew's `/opt/homebrew/lib` glib is found (pkg_check_modules gives
+  bare names in `${GLIB_LIBRARIES}`).
+- `src/bridge.cc`: headless mode forces `SDL_VIDEODRIVER=dummy` on
+  `__APPLE__`.  SDL's `offscreen` driver on macOS is EGL-based and
+  fails to init without a real GL loader even for non-GL output modes.
+  Also forces `[sdl] output=texture` to bypass sdlmain's
+  `opengl_driver_crash_workaround`, which still OR's `SDL_WINDOW_OPENGL`
+  into CreateWindow flags when the default SDL render driver is opengl.
+- dosbox-staging configured with
+  `-Duse_sdl2_net=false -Duse_fluidsynth=false -Duse_slirp=false
+  -Duse_opengl=false` (plus alsa auto-disabled off-Linux).  `config.h`
+  ends up with `C_OPENGL 0`, killing the unconditional GL-context probe
+  at `sdlmain.cpp:1329` inside `SetWindowMode`.
+
+DJGPP toolchain: no brew formula.  Used
+`andrewwutw/build-djgpp` v3.4 `djgpp-osx-gcc1220.tar.bz2` (60MB,
+x86_64 — runs under Rosetta 2 on arm64) installed to `~/djgpp/djgpp`.
+Added `~/djgpp/djgpp/bin` to PATH; `DJGPP=~/djgpp/djgpp/setup/djgpp.env`.
+
+Smoke tests green on arm64 Darwin:
+- `tests/HELLO.COM` → `dosemu-hello-ok` rc=0
+- `tests/DPMI_INTEGRATION.COM` → `dpmi-integration=ok` rc=0
+- A fresh-compiled djecho reaches the exact same `0xF4` DS-load state
+  described below (see "the remaining mystery").
+
+## Watchpoint data point on [DS:0x19370] (2026-04-22, arm64 Mac)
+
+Added `mem_writed_inline` hook on linear `0x139370` (= client DS base
+`0x120000` + `0x19370`) that logs every write.  Rebuilt + ran djecho
+with `DOSEMU_DPMI_RING3=1`.
+
+**Result**: the slot is written exactly **one** time during the entire
+run, with value **`0x00000000`**.  Never populated.  That confirms
+WIP.md's hypothesis word for word — the consumer reads a zero pointer,
+dereferences, grabs garbage, tries to load `0xF4` into DS, GP-faults
+with `err=0x00F4 EAX=0x000000f4`.
+
+Next step: objdump on fresh djecho COFF to find the WRITER of
+`[0x19370]` (not the reader, which is already identified at `0x40f0`
+in the movedata wrapper's caller).  Likely a DJGPP library init
+routine that's gated on a stubinfo field our DPMI host doesn't provide
+correctly.
+
 ## Current DJGPP state
 
 All 37 local fixtures + full 60-step CI pipeline green.  `djecho.exe`

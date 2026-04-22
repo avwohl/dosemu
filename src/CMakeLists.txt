@@ -38,6 +38,11 @@ endif()
 find_package(SDL2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED glib-2.0)
+# On Mac (Homebrew) glib lives in /opt/homebrew; pkg_check_modules's plain
+# ${GLIB_LIBRARIES} gives bare library names — we need ${GLIB_LDFLAGS} (which
+# includes -L paths) and the cflags for headers.
+link_directories(${GLIB_LIBRARY_DIRS})
+include_directories(${GLIB_INCLUDE_DIRS})
 
 add_executable(dosemu
   dosemu.cc
@@ -61,11 +66,7 @@ target_include_directories(dosemu PRIVATE
   ${SDL2_INCLUDE_DIRS}
 )
 
-# Link order mirrors what meson uses for the dosbox binary.  --start-group /
-# --end-group handles circular references between the per-subdir archives
-# (e.g. libmidi -> libhardware -> libmidi).
-target_link_libraries(dosemu PRIVATE
-  -Wl,--start-group
+set(DB_ARCHIVES
   ${DB_BUILD}/libdosbox.a
   ${DB_BUILD}/src/capture/libcapture.a
   ${DB_BUILD}/src/cpu/libcpu.a
@@ -87,26 +88,63 @@ target_link_libraries(dosemu PRIVATE
   ${DB_BUILD}/src/libs/tal-chorus/libtalchorus.a
   ${DB_BUILD}/src/libs/whereami/libwhereami.a
   ${DB_BUILD}/src/libs/zmbv/libzmbv.a
-  ${DB_BUILD}/subprojects/libpng-1.6.40/libpng16.a
-  ${DB_BUILD}/subprojects/zlib-ng/libzlib.a
-  ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.so
-  ${DB_BUILD}/subprojects/iir1-1.9.3/iir/libiir.so
-  -Wl,--end-group
-  SDL2::SDL2
-  ${GLIB_LIBRARIES}
-  atomic stdc++fs dl m
 )
 
-# Host libs that meson's dosbox also links against.
-find_library(SDL2_NET SDL2_net REQUIRED)
-find_library(SLIRP slirp REQUIRED)
-find_library(SPEEX speexdsp REQUIRED)
-find_library(OPUSFILE opusfile REQUIRED)
-find_library(FLUIDSYNTH fluidsynth REQUIRED)
-find_library(ASOUND asound REQUIRED)
-find_library(XI Xi REQUIRED)
-find_library(GL GL REQUIRED)
-target_link_libraries(dosemu PRIVATE
-  ${SDL2_NET} ${SLIRP} ${SPEEX} ${OPUSFILE}
-  ${FLUIDSYNTH} ${ASOUND} ${XI} ${GL}
-)
+if(APPLE)
+  # Mac: ld64 resolves circular deps via multi-pass, no --start-group needed.
+  # Subprojects are system libs on Mac (except mt32emu, which meson built).
+  target_link_libraries(dosemu PRIVATE
+    ${DB_ARCHIVES}
+    ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.dylib
+    SDL2::SDL2
+    ${GLIB_LIBRARIES}
+    dl m
+  )
+
+  find_library(SPEEX speexdsp REQUIRED)
+  find_library(OPUSFILE opusfile REQUIRED)
+  find_library(IIR iir REQUIRED)
+  find_library(PNG png REQUIRED)
+  target_link_libraries(dosemu PRIVATE
+    ${SPEEX} ${OPUSFILE} ${IIR} ${PNG} z
+    "-framework CoreFoundation"
+    "-framework CoreAudio"
+    "-framework AudioUnit"
+    "-framework AudioToolbox"
+    "-framework CoreMIDI"
+    "-framework IOKit"
+    "-framework OpenGL"
+  )
+  # rpath so the mt32emu dylib is found at runtime next to the executable.
+  set_target_properties(dosemu PROPERTIES
+    BUILD_RPATH "${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1"
+    INSTALL_RPATH "@loader_path/../dosbox-staging/build/subprojects/munt-libmt32emu_2_7_1"
+  )
+else()
+  # Linux: GNU ld + --start-group for circular archive refs.
+  target_link_libraries(dosemu PRIVATE
+    -Wl,--start-group
+    ${DB_ARCHIVES}
+    ${DB_BUILD}/subprojects/libpng-1.6.40/libpng16.a
+    ${DB_BUILD}/subprojects/zlib-ng/libzlib.a
+    ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.so
+    ${DB_BUILD}/subprojects/iir1-1.9.3/iir/libiir.so
+    -Wl,--end-group
+    SDL2::SDL2
+    ${GLIB_LIBRARIES}
+    atomic stdc++fs dl m
+  )
+
+  find_library(SDL2_NET SDL2_net REQUIRED)
+  find_library(SLIRP slirp REQUIRED)
+  find_library(SPEEX speexdsp REQUIRED)
+  find_library(OPUSFILE opusfile REQUIRED)
+  find_library(FLUIDSYNTH fluidsynth REQUIRED)
+  find_library(ASOUND asound REQUIRED)
+  find_library(XI Xi REQUIRED)
+  find_library(GL GL REQUIRED)
+  target_link_libraries(dosemu PRIVATE
+    ${SDL2_NET} ${SLIRP} ${SPEEX} ${OPUSFILE}
+    ${FLUIDSYNTH} ${ASOUND} ${XI} ${GL}
+  )
+endif()

@@ -5346,7 +5346,14 @@ int run_program(const dosemu::Config &cfg) {
   control      = std::make_unique<::Config>(cmdline.get());
 
   if (cfg.headless) {
+    // On macOS, SDL's "offscreen" driver is EGL-based and cannot init without
+    // a real GL loader -- it fails to create any window even in texture mode.
+    // "dummy" creates no window at all, which is what we want anyway.
+#if defined(__APPLE__)
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+#else
     setenv("SDL_VIDEODRIVER", "offscreen", 1);
+#endif
     setenv("SDL_AUDIODRIVER", "dummy", 1);
   }
 
@@ -5376,6 +5383,9 @@ int run_program(const dosemu::Config &cfg) {
       }
       if (auto *s = control->GetSection("mixer"))   s->HandleInputline("nosound=true");
       if (auto *s = control->GetSection("sblaster")) s->HandleInputline("sbtype=none");
+      // Avoid the OpenGL probe in sdlmain.cpp:set_output -- it fails under
+      // SDL's offscreen driver on macOS, and we render to nothing anyway.
+      if (auto *s = control->GetSection("sdl"))     s->HandleInputline("output=texture");
     }
     // Keep the interpreter core for tracing.  dosbox auto-switches
     // to the dynamic JIT when a program enters PM; that's fine for
