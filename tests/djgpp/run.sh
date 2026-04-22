@@ -82,6 +82,20 @@ else
     fail=$((fail + 1))
 fi
 
+# Real third-party DJGPP tool: banner.exe (bann10b from the
+# delorie.com archive, built 2005).  Rendering "HI" should produce
+# ASCII art containing 7 rows of '#' characters.  This is a "no
+# regression on external tools" gate -- if an aggressive change
+# to dosemu's DPMI host breaks a real program, this catches it.
+bout=$(./build/dosemu tests/BANNER.EXE HI 2>/dev/null | tr -d '\r')
+if echo "$bout" | grep -q '#######' && [[ $(echo "$bout" | grep -c '#') -ge 7 ]]; then
+    printf "  %-12s PASS\n" "BANNER"
+    pass=$((pass + 1))
+else
+    printf "  %-12s FAIL (expected ASCII-art H and I with #s)\n" "BANNER"
+    fail=$((fail + 1))
+fi
+
 echo ""
 echo "  ${pass} passed, ${fail} failed"
 exit "$fail"
