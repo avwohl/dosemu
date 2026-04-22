@@ -105,6 +105,16 @@ bool load_program_at(const std::string &path, uint16_t psp_seg,
 // --- Run-time state, reset by run_com() ------------------------------------
 
 std::string                 s_program;
+
+// Set during load_exe_at when the MZ stub contains a DOS-extender
+// signature ("DOS/4G" or similar).  Suppresses our own DPMI
+// advertisement and our LE-direct-dispatch path, letting the bound
+// extender do its own init.  This is what QEMM/Windows/CWSDPMI-era
+// DOS extender host systems did: they advertised DPMI, and bound
+// extenders either used it or brought their own -- the two worlds
+// coexisted without per-binary config.  We choose the same path by
+// sensing which kind of binary we're running.
+bool s_extender_bound = false;
 std::vector<std::string>    s_args;
 int                         s_exit_code = 0;
 
@@ -1127,9 +1137,11 @@ Bitu dosemu_int2f() {
   }
   if (reg_ax == 0x1687) {
     // Some DOS extenders (DOS/4GW, DOS/16M, PMODE/W) bring their own
-    // protected-mode machinery and work better when we report "no
-    // DPMI".  DOSEMU_NO_DPMI=1 suppresses the DPMI-present response.
-    if (std::getenv("DOSEMU_NO_DPMI")) {
+    // protected-mode machinery and do their own PM init when no host
+    // DPMI is present.  Auto-detected at load time via the MZ stub's
+    // DOS/4G signature (see s_extender_bound).  Matches how QEMM-era
+    // memory managers coexisted with bound extenders.
+    if (s_extender_bound || std::getenv("DOSEMU_NO_DPMI")) {
       reg_ax = 0xFFFF;        // DPMI not present
       return CBRET_NONE;
     }
@@ -4356,7 +4368,38 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   // LE image is a future-session item -- requires installing PM
   // descriptors for each object, applying fixups, and entering PM at
   // the entry point with the right CS:EIP/SS:ESP.
-  if (f.size() >= 0x40 && !std::getenv("DOSEMU_LE_AS_MZ")) {
+  // Auto-detect DOS-extender-bound MZ binaries: if the MZ stub
+  // contains a signature of a bundled extender (DOS/4G, DOS/16M,
+  // PMODE/W, ...), treat the whole file as a plain MZ and let the
+  // stub's own code (the extender) handle the LE payload.  Only go
+  // down our direct-LE-dispatch path for files where the stub is
+  // clearly not doing anything meaningful (bare LE binaries like
+  // LE_MIN.EXE, OS/2 executables running on DOS, etc.).
+  bool extender_detected = false;
+  if (f.size() >= 0x40) {
+    const uint32_t lfanew = rdd(f, 0x3C);
+    if (lfanew > 0x40 && lfanew <= f.size()) {
+      // Scan the MZ stub for well-known extender signatures.
+      const uint8_t *stub = f.data();
+      const size_t slen = std::min<size_t>(lfanew, 4096);
+      auto has = [&](const char *s) -> bool {
+        const size_t n = std::strlen(s);
+        for (size_t i = 0; i + n <= slen; ++i)
+          if (std::memcmp(stub + i, s, n) == 0) return true;
+        return false;
+      };
+      if (has("DOS/4G") || has("DOS/16M") || has("PMODE/W")) {
+        extender_detected = true;
+      }
+    }
+  }
+  if (extender_detected) {
+    s_extender_bound = true;
+    // Fall through to the MZ loader below.
+  }
+  if (!extender_detected
+      && f.size() >= 0x40
+      && !std::getenv("DOSEMU_LE_AS_MZ")) {
     const uint32_t le_off = rdd(f, 0x3C);
     if (le_off != 0 && le_off + 2 <= f.size()
         && ((f[le_off] == 'L' && f[le_off + 1] == 'E') ||
