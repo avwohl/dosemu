@@ -112,18 +112,39 @@ Root cause chain:
    read_section is erroring out on .text's path and taking a
    short-circuit return that skips .data.
 
-**For next session**: instrument `read_section` execution via CPU
-trace, or add verbose logging to our AX=0300/0301/0302 handlers to
-see what error go32-v2 encounters.  Likely candidates:
-- Our AH=42 (seek) returning a wrong DX:AX file-position on success.
-- Our AH=3F (read) returning an incorrect byte count in AX on
-  partial-buffer reads (the stub's transfer buffer is 60KB but
-  .text is 52KB, so it should fit in one read).
-- A subtle INT 31h AX=0300 (simulate RM INT) bug around register
-  preservation after the RM call.
+**Further pinpointing (same session, 2026-04-22)**: downloaded DJGPP
+source (`djlsr205.zip`), extracted `src/stub/stub.asm` and `src/libc/
+crt0/crt0.S`.  Compared against execution trace.
 
-Once .data loads, `__stubinfo` will get a valid pointer, and the rest
-of DJGPP libc's startup should chain correctly.
+The go32-v2 stub code at offsets 0x2EE and 0x300 in the stub image
+(= linear 0x13EE and 0x1400 after MZ load at 0x1100) are the two
+`call read_section` instructions (for .text and .data respectively).
+The CPU trace shows EIP progresses correctly through 0x2EE -> 0x33A
+(read_section entry) -> ... -> returns to 0x2F1 -> 0x2F6 ->
+**then garbage from 0x2FB onwards** (executing random bytes as
+instructions).
+
+Memory dump at fault time (`DOSEMU_EXC_TRACE=1`, custom probe) shows
+stub bytes at 0x13FA..0x13FF have been **overwritten** from the
+expected `08 66 8b 0e 27 08` (the end of `mov edi,[0x823]` + all of
+`mov ecx,[0x827]`) to `c8 20 00 f0 47 30`.  So the CALL itself
+didn't happen -- the 3-byte `e8 37 00 call 0x33a` at 0x300 is intact,
+but its setup instructions at 0x2FB-0x2FF are corrupted.
+
+Exactly **6 bytes** corrupted, not a huge range.  That rules out
+"entire .text got copied to wrong address via AH=3F with bad DS".
+More likely: **our AX=0300 handler writes the simulated-RM CPU state
+back to the wrong offset of the dpmi_regs struct** (or writes too
+many bytes), clobbering a neighboring 6-byte span of stub code.
+
+**For next session**: diff what our AX=0300 handler writes back to
+[ES:EDI+offset] against CWSDPMI's convention.  dpmi_regs is a fixed
+0x32-byte real-mode call structure (AX/BX/CX/DX/SI/DI/BP/flags/ES/
+DS/FS/GS/IP/CS/SP/SS).  Our handler may be writing past the struct
+end into adjacent .data, or computing the struct base with wrong
+segment registers.  Specifically: does AX=0300 use the client's DS
+when the client has 32-bit mode flags set and the struct pointer is
+passed in EDI (not DI), or does it use some other selector?
 
 ## Watchpoint data point on [DS:0x19370] (2026-04-22, arm64 Mac)
 
