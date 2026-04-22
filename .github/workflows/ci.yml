@@ -1,8 +1,12 @@
 name: CI
 
 on:
+  # Run CI only on tagged releases + manual triggers.  Day-to-day
+  # commits to main are fast enough to self-test locally; running the
+  # full dosbox-staging build + dosemu suite on every push burns a lot
+  # of GitHub Actions minutes for little marginal value.
   push:
-    branches: [main]
+    tags: ['v*', 'ci-*']
   pull_request:
     branches: [main]
   workflow_dispatch:
