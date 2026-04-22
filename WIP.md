@@ -24,6 +24,40 @@ The cascade of fixes that got us here:
     commit f00bd10  AX=0002 cache RPL fix + recursion guard
     commit 2bafe81  IOPL=3 in initial EFLAGS + AX=0001 don't-zero-descriptor
 
+## DJGPP: the remaining mystery
+
+The first real fault (DS=0xF4 at 0x002f:0x7c29 in djecho's libc) has
+been narrowed down:
+
+- **Instruction identified** via `i586-pc-msdosdjgpp-objdump` on the
+  extracted COFF: `mov %ds, 0x8(%ebp)` in a `movedata`-like wrapper
+  at `0x7c20`.  Caller at `0x4177` in a function at `0x40f0` that
+  reads a global pointer at `[0x19370]` (in .bss -- zero-initialized)
+  and passes fields from the pointed-to struct as movedata args.
+
+- **The pointed-to struct layout matches `__dpmi_regs`** (fs at +0x26,
+  ip at +0x2a, cs at +0x2c, ss at +0x30).  Whichever global this is,
+  it's meant to hold a real-mode call register block.  When the code
+  path fires without the struct ever having been populated (or with
+  stale data), the CS field can hold 0xF4 -- a value we never allocate
+  as a selector, so loading it into DS #GPs.
+
+- **Allocations verified**: only 4 LDT allocations happen during the
+  full djecho run (slots 5/6/7/8 via AX=0000 + AX=000A).  LDT[30]
+  is never allocated; 0xF4 doesn't come from our DPMI host response.
+
+Further investigation needs to trace the client's global
+initialization path -- specifically, which DJGPP library function
+is supposed to populate `[0x19370]` with a valid `__dpmi_regs *`
+before anyone in the exit path reads it.  Likely a missing
+stubinfo or env-setup piece that our DPMI host doesn't provide
+correctly to DJGPP.
+
+**Pragmatic status**: dosemu now terminates cleanly on DJGPP
+SIGSEGV (rc=0 with readable diagnostic output).  No actual DJGPP
+program execution yet -- main() never runs -- but every underlying
+dosemu-side bug that was ALSO on the critical path has been fixed.
+
 ## CI: first fully green run in repo history
 
 ## CI: first fully green run in repo history
