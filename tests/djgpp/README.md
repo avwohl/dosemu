@@ -54,3 +54,4 @@ make                    # build dosemu if not already
 | DJ_QUOTED   | quoted multi-word args survive PSP cmd-tail encoding |
 | BANNER      | real third-party DJGPP tool (banner.exe, 2005)       |
 | GREP        | real GNU grep 2.28 (grep228b from delorie.com)       |
+| DIFF        | real GNU diff (dif37b from delorie.com) — text-mode read regression gate |

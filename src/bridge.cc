@@ -3611,7 +3611,14 @@ Bitu dosemu_int21() {
         auto it = s_handles.find(reg_bx);
         if (it == s_handles.end()) { return_error(0x06); break; }
         fd = it->second.fd;
-        text_mode = it->second.text_mode;
+        // Real DOS does NOT do CR/LF translation on disk-file reads --
+        // that's a C-runtime concern layered on top of AH=3F.  Only
+        // device reads (stdin) do text-mode cooking at the DOS level.
+        // Expanding \n -> \r\n here inflates the byte count the caller
+        // sees, which breaks programs that seek relative to EOF
+        // (e.g., DJGPP diff does lseek(-filesize, SEEK_CUR) and gets
+        // EINVAL if the file looks bigger than it is on disk).
+        text_mode = false;
         pending = &it->second.read_pending;
       }
       const PhysPt dst = SegPhys(ds) + reg_dx;
@@ -3688,9 +3695,23 @@ Bitu dosemu_int21() {
       int whence = SEEK_SET;
       if (reg_al == 1) whence = SEEK_CUR;
       if (reg_al == 2) whence = SEEK_END;
-      off_t off = (static_cast<int32_t>(reg_cx) << 16) | reg_dx;
+      // CX:DX is a 32-bit signed offset (high:low).  Cast through
+      // int32_t to get correct sign extension to off_t.
+      off_t off = static_cast<int32_t>(
+          (static_cast<uint32_t>(reg_cx) << 16) | reg_dx);
+      if (std::getenv("DOSEMU_OPEN_TRACE")) {
+        std::fprintf(stderr, "[seek] fd=%d whence=%d off=%lld (from CX:DX=%04x:%04x)\n",
+            (int)reg_bx, whence, (long long)off,
+            (unsigned)reg_cx, (unsigned)reg_dx);
+      }
       off_t pos = ::lseek(it->second.fd, off, whence);
-      if (pos < 0) { return_error(0x19); break; }
+      if (pos < 0) {
+        if (std::getenv("DOSEMU_OPEN_TRACE")) {
+          std::fprintf(stderr, "[seek] -> errno=%d (%s)\n", errno, strerror(errno));
+        }
+        return_error(0x19);
+        break;
+      }
       reg_ax = static_cast<uint16_t>(pos & 0xFFFF);
       reg_dx = static_cast<uint16_t>((pos >> 16) & 0xFFFF);
       it->second.read_pending = -1;  // invalidate text-mode read buffer

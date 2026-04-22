@@ -123,6 +123,28 @@ else
     fail=$((fail + 1))
 fi
 
+# Another real DJGPP tool: diff (dif37b from delorie.com).  This is
+# the regression gate for the AH=3F text-mode fix: diff reads the
+# whole file, then does lseek(-filesize, SEEK_CUR) to rewind.  If
+# AH=3F inflates byte counts with \n->\r\n for regular files, that
+# seek fails with EINVAL and diff bails.  Fixture: two 3-line files
+# differing on line 2; expected output is "2c2" diff format.
+ddir=$(mktemp -d)
+cp build/dosemu "$ddir/"
+cp tests/DIFF.EXE "$ddir/"
+printf "line1\nline2\nline3\n" > "$ddir/a.txt"
+printf "line1\nCHANGED\nline3\n" > "$ddir/b.txt"
+(cd "$ddir" && DOSEMU_DPMI_RING3=1 ./dosemu DIFF.EXE a.txt b.txt 2>/dev/null) > "$ddir/out" && drc=$? || drc=$?
+dgot=$(tr -d '\r' < "$ddir/out")
+rm -rf "$ddir"
+if [[ "$drc" == "1" && "$dgot" == *"2c2"* && "$dgot" == *"< line2"* && "$dgot" == *"> CHANGED"* ]]; then
+    printf "  %-12s PASS\n" "DIFF"
+    pass=$((pass + 1))
+else
+    printf "  %-12s FAIL (rc=%s out=%q)\n" "DIFF" "$drc" "$dgot"
+    fail=$((fail + 1))
+fi
+
 echo ""
 echo "  ${pass} passed, ${fail} failed"
 exit "$fail"
