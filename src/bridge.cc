@@ -885,8 +885,12 @@ void write_idt_gate(int idx, uint16_t sel, uint32_t off, bool bits32) {
   mem_writeb(p + 2, sel & 0xFF);
   mem_writeb(p + 3, (sel >> 8) & 0xFF);
   mem_writeb(p + 4, 0);
-  mem_writeb(p + 5, bits32 ? 0x8E : 0x86);      // present, DPL=0, int gate
-  mem_writeb(p + 6, (off >> 16) & 0xFF);        // 32-bit offset high
+  // Gate access byte: P=1, DPL=3, S=0, type (8E = 32-bit int gate,
+  // 86 = 16-bit).  DPL=3 so ring-3 clients can software-INT into
+  // the gate.  For CPU-delivered exceptions (not caused by an INT
+  // instruction) DPL doesn't matter.
+  mem_writeb(p + 5, bits32 ? 0xEE : 0xE6);
+  mem_writeb(p + 6, (off >> 16) & 0xFF);
   mem_writeb(p + 7, (off >> 24) & 0xFF);
 }
 
@@ -928,13 +932,13 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   write_gdt_descriptor(14, 0, 0, 0);
   write_gdt_descriptor(15, 0, 0, 0);
 
-  // TSS body: zero-fill, then set SS0=PM_SS_SEL / ESP0=top-of-ring0-stack
-  // so the CPU can switch stacks when transitioning ring 3 -> ring 0 on
-  // an interrupt.  Only those two fields matter for our use.
+  // TSS body: zero-fill, then set SS0 / ESP0 so the CPU can switch
+  // stacks when transitioning ring 3 -> ring 0 on an interrupt.
+  // ESP0 is an offset WITHIN the SS0 segment (stack top).
   for (uint32_t i = 0; i < TSS_SIZE; ++i)
     mem_writeb(TSS_SEG * 16u + i, 0);
-  mem_writed(TSS_SEG * 16u + 4, PM_RING0_STACK_TOP);   // ESP0
-  mem_writew(TSS_SEG * 16u + 8, PM_SS_SEL);            // SS0
+  mem_writed(TSS_SEG * 16u + 4, PM_CB_STACK_SIZE);     // ESP0 = 0x1000 (top)
+  mem_writew(TSS_SEG * 16u + 8, PM_CB_STACK);          // SS0 = PM_CB_STACK
 
   CPU_LGDT(GDT_LIMIT, GDT_SEG * 16u);
 
@@ -1042,6 +1046,52 @@ Bitu dosemu_dpmi_entry() {
   if (exc_cb) {
     for (int v = 0; v < 0x10; ++v)
       write_idt_gate(v, PM_CB_SEL, exc_cb, bits32);
+  }
+
+  // Ring-3 DPMI entry (DOSEMU_DPMI_RING3=1) -- experimental.  32-bit
+  // clients only; 16-bit goes down the ring-0 path below.  Real DPMI
+  // hosts (CWSDPMI, Windows 3.x, QEMM) run clients at CPL=3 with the
+  // host at CPL=0 so exceptions cleanly transition through the TSS.
+  // Our existing fixtures run at ring 0 and would need updating to
+  // use this path -- opt-in for now.
+  if (bits32 && std::getenv("DOSEMU_DPMI_RING3")) {
+    // Save the original client IP from the far-call frame.  The CS
+    // slot at [SP+2] gets overwritten below; IP at [SP] stays.
+    const uint16_t client_ip = mem_readw(SegValue(ss) * 16u + reg_sp);
+    const uint16_t client_ss = SegValue(ss);
+
+    CPU_SET_CRX(0, 0x00000001);      // PE=1
+    CPU_LLDT(PM_LDT_SEL);
+    CPU_LTR(PM_TSS_SEL);             // TSS active for inter-ring switches
+
+    // Switch to the ring-0 scratch stack (PM_CB_STACK, 4KB segment)
+    // so we can build an IRETD frame without clobbering the client's
+    // RM stack.  This is the same stack TSS.ESP0/SS0 point at, which
+    // the CPU will also use when interrupts fire from ring 3.
+    CPU_SetSegGeneral(ss, PM_CB_STACK);
+    reg_esp = PM_CB_STACK_SIZE - 32;      // offset within 4KB seg
+
+    // Pre-load DS/ES with ring-3 selectors.
+    CPU_SetSegGeneral(ds, PM_DS3_SEL);
+    CPU_SetSegGeneral(es, PM_ES3_SEL);
+
+    // Build IRETD frame with CPL change (0->3 pops 20 bytes):
+    //   [ESP+0]  EIP       = client_ip
+    //   [ESP+4]  CS        = PM_CS3_SEL (RPL=3)
+    //   [ESP+8]  EFLAGS    = 0x0002 (reserved-bit-1 only; IF cleared)
+    //   [ESP+12] ESP       = client's ring-3 ESP (top of SS3 segment)
+    //   [ESP+16] SS        = PM_SS3_SEL (RPL=3)
+    const PhysPt frame = SegPhys(ss) + reg_esp;
+    mem_writed(frame + 0,  client_ip);
+    mem_writed(frame + 4,  PM_CS3_SEL);
+    mem_writed(frame + 8,  0x00000002u);
+    mem_writed(frame + 12, 0xFFFC);                     // ESP3 (offset)
+    mem_writed(frame + 16, PM_SS3_SEL);
+    (void)client_ss;                                    // currently unused
+
+    CPU_IRET(true, 0);                 // pops to ring 3
+    reg_ax = 0;
+    return CBRET_NONE;
   }
 
   // Replace the stacked return-address CS with our PM code selector so the
