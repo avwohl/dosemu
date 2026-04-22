@@ -1141,7 +1141,8 @@ Bitu dosemu_int2f() {
     // DPMI is present.  Auto-detected at load time via the MZ stub's
     // DOS/4G signature (see s_extender_bound).  Matches how QEMM-era
     // memory managers coexisted with bound extenders.
-    if (s_extender_bound || std::getenv("DOSEMU_NO_DPMI")) {
+    if ((s_extender_bound && !std::getenv("DOSEMU_FORCE_DPMI"))
+        || std::getenv("DOSEMU_NO_DPMI")) {
       reg_ax = 0xFFFF;        // DPMI not present
       return CBRET_NONE;
     }
