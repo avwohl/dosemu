@@ -5611,7 +5611,7 @@ bool build_env_block(const std::string &program_path) {
   // commonly expected (HOME, USER, TMPDIR).
   if (!put_string("COMSPEC=C:\\COMMAND.COM")) return false;
   if (!put_string("PATH=C:\\"))               return false;
-  for (const char *key : {"HOME", "USER", "TMPDIR", "LANG"}) {
+  for (const char *key : {"HOME", "USER", "TMPDIR", "LANG", "TZ"}) {
     const char *val = std::getenv(key);
     if (val && *val) {
       std::string entry = std::string(key) + "=" + val;
