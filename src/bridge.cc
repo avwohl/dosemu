@@ -2136,6 +2136,13 @@ struct ProcessState {
 };
 std::vector<ProcessState> s_process_stack;
 
+// Set by AH=4Ch when a child process exits while nested inside a
+// simulate-RM-INT.  The simulate-RM-INT return path checks this and
+// propagates CBRET_STOP all the way out so AH=4Bh's RunMachine
+// unwinds cleanly, instead of trying to IRET back to the child's
+// now-dead PM context (which fails with "Illegal descriptor type").
+bool s_child_exit_pending = false;
+
 // Last terminated child's exit info for AH=4Dh.  Low byte = exit
 // code from AH=4Ch, high byte = termination type (we always report
 // 0 = normal).  Updated by AH=4Bh after restoring the parent; read
@@ -3321,6 +3328,16 @@ Bitu dosemu_int31() {
 
       CALLBACK_RunRealInt(intnum);
 
+      // If the RM INT terminated a child via AH=4C, don't try to
+      // resume PM here -- the child is dead.  Propagate CBRET_STOP
+      // so the outer child RunMachine (from AH=4B) unwinds.  AH=4B's
+      // restore path will flip CR0.PE=1 via CPU_SetSegGeneral when
+      // it reloads the parent's selectors.
+      if (s_child_exit_pending) {
+        CPU_LIDT(saved_idt_limit, saved_idt_base);
+        return CBRET_STOP;
+      }
+
       // Snapshot results before reloading PM state clobbers them.
       const uint32_t r_eax = reg_eax;
       const uint32_t r_ebx = reg_ebx;
@@ -4363,6 +4380,13 @@ Bitu dosemu_int21() {
       // halts the emulator.
       if (!s_process_stack.empty()) {
         s_process_stack.back().child_exit_code = reg_al;
+        // Signal the simulate-RM-INT return path (if any) to propagate
+        // CBRET_STOP up through the INT 31 trampoline so the OUTER
+        // child RunMachine (from AH=4B) also unwinds.  Without this,
+        // AH=4C from PM via INT 31 AX=0300 would only unwind the RM
+        // INT's nested machine, then try to IRET back to the child's
+        // PM context -- which is dead and whose stack is gone.
+        s_child_exit_pending = true;
         return CBRET_STOP;
       }
       s_exit_code = reg_al;
@@ -4611,6 +4635,7 @@ Bitu dosemu_int21() {
       DOSBOX_RunMachine();
 
       // Child exited via AH=4Ch; restore parent state.
+      s_child_exit_pending = false;
       const ProcessState restored = s_process_stack.back();
       s_process_stack.pop_back();
       SegSet16(cs, restored.cs);

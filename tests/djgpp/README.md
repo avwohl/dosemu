@@ -51,6 +51,7 @@ make                    # build dosemu if not already
 | DJ_MALLOC   | malloc/free stress (64 blocks × varying sizes)       |
 | DJ_STDIN    | fread from piped stdin                               |
 | DJ_SIGNAL   | SIGFPE handler + siglongjmp recovery (#DE → POSIX)   |
+| DJ_EXEC     | AH=4B exec: DJGPP parent spawns HELLO.COM child       |
 | DJ_QUOTED   | quoted multi-word args survive PSP cmd-tail encoding |
 | BANNER      | real third-party DJGPP tool (banner.exe, 2005)       |
 | GREP        | real GNU grep 2.28 (grep228b from delorie.com)       |
