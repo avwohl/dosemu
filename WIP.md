@@ -127,40 +127,61 @@ is functional under our DPMI host.
    which isn't a valid selector for the client.  So the CALLER of
    this function passed a bogus SS.
 
-   **AX=0300 ruled out (2026-04-22 end-of-session probe).**
-   Instrumented AX=0300 to checksum the ring-change frame's
-   outer_SS:outer_ESP slots before and after the RM round-trip.
-   Across 303,000+ AX=0300 calls during djecho's run, ZERO frame
-   mutations were observed ("CHANGED!" never fires).  The simulate-
-   RM-INT path preserves the ring-change frame correctly; the
-   corruption is elsewhere.
+   **AX=0300 ruled out (2026-04-22).**  303,000+ sim-RM-INT calls
+   preserved the ring-change frame every time (zero frame mutations
+   observed).
 
-   Remaining suspects:
-   - AX=0301/0302 (call RM procedure) -- similar mode-switch code,
-     might have a bug AX=0300 doesn't.
-   - AX=0303/0304 (RM callback) -- do_rm_callback runs every time a
-     registered RM IVT vector fires; DJGPP registers timer/kbd/INT 0.
-   - Our PSP / command-line setup feeding DJGPP libc garbage that
-     its exception-dispatch/signal path propagates as a bogus SS.
-     (Register dump shows `program=<**UNKNOWN**>`, i.e. __dos_argv0
-     is NULL.)
-   - A data-segment limit mismatch between our starter LDT[3] SS
-     (set up in dosemu_dpmi_entry with base = client_rm_ss*16) and
-     LDT[7] (the client's eventually-used SS, base = client_memory).
-     DJGPP crt0.S does `movw %ds, %ss` (line 317), but that only
-     switches SELECTOR; if the starter LDT[3] descriptor is ever
-     consulted for something else, base mismatch bites.
+   **Actual instruction identified (2026-04-22, via objdump on the
+   extracted COFF from djecho.exe using `i586-pc-msdosdjgpp-objdump`
+   from the host's binutils-djgpp package):**
+   ```
+   7c29: 8e 5d 08    mov %ds, 0x8(%ebp)   ; (not SS as initially decoded)
+   ```
+   So the fault is loading DS (not SS) from arg1 of a `movedata`-like
+   function.  Arg1 at fault time = 0xF4 (matches err).  0xF4 is a
+   selector: LDT[30], RPL=0.  Something in djecho's libc grabbed 0xF4
+   as a "source selector" to pass to movedata.  Our LDT bitmap only
+   records 3 allocations (LDT[5]/[6]/[7] + the starter slots 1-4), so
+   LDT[30] was never allocated through AX=0000 -- yet the client has
+   this value somewhere.  Likely a pre-initialized constant baked
+   into the COFF, or a stubinfo field feeding __djgpp_dos_sel.
 
-2. **Secondary fault in exit path.**  After the handler prints the
-   dump it calls `_exit(-1)` -> `__exit` -> INT 21h AH=4C.  Inside
-   that, a second #GP fires at 0x002f:0x1acc with err=0 (null-selector
-   access).  Investigation would need to disassemble offset 0x1ACC of
-   djecho's COFF image to identify which DJGPP libc routine is on the
-   exit path.
+   **Practical mitigation landed (commit f00bd10):**
+   - AX=0002 cached-path was returning selector with RPL=0 instead of
+     the client's CPL.  Harmless for DS-into-ring-3 loads (since
+     DPL=3 satisfied MAX(CPL,RPL) <= DPL), but would crash on SS
+     loads at ring-3.  Fixed.
+   - PM exception dispatcher now detects recursive faults (same cs:eip
+     5 times in a row) and CBRET_STOP-terminates, matching CWSDPMI's
+     `locked_count > 5` bail.  Without this, DJGPP's SIGSEGV default
+     handler would print + `_exit`, but `_exit` itself faults (same
+     DS=0xF4 story, different call site at 0x1ACC), re-entering the
+     handler, infinite spin.  Now: prints dump once, attempts exit,
+     recursion guard fires, dosemu exits rc=0.
+
+   **Outcome:** DJGPP djecho.exe prints its full SIGSEGV diagnostic:
+   ```
+   General Protection Fault at eip=00007c29
+   eax=00000000 ebx=0009ffff ecx=000000ff edx=00000000 ...
+   cs: sel=002f base=00120000 limit=0009ffff
+   ds: sel=0037 base=00120000 limit=0009ffff
+   ...
+   Exiting due to signal SIGSEGV
+   ```
+   No actual program execution (djecho's main() never runs), but
+   the DPMI infrastructure is now correct enough that DJGPP's
+   runtime diagnostic path is fully functional.  Full program
+   execution needs the 0xF4 mystery resolved -- likely involves
+   reverse-engineering the stubinfo consumption in go32-v2.
 
 3. **Paging.**  As before, genuine ring-3 isolation needs CR0.PG=1 +
    page tables so a misbehaving client can't overwrite host memory
    through a legitimate selector.  Multi-session.
+
+2. **Secondary fault in exit path.**  After the handler prints the
+   dump it calls `_exit(-1)` -> `__exit` -> INT 21h AH=4C.  Inside
+   that, a second #GP fires at 0x002f:0x1acc with err=0 (null-selector
+   access).  Same class of bug -- also mitigated by the recursion guard.
 
 **Why this is hard to fix without paging:** DPMI clients legitimately
 point their own selectors at arbitrary linear addresses.  With no
