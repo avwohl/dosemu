@@ -115,6 +115,12 @@ std::string                 s_program;
 // coexisted without per-binary config.  We choose the same path by
 // sensing which kind of binary we're running.
 bool s_extender_bound = false;
+
+// Current DPMI client's CPL (0 = legacy ring-0 clients, 3 = ring-3
+// clients entered via DOSEMU_DPMI_RING3 path).  OR'd into the RPL
+// field of selectors we hand out via INT 31h AX=0000 so the client
+// can use them at its own privilege level.  CWSDPMI's `run_ring`.
+uint8_t s_client_cpl = 0;
 std::vector<std::string>    s_args;
 int                         s_exit_code = 0;
 
@@ -1063,6 +1069,7 @@ Bitu dosemu_dpmi_entry() {
     CPU_SET_CRX(0, 0x00000001);      // PE=1
     CPU_LLDT(PM_LDT_SEL);
     CPU_LTR(PM_TSS_SEL);             // TSS active for inter-ring switches
+    s_client_cpl = 3;                // LDT selectors get RPL=3
 
     // Switch to the ring-0 scratch stack (PM_CB_STACK, 4KB segment)
     // so we can build an IRETD frame without clobbering the client's
@@ -1863,15 +1870,13 @@ Bitu dosemu_int31() {
       if (start == 0) {
         reg_ax = 0x8011; set_cf(true); return CBRET_NONE;
       }
+      // Access byte: 0x92 for ring-0 client, 0xF2 for ring-3.
+      const uint8_t access = 0x92 | (s_client_cpl << 5);
       for (uint16_t i = 0; i < count; ++i) {
         ldt_set(start + i, true);
-        // Install a placeholder data descriptor: base 0, limit 0, access
-        // 0x92 (present, DPL=0, data r/w).  The client is expected to
-        // call AX=0007 (set base) + a size service before using it, so
-        // a base-0/limit-0 slot is valid-but-empty.
-        write_ldt_descriptor(start + i, 0, 0, 0x92);
+        write_ldt_descriptor(start + i, 0, 0, access);
       }
-      reg_ax = (start << 3) | 0x04;      // TI=1, RPL=0
+      reg_ax = (start << 3) | 0x04 | s_client_cpl;   // TI=1, RPL=client
       set_cf(false);
       return CBRET_NONE;
     }
@@ -1911,9 +1916,11 @@ Bitu dosemu_int31() {
         reg_ax = 0x8011; set_cf(true); return CBRET_NONE;
       }
       ldt_set(idx, true);
-      write_ldt_descriptor(idx, seg * 16u, 0xFFFF, 0x92);
+      // Access byte 0x92 + DPL: 0x92 for ring-0, 0xF2 for ring-3.
+      const uint8_t access = 0x92 | (s_client_cpl << 5);
+      write_ldt_descriptor(idx, seg * 16u, 0xFFFF, access);
       s_seg2desc_cache[seg] = idx;
-      reg_ax = (idx << 3) | 0x04;
+      reg_ax = (idx << 3) | 0x04 | s_client_cpl;
       set_cf(false);
       return CBRET_NONE;
     }
