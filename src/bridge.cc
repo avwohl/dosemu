@@ -6534,9 +6534,15 @@ int run_program(const dosemu::Config &cfg) {
   // unconditional.
   s_default_mode = cfg.default_mode;
 
-  loguru::g_stderr_verbosity = (cfg.verbose >= 2) ? loguru::Verbosity_INFO
-                              : (cfg.verbose >= 1) ? loguru::Verbosity_WARNING
-                                                   : loguru::Verbosity_ERROR;
+  // Default to FATAL so dosbox's ERR-level chatter (UNICODE mapping
+  // lookups, PIC ICW quirks, etc.) doesn't pollute normal runs.
+  // dosemu's own user-facing diagnostics go through std::fprintf, so
+  // legitimate error reporting is unaffected.  Passing -v once bumps
+  // to ERROR (still filters warnings), -vv bumps to WARNING, etc.
+  loguru::g_stderr_verbosity = (cfg.verbose >= 3) ? loguru::Verbosity_INFO
+                              : (cfg.verbose >= 2) ? loguru::Verbosity_WARNING
+                              : (cfg.verbose >= 1) ? loguru::Verbosity_ERROR
+                                                   : loguru::Verbosity_FATAL;
 
   static const char *dummy_argv[] = {"dosemu", nullptr};
   auto cmdline = std::make_unique<CommandLine>(1, dummy_argv);
