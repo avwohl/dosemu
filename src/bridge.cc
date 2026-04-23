@@ -4265,38 +4265,54 @@ Bitu dosemu_int21() {
       // Input : AL=subfunction, BX=codepage (-1=current), DX=country
       //         (-1=current), ES:DI=buffer, CX=buffer size
       // Output: on success CX=info len, buffer filled.
-      // Our minimal implementation reports US / codepage 437 /
-      // "C"-locale-equivalent.  DJGPP libc uses this in setlocale
-      // and various isalpha/toupper tables; FreeCOM uses AL=05
-      // (filename-character table) to populate its is_fnchar() --
-      // without which every character is treated as non-filename
-      // and internal commands can't be parsed.
+      //
+      // Subfunctions 02/04/06 return a 5-byte result [id + far ptr to
+      // table], NOT a 41-byte general-info block.  2000-era DJGPP tools
+      // (coreutils SEQ/WC/GREP, etc.) call AL=06 during setlocale and
+      // dereference the returned pointer to read the collating table;
+      // returning the 41-byte general-info struct made them jump to a
+      // bogus address encoded in bytes 1..4 (the "codepage/country"
+      // fields) and crash with #UD at a random high EIP.  Minimal C-
+      // locale tables live in the BIOS-data-area-adjacent scratch
+      // region we reserve at 0x0700-0x0A00 (unused by DOS).
       const uint16_t cx_in = reg_cx;
       const PhysPt dst = SegPhys(es) + reg_di;
       uint8_t buf[64] = {0};
       size_t n = 0;
+
+      // Small helper to emit a 5-byte result: [id][off_lo][off_hi][seg_lo][seg_hi].
+      auto emit_far_ptr = [&](uint8_t id, uint16_t seg, uint16_t off) {
+        buf[0] = id;
+        buf[1] = off & 0xFF;
+        buf[2] = (off >> 8) & 0xFF;
+        buf[3] = seg & 0xFF;
+        buf[4] = (seg >> 8) & 0xFF;
+        n = 5;
+      };
+
+      // Install the minimal C-locale tables once.  Layout in linear memory:
+      //   0x0700: uppercase (AL=02 / AL=04) -- count=128, then bytes for 0x80..0xFF
+      //   0x0800: collating (AL=06)          -- count=256, then identity 0x00..0xFF
+      //   0x0A00: filename character table (AL=05; already installed at 0x0610)
+      static bool nls_installed = false;
+      if (!nls_installed) {
+        // Uppercase table at 0x0700: count word = 128, identity for high chars.
+        mem_writew(0x0700, 128);
+        for (int c = 0x80; c <= 0xFF; ++c) mem_writeb(0x0702 + (c - 0x80), c);
+        // Collating table at 0x0800: count word = 256, identity mapping.
+        mem_writew(0x0800, 256);
+        for (int c = 0x00; c <= 0xFF; ++c) mem_writeb(0x0802 + c, c);
+        nls_installed = true;
+      }
+
       if (reg_al == 0x05) {
-        // Filename character table: buf[0]=id, buf[1..4]=FAR pointer
-        // to the table.  FreeCOM reads the 10-byte header via that
-        // pointer, then treats pointer+10 as the illegal-char list.
-        // We park the table at a fixed offset (0x0060:0x0010 =
-        // linear 0x610) just past the SFT stub block at 0x600.
+        // Filename character table.  Pre-installed at linear 0x0610 by
+        // an earlier commit; emit the 5-byte far-pointer response.
         constexpr uint32_t nls_tab = 0x610;
-        // Table layout (10-byte header + 13 illegal chars):
-        //   [0..1] = reserved (size/pad)
-        //   [2]    = reserved
-        //   [3]    = inclFirst (lowest allowed char)
-        //   [4]    = inclLast  (highest allowed char)
-        //   [5]    = reserved
-        //   [6]    = exclFirst (lead-byte exclude range start)
-        //   [7]    = exclLast  (lead-byte exclude range end, empty)
-        //   [8]    = reserved
-        //   [9]    = illegalLen (count of bytes that follow)
-        //   [10..] = illegal chars
         static const uint8_t tbl[10] = {
             0x17, 0x00,   // size hint
             0x00,
-            0x21,         // inclFirst (first printable ASCII char, '!')
+            0x21,         // inclFirst (first printable ASCII, '!')
             0xFF,         // inclLast
             0x00,
             0x80,         // exclFirst
@@ -4309,14 +4325,19 @@ Bitu dosemu_int21() {
           mem_writeb(nls_tab + i, tbl[i]);
         for (size_t i = 0; i < 13; ++i)
           mem_writeb(nls_tab + 10 + i, static_cast<uint8_t>(illegal[i]));
-        buf[0] = 0x05;
-        buf[1] = 0x10;   // offset lo
-        buf[2] = 0x00;   // offset hi
-        buf[3] = 0x60;   // segment lo
-        buf[4] = 0x00;   // segment hi
+        emit_far_ptr(0x05, 0x0060, 0x0010);
+      } else if (reg_al == 0x02 || reg_al == 0x04) {
+        // Uppercase tables: both map identity for high-ASCII in C locale.
+        emit_far_ptr(reg_al, 0x0070, 0x0000);
+      } else if (reg_al == 0x06) {
+        // Collating sequence: 256-byte identity for C locale.
+        emit_far_ptr(0x06, 0x0080, 0x0000);
+      } else if (reg_al == 0x07) {
+        // DBCS lead-byte table: empty (no DBCS).
+        buf[0] = 0x07; buf[1] = 0; buf[2] = 0; buf[3] = 0; buf[4] = 0;
         n = 5;
       } else {
-        // Default (subfunctions 1 etc.): 41-byte extended country info.
+        // AL=00/01 (and fall-through): 41-byte extended country info.
         buf[0] = 0x01;                                 // info id
         buf[1] = 41 & 0xFF;
         buf[2] = 0;

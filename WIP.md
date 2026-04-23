@@ -16,12 +16,21 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
 
     Severity  Issue                                        Evidence / gating
     --------  ------------------------------------------   ------------------
-    medium    2000-era DJGPP tools crash under FreeCOM     in-tree DJGPP works
-              (SEQ/WC/GREP/DIFF/FACTOR)                    same tools work direct
     medium    FreeCOM→DJGPP→DJGPP grandchild chain         nested AH=4B paths
     low       cpp.exe crash (DJGPP libc 2.05 stack smash)  patch in patches/
               -- not our bug; DJGPP libc dormant since     + verify script
               2015                                         + docs/djgpp-libc-*.md
+
+## Fixed this session (appended)
+
+    AH=65 AL=02/04/06/07 (NLS subfunctions) now return the correct
+    5-byte [id + far ptr] format with minimal C-locale tables at
+    linear 0x0700 (uppercase) and 0x0800 (collating).  Previously we
+    returned a 41-byte general-info struct for every AL, causing
+    2000-era DJGPP tools (SEQ/WC/GREP/DIFF/FACTOR) to dereference
+    `0x01B5:0x0029` (bytes from the general-info codepage/country
+    fields misread as a far pointer) and crash with #UD at high EIP.
+    Extended FC_SPAWN regression gate to include SEQ.EXE 1 3.
 
 ## Strategic backlog
 
@@ -31,7 +40,7 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
     ----                                    ------    -------    ----
     FreeCOM + modern DJGPP programs         done      [x]        [x]
     FreeCOM + RM children (HELLO.COM)       done      [x]        [x]
-    FreeCOM + 2000-era DJGPP tools          1-2 days  broken     [x]
+    FreeCOM + 2000-era DJGPP tools          done      [x]        [x]
     GNU make + real recipes                 done      [x]        [x]
 
 ### Tier 2 — development environment
@@ -76,12 +85,15 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
 
 ## Dependency ordering for what's achievable
 
-    1.  FreeCOM + 2000-era DJGPP tools     ┐
-                                           ├── independent
-    2.  Tier 3 LE loader pieces            ┘
+    1.  Tier 3 LE loader pieces
         ├─ DPMI service hand-off
         ├─ RM INT reflection
         └─ Import resolution
+
+    2.  FreeCOM→DJGPP→DJGPP grandchild chain
+        (nested AH=4B state restore; our current impl only preserves
+         one level of parent state -- grandchild's cleanup clobbers
+         grandparent's bases)
 
     3.  cpp.exe fix   ← depends on: someone rebuilds DJGPP libc with our
                                      patches/djgpp-libc-c1loadef-stack-smash.patch
@@ -90,10 +102,7 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
 
 ## Recommendation
 
-- **Interactive shell robustness**: chase #1.  Deterministic fault EIP
-  per binary, known-good minimal case (DJ_WRITE), clean DPMI init
-  trace matching up to divergence point.  Tractable debug shape.
-- **Developer-tool coverage**: chase #2 (LE loader).  Each remaining
+- **Developer-tool coverage**: chase #1 (LE loader).  Each remaining
   piece is bounded and additive.  `wd.exe` running is a visible
   milestone.
 - **Long-game goodwill**: submit

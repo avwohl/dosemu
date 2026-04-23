@@ -136,13 +136,15 @@ fi
 # DJ_WRITE.EXE) within a single FreeCOM session, then a post-spawn
 # builtin + exit to verify the REPL is still alive.
 fcs_dir=$(mktemp -d)
-cp build/dosemu tests/COMMAND.COM tests/HELLO.COM tests/DJ_WRITE.exe "$fcs_dir/"
-fcsout=$(printf 'HELLO.COM\r\nDJ_WRITE.EXE\r\necho post-spawn-ok\r\nexit\r\n' \
+cp build/dosemu tests/COMMAND.COM tests/HELLO.COM tests/DJ_WRITE.exe tests/SEQ.EXE "$fcs_dir/"
+fcsout=$(printf 'HELLO.COM\r\nDJ_WRITE.EXE\r\nSEQ.EXE 1 3\r\necho post-spawn-ok\r\nexit\r\n' \
     | (cd "$fcs_dir" && timeout 10 ./dosemu COMMAND.COM 2>/dev/null) | tr -d '\r')
 rm -rf "$fcs_dir"
 if echo "$fcsout" | grep -q 'post-spawn-ok' \
     && echo "$fcsout" | grep -q 'dosemu-hello-ok' \
-    && echo "$fcsout" | grep -q 'dj-write=ok'; then
+    && echo "$fcsout" | grep -q 'dj-write=ok' \
+    && echo "$fcsout" | grep -Eq '^1$' \
+    && echo "$fcsout" | grep -Eq '^3$'; then
     printf "  %-12s PASS\n" "FC_SPAWN"
     pass=$((pass + 1))
 else
