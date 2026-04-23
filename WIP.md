@@ -34,30 +34,33 @@ when landed.  Suite is 29/29 at the start of the backlog.
    to no longer be a blocker.  (Subsequent compile+link failures
    are Watcom config issues -- missing system definition + libs --
    not dosemu bugs.)
-5. **DJGPP→DJGPP nested exec.**  Child now runs end-to-end;
-   five layered root causes found and all fixed (3 child-side,
-   2 parent-side).  DJGPP→DJGPP child's `dj-write=ok` marker
-   prints.
+5. **DJGPP→DJGPP nested exec.**  Child runs end-to-end and
+   prints `dj-write=ok`.  Seven layered root causes found and
+   fixed.  Parent resume still hits a fault; deferred.
    - **#5.1 (b46f43a):** Path reconstruction for empty `[DS:0x764]`.
    - **#5.2 (9f8cc2a):** Zero child MCB before MZ load.
-   - **#5.3 (281e20f):** Preserve client's RM SP into PM instead
-     of hardcoding 0xFFFC (the hardcoded SP collided with child's
-     own COFF-load buffer for any child whose SS base differs
-     from top-level).
-   - **#5.4 (b06c848):** Rewrite parent's LDT[1..5] bases on
-     parent resume -- the child's dpmi_entry overwrote them.
-   - **#5.5 (b06c848):** Use CPU_SetSegGeneral instead of SegSet16
-     for PM parent restore -- the former re-reads the descriptor
-     base, the latter sets phys=val<<4 (RM-style).
+   - **#5.3 (281e20f):** Preserve client's RM SP in dpmi_entry
+     IRETD frame instead of hardcoding 0xFFFC.
+   - **#5.4 (b06c848):** Rewrite parent's LDT[1..5] bases on resume.
+   - **#5.5 (b06c848):** CPU_SetSegGeneral (PM descriptor reload)
+     instead of SegSet16 (val<<4) for PM parent restore.
+   - **#5.6 (9b020e9):** Unconditionally restore parent's CR0 on
+     AH=4B return -- child exited with PE=1 but parent was RM.
+   - **#5.7 (9b020e9):** Snapshot+restore full 2KB LDT memory
+     around child execution -- child's dpmi_entry wipes all 256
+     slots, clobbering parent's DPMI allocations in slots 6+.
 
-   **Remaining:** Parent resume still hits a late IRET failure
-   in a simrm context whose PM state wasn't fully unwound (stack
-   trace shows CALLBACK_RunRealInt active).  Low priority since
-   the CHILD works -- exit code path cleanup is a refinement.
+   **Remaining:** After all seven fixes, parent resume trips a
+   PM-exception-dispatcher recursive-fault loop.  The fault is
+   at CS=0x37 (LDT[6]) with a base mutation between our LDT
+   restore (0x120000) and the fault site (0x1d0000).  Something
+   modifies LDT[6] between the two points -- possibly a late
+   INT 31 AX=0007 (set base) from the parent's libc.  Not yet
+   diagnosed.
 
    **Suite: 29/29.  DJGPP→HELLO.COM clean.  DJGPP→DJGPP child
-   runs and produces correct output, then parent crashes on
-   cleanup.**
+   now runs + produces correct output; parent post-resume still
+   crashes in fault-dispatcher.**
 
 ## Larger
 6. **`make` with real recipes.**  Need FreeCOM (FreeDOS's
