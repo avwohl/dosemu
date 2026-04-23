@@ -3643,8 +3643,33 @@ Bitu dosemu_int21() {
     }
 
     case 0x3D: {  // Open file; AL=mode, DS:DX=path.  Returns handle in AX.
-      const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
-      const Resolved    r        = resolve_path(dos_path);
+      std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      // DJGPP stub quirk on nested exec: the go32-v2 stub clears the
+      // RM argv[0] scratch buffer at `[DS:0x764]` (writing 0x00 to
+      // byte 0) after switching to PM -- but some PM-side code still
+      // reads the path from that offset.  When we see an empty path
+      // but bytes 1..N look like ":\..." (the rest of the path
+      // survives, just the leading 'C' was zeroed), re-synthesize
+      // the full argv[0] from our known child path.  Only kicks in
+      // inside a nested process (s_process_stack non-empty) so
+      // top-level flows are unaffected.
+      if (dos_path.empty() && !s_process_stack.empty()
+          && reg_dx != 0 && mem_readb(SegPhys(ds) + reg_dx) == 0
+          && mem_readb(SegPhys(ds) + reg_dx + 1) == ':') {
+        // Reconstruct from the :\... tail still in memory.  Prepend
+        // the current drive letter.
+        dos_path = s_current_drive;
+        for (uint32_t i = 1; i < 128; ++i) {
+          uint8_t b = mem_readb(SegPhys(ds) + reg_dx + i);
+          if (b == 0) break;
+          dos_path += static_cast<char>(b);
+        }
+        if (std::getenv("DOSEMU_OPEN_TRACE")) {
+          std::fprintf(stderr, "[open] reconstructed path from clobbered "
+              "stub buffer: '%s'\n", dos_path.c_str());
+        }
+      }
+      const Resolved r = resolve_path(dos_path);
       if (std::getenv("DOSEMU_OPEN_TRACE")) {
         std::fprintf(stderr,
             "[open] AL=%02x DS:DX=%04x:%04x path='%s' -> host='%s' textmode=%d\n",
