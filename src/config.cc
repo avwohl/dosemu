@@ -6,6 +6,7 @@
 //
 
 #include "config.h"
+#include "debug_settings.hpp"
 
 #include <cctype>
 #include <cstdio>
@@ -215,7 +216,7 @@ std::string resolve_program_path(const std::string &name) {
   }
 
   std::vector<std::string> dirs = {""};      // empty = CWD
-  if (const char *env = std::getenv("DOSEMU_PATH")) {
+  if (const char *env = dosemu::g_debug.path) {
     std::string p = env;
     size_t start = 0;
     while (start <= p.size()) {

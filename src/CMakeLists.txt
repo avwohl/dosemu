@@ -48,6 +48,7 @@ add_executable(dosemu
   dosemu.cc
   config.cc
   bridge.cc
+  debug_settings.cpp
 )
 
 # dosbox-staging searches <exe_dir>/resources for shaders, fonts, and

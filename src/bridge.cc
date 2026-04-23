@@ -21,6 +21,7 @@
 //
 
 #include "bridge.h"
+#include "debug_settings.hpp"
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -1179,7 +1180,7 @@ Bitu dosemu_dpmi_entry() {
   // host at CPL=0 so exceptions cleanly transition through the TSS.
   // Our existing fixtures run at ring 0 and would need updating to
   // use this path -- opt-in for now.
-  if (bits32 && std::getenv("DOSEMU_DPMI_RING3")) {
+  if (bits32 && dosemu::g_debug.dpmi_ring3) {
     // CWSDPMI-style ring-3 entry: allocate LDT slots for the client's
     // CS/DS/SS/ES aliases (not GDT slots -- real DPMI hosts put
     // client selectors in the LDT, so stub code that checks TI bit
@@ -1196,7 +1197,7 @@ Bitu dosemu_dpmi_entry() {
     const uint32_t ds_base  = SegValue(ds) * 16u;
     const uint32_t ss_base  = SegValue(ss) * 16u;
     const uint32_t es_base  = SegValue(es) * 16u;
-    if (std::getenv("DOSEMU_DPMI_TRACE")) {
+    if (dosemu::g_debug.dpmi_trace) {
       std::fprintf(stderr,
           "[dpmi-entry] cs=%04x ip=%04x ds=%04x ss=%04x es=%04x fs=%04x gs=%04x sp=%04x -> bases "
           "cs=%08x ds=%08x ss=%08x es=%08x\n",
@@ -1478,8 +1479,8 @@ Bitu dosemu_int2f() {
     // DPMI is present.  Auto-detected at load time via the MZ stub's
     // DOS/4G signature (see s_extender_bound).  Matches how QEMM-era
     // memory managers coexisted with bound extenders.
-    if ((s_extender_bound && !std::getenv("DOSEMU_FORCE_DPMI"))
-        || std::getenv("DOSEMU_NO_DPMI")) {
+    if ((s_extender_bound && !dosemu::g_debug.force_dpmi)
+        || dosemu::g_debug.no_dpmi) {
       reg_ax = 0xFFFF;        // DPMI not present
       return CBRET_NONE;
     }
@@ -1812,12 +1813,42 @@ Bitu dosemu_pm_exc_dispatch(int vec) {
     outer_ss  = static_cast<uint16_t>(mem_readd(r0_fp + 16) & 0xFFFF);
   }
 
-  if (std::getenv("DOSEMU_EXC_TRACE")) {
+  if (dosemu::g_debug.exc_trace) {
     static int seq = 0;
     std::fprintf(stderr,
-        "[exc#%d] vec=%d cs:eip=%04x:%08x err=0x%x outer_ss:esp=%04x:%08x eflags=%08x\n",
+        "[exc#%d] vec=%d cs:eip=%04x:%08x err=0x%x outer_ss:esp=%04x:%08x eflags=%08x cpl=%u\n",
         seq++, vec, (unsigned)cs_val, eip, err,
-        (unsigned)outer_ss, outer_esp, eflags);
+        (unsigned)outer_ss, outer_esp, eflags, (unsigned)cpu.cpl);
+    // Raw ring-0 stack dump.
+    std::fprintf(stderr, "[exc#] r0_fp=%08x r0_esp=%08x ring0 at r0_fp..+28:",
+                 (unsigned)r0_fp, (unsigned)r0_esp);
+    for (int i = 0; i <= 28; i += 4)
+      std::fprintf(stderr, " %08x", (unsigned)mem_readd(r0_fp + i));
+    std::fprintf(stderr, "\n");
+    std::fprintf(stderr, "[exc#] CPU Segs.val[cs]=%04x phys=%08x cpl=%u\n",
+                 (unsigned)SegValue(cs), (unsigned)SegPhys(cs), (unsigned)cpu.cpl);
+    // Dump the faulting instruction bytes.  cs_val may be a PM selector,
+    // so resolve via the descriptor table (routes GDT vs LDT by TI bit).
+    Descriptor dcs_dump;
+    if (cpu.gdt.GetDescriptor(cs_val, dcs_dump)) {
+      const uint32_t cs_base = dcs_dump.GetBase();
+      std::fprintf(stderr, "[exc#] cs.base=%08x bytes@eip:", cs_base);
+      for (int i = 0; i < 16; ++i)
+        std::fprintf(stderr, " %02x", mem_readb(cs_base + eip + i));
+      std::fprintf(stderr, "\n");
+    }
+    // Dump outer SS area too
+    Descriptor dss_dump;
+    if (cpu.gdt.GetDescriptor(outer_ss, dss_dump)) {
+      const uint32_t ss_base = dss_dump.GetBase();
+      std::fprintf(stderr, "[exc#] ss.base=%08x ss.limit=%08x words@esp-8:",
+                   ss_base, (unsigned)dss_dump.GetLimit());
+      for (int i = 0; i < 8; ++i) {
+        std::fprintf(stderr, " %04x",
+            (unsigned)mem_readw(ss_base + (outer_esp - 8 + i*2)));
+      }
+      std::fprintf(stderr, "\n");
+    }
   }
 
   // Recursion guard.  If the user handler's exit cleanup re-faults
@@ -2147,7 +2178,7 @@ bool s_virtual_if = true;    // clients assume interrupts enabled at start
 // handler returns CBRET_STOP to unwind that RunMachine and our AH=4B
 // handler pops the frame back off to restore parent state.
 struct ProcessState {
-  uint16_t cs, ds, ss, es;
+  uint16_t cs, ds, ss, es, fs, gs;
   uint32_t eip, esp, ebp;
   uint32_t eax, ebx, ecx, edx, esi, edi;
   uint32_t eflags;
@@ -2211,7 +2242,7 @@ inline bool selector_is_valid(uint16_t sel) {
 // slot) and AX=0002 (installs a real-mode-segment alias).
 void write_ldt_descriptor(int idx, uint32_t base, uint32_t limit,
                           uint8_t access, bool bits32) {
-  if (std::getenv("DOSEMU_LDT_TRACE")) {
+  if (dosemu::g_debug.ldt_trace) {
     std::fprintf(stderr,
         "[ldt-write] LDT[%d] sel=0x%04x base=0x%08x limit=0x%08x access=0x%02x "
         "bits32=%d (client cs:eip=%04x:%08x)\n",
@@ -2254,7 +2285,7 @@ uint16_t ldt_find_run(uint16_t count) {
 }
 
 Bitu dosemu_int31() {
-  if (std::getenv("DOSEMU_TRACE")) {
+  if (dosemu::g_debug.trace) {
     std::fprintf(stderr, "[int31] AX=%04x BX=%04x CX=%04x DX=%04x EDI=%08x ESI=%08x\n",
                  reg_ax, reg_bx, reg_cx, reg_dx, reg_edi, reg_esi);
   }
@@ -3267,7 +3298,7 @@ Bitu dosemu_int31() {
       const uint8_t intnum = reg_bl;
       // Pin the struct's linear address before we touch segments.
       const PhysPt rmcs = SegPhys(es) + reg_edi;
-      if (std::getenv("DOSEMU_SIMRM_TRACE")) {
+      if (dosemu::g_debug.simrm_trace) {
         std::fprintf(stderr,
             "[simrm] INT %02x ax=%08x cx=%08x dx=%08x ds=%04x es=%04x (PM ds=%04x(b=%08x) ss=%04x(b=%08x) es=%04x(b=%08x))\n",
             (unsigned)intnum,
@@ -3279,7 +3310,7 @@ Bitu dosemu_int31() {
             (unsigned)SegValue(es), (unsigned)SegPhys(es));
       }
 
-      if (std::getenv("DOSEMU_STACKWATCH")) {
+      if (dosemu::g_debug.stackwatch) {
         const uint32_t ss_lin = SegPhys(ss) + reg_esp;
         std::fprintf(stderr, "[simrm-enter] INT %02x client SS:SP=%04x:%08x lin=%08x val=%04x\n",
             (unsigned)intnum, (unsigned)SegValue(ss), (unsigned)reg_esp,
@@ -3288,6 +3319,12 @@ Bitu dosemu_int31() {
       // Snapshot PM state (segments + full register file + stack).
       const uint32_t saved_cr0  = cpu.cr0;
       const uint16_t saved_cs   = SegValue(cs);
+      if (dosemu::g_debug.simrm_trace) {
+        std::fprintf(stderr,
+            "[simrm-entry] PM cs:eip=%04x:%08x cr0=%08x cpl=%u\n",
+            (unsigned)saved_cs, (unsigned)reg_eip, (unsigned)saved_cr0,
+            (unsigned)cpu.cpl);
+      }
       const uint16_t saved_ds   = SegValue(ds);
       const uint16_t saved_ss   = SegValue(ss);
       const uint16_t saved_es   = SegValue(es);
@@ -3427,11 +3464,31 @@ Bitu dosemu_int31() {
       mem_writew(rmcs + 0x26, r_fs);
       mem_writew(rmcs + 0x28, r_gs);
 
-      if (std::getenv("DOSEMU_STACKWATCH")) {
+      if (dosemu::g_debug.stackwatch) {
         const uint32_t ss_lin = SegPhys(ss) + reg_esp;
         std::fprintf(stderr, "[simrm-exit]  INT %02x client SS:SP=%04x:%08x lin=%08x val=%04x\n",
             (unsigned)intnum, (unsigned)SegValue(ss), (unsigned)reg_esp,
             ss_lin, (unsigned)mem_readw(ss_lin));
+      }
+      if (dosemu::g_debug.simrm_trace || dosemu::g_debug.int4b_trace) {
+        std::fprintf(stderr,
+            "[simrm-exit]  INT %02x PM cs:eip=%04x:%08x cr0=%08x cpl=%u ss:esp=%04x:%08x\n",
+            (unsigned)intnum,
+            (unsigned)SegValue(cs), (unsigned)reg_eip,
+            (unsigned)cpu.cr0, (unsigned)cpu.cpl,
+            (unsigned)SegValue(ss), (unsigned)reg_esp);
+        // Read stack via BOTH the constexpr and SegPhys(ss) to detect
+        // any mismatch.
+        const PhysPt top_c = PM_CB_STACK_BASE + PM_CB_STACK_SIZE;
+        const PhysPt stk_p = SegPhys(ss) + reg_esp;
+        std::fprintf(stderr, "[simrm-exit]  INT %02x CONST ring0 top-32:", (unsigned)intnum);
+        for (int i = 32; i > 0; i -= 4)
+          std::fprintf(stderr, " %08x", (unsigned)mem_readd(top_c - i));
+        std::fprintf(stderr, "\n");
+        std::fprintf(stderr, "[simrm-exit]  INT %02x VIASP ss_base=%08x esp=%08x   EIP@%08x=%08x CS@%08x=%08x\n",
+            (unsigned)intnum, (unsigned)SegPhys(ss), (unsigned)reg_esp,
+            (unsigned)stk_p, (unsigned)mem_readd(stk_p),
+            (unsigned)(stk_p+4), (unsigned)mem_readd(stk_p+4));
       }
       set_cf(false);
       return CBRET_NONE;
@@ -3558,7 +3615,7 @@ Bitu dosemu_int31_bits32() {
 }
 
 Bitu dosemu_int21() {
-  if (std::getenv("DOSEMU_TRACE")) {
+  if (dosemu::g_debug.trace) {
     // When the client is in 32-bit PM (s_int_gate_bits32) the high
     // halves of EBX/ECX/EDX may carry meaningful data (Watcom's
     // runtime, for instance, calls AH=FFh with partial 32-bit regs).
@@ -3645,14 +3702,14 @@ Bitu dosemu_int21() {
     case 0x3C: {  // Create file; CX=attr, DS:DX=path.  Returns handle in AX.
       const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
       const Resolved    r        = resolve_path(dos_path);
-      if (std::getenv("DOSEMU_OPEN_TRACE")) {
+      if (dosemu::g_debug.open_trace) {
         std::fprintf(stderr,
             "[create] CX=%04x path='%s' -> host='%s'\n",
             (unsigned)reg_cx, dos_path.c_str(), r.host_path.c_str());
       }
       int fd = ::open(r.host_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
       if (fd < 0) {
-        if (std::getenv("DOSEMU_OPEN_TRACE")) {
+        if (dosemu::g_debug.open_trace) {
           std::fprintf(stderr, "[create] -> errno=%d (%s)\n", errno, strerror(errno));
         }
         return_error(0x05);
@@ -3687,13 +3744,13 @@ Bitu dosemu_int21() {
           if (b == 0) break;
           dos_path += static_cast<char>(b);
         }
-        if (std::getenv("DOSEMU_OPEN_TRACE")) {
+        if (dosemu::g_debug.open_trace) {
           std::fprintf(stderr, "[open] reconstructed path from clobbered "
               "stub buffer: '%s'\n", dos_path.c_str());
         }
       }
       const Resolved r = resolve_path(dos_path);
-      if (std::getenv("DOSEMU_OPEN_TRACE")) {
+      if (dosemu::g_debug.open_trace) {
         std::fprintf(stderr,
             "[open] AL=%02x DS:DX=%04x:%04x path='%s' -> host='%s' textmode=%d\n",
             (unsigned)reg_al, (unsigned)SegValue(ds), (unsigned)reg_dx,
@@ -3805,7 +3862,7 @@ Bitu dosemu_int21() {
       std::vector<uint8_t> buf(reg_cx);
       const PhysPt src = SegPhys(ds) + reg_dx;
       for (uint16_t i = 0; i < reg_cx; ++i) buf[i] = mem_readb(src + i);
-      if (std::getenv("DOSEMU_WRITE_TRACE")) {
+      if (dosemu::g_debug.write_trace) {
         std::fprintf(stderr,
             "[write] fd=%d cx=%u ds=%04x(b=%08x) dx=%04x bytes:",
             (int)reg_bx, (unsigned)reg_cx,
@@ -3856,7 +3913,7 @@ Bitu dosemu_int21() {
       // int32_t to get correct sign extension to off_t.
       off_t off = static_cast<int32_t>(
           (static_cast<uint32_t>(reg_cx) << 16) | reg_dx);
-      if (std::getenv("DOSEMU_OPEN_TRACE")) {
+      if (dosemu::g_debug.open_trace) {
         std::fprintf(stderr, "[seek] fd=%d whence=%d off=%lld (from CX:DX=%04x:%04x)\n",
             (int)reg_bx, whence, (long long)off,
             (unsigned)reg_cx, (unsigned)reg_dx);
@@ -3866,7 +3923,7 @@ Bitu dosemu_int21() {
         if (reg_bx <= 4) {
           pos = 0;  // non-seekable stdio: report position 0, success
         } else {
-          if (std::getenv("DOSEMU_OPEN_TRACE")) {
+          if (dosemu::g_debug.open_trace) {
             std::fprintf(stderr, "[seek] -> errno=%d (%s)\n", errno, strerror(errno));
           }
           return_error(0x19);
@@ -4296,7 +4353,7 @@ Bitu dosemu_int21() {
     }
 
     case 0x44: {  // IOCTL.
-      if (std::getenv("DOSEMU_OPEN_TRACE")) {
+      if (dosemu::g_debug.open_trace) {
         std::fprintf(stderr, "[ioctl] AL=%02x BX=%04x CX=%04x DX=%04x\n",
             (unsigned)reg_al, (unsigned)reg_bx, (unsigned)reg_cx, (unsigned)reg_dx);
       }
@@ -4438,6 +4495,12 @@ Bitu dosemu_int21() {
       // process stack and unwind the nested RunMachine so the parent's
       // AH=4Bh handler resumes and restores its state.  Top-level exit
       // halts the emulator.
+      if (dosemu::g_debug.int4c_trace) {
+        std::fprintf(stderr,
+            "[4C] reg_al=%02x process_stack.size=%zu cs:eip=%04x:%08x\n",
+            (unsigned)reg_al, s_process_stack.size(),
+            (unsigned)SegValue(cs), (unsigned)reg_eip);
+      }
       if (!s_process_stack.empty()) {
         s_process_stack.back().child_exit_code = reg_al;
         s_child_exit_pending = true;
@@ -4697,6 +4760,7 @@ Bitu dosemu_int21() {
       ProcessState ps{};
       ps.cs = SegValue(cs); ps.ds = SegValue(ds);
       ps.ss = SegValue(ss); ps.es = SegValue(es);
+      ps.fs = SegValue(fs); ps.gs = SegValue(gs);
       ps.eip = reg_eip; ps.esp = reg_esp; ps.ebp = reg_ebp;
       ps.eax = reg_eax; ps.ebx = reg_ebx;
       ps.ecx = reg_ecx; ps.edx = reg_edx;
@@ -4705,6 +4769,16 @@ Bitu dosemu_int21() {
       ps.child_data_seg = child_psp;
       ps.child_env_seg  = child_env;
       s_process_stack.push_back(ps);
+
+      if (dosemu::g_debug.int4b_trace) {
+        std::fprintf(stderr,
+            "[4B entry] cs:eip=%04x:%08x ss:esp=%04x:%08x ds=%04x es=%04x "
+            "fs=%04x gs=%04x ebp=%08x efl=%08x cpl=%u cr0=%08x\n",
+            (unsigned)ps.cs, ps.eip, (unsigned)ps.ss, ps.esp,
+            (unsigned)ps.ds, (unsigned)ps.es, (unsigned)ps.fs,
+            (unsigned)ps.gs, ps.ebp, ps.eflags,
+            (unsigned)cpu.cpl, (unsigned)cpu.cr0);
+      }
 
       // Publish child's PSP + env segment so dpmi_entry (if the
       // child goes protected) aliases LDT[4]/LDT[5] to the right
@@ -4733,6 +4807,25 @@ Bitu dosemu_int21() {
       // target -- recursive-fault-loop in our dispatcher.
       ExcHandler saved_pm_exc[32];
       std::memcpy(saved_pm_exc, s_pm_exc, sizeof(s_pm_exc));
+
+      // Snapshot the PM ring-0 callback stack (PM_CB_STACK).  If the
+      // parent reached AH=4B via a ring-3 INT 31 call, the CPU has
+      // already pushed the parent's IRETD frame (outer SS/ESP/EFLAGS/
+      // CS/EIP) at the top of PM_CB_STACK.  The child's own ring
+      // transitions during its run push onto this same stack, which
+      // clobbers parent's frame -- the subsequent IRETD would then
+      // pop garbage CS/EIP and fault in random stub code.  Snapshot
+      // the full 4KB before the nested RunMachine and restore after.
+      uint8_t saved_cb_stack[PM_CB_STACK_SIZE];
+      for (uint32_t i = 0; i < PM_CB_STACK_SIZE; ++i)
+        saved_cb_stack[i] = mem_readb(PM_CB_STACK_BASE + i);
+      if (dosemu::g_debug.int4b_trace) {
+        std::fprintf(stderr, "[4B cb_stack snap] top-32:");
+        for (int i = 32; i > 0; i -= 4)
+          std::fprintf(stderr, " %08x",
+              (unsigned)mem_readd(PM_CB_STACK_BASE + PM_CB_STACK_SIZE - i));
+        std::fprintf(stderr, "\n");
+      }
 
       // Switch CPU to child entry state (a real-mode CS load; shim's
       // current execution will "resume" child flow via the main loop's
@@ -4771,6 +4864,25 @@ Bitu dosemu_int21() {
       // Restore parent's PM exception handlers (child's were in
       // child-memory that's now freed).
       std::memcpy(s_pm_exc, saved_pm_exc, sizeof(s_pm_exc));
+      // Restore parent's PM_CB_STACK contents.  Parent's ring-3->0
+      // INT 31 frame lives near the top of this stack; child's
+      // ring transitions overwrote it.
+      if (dosemu::g_debug.int4b_trace) {
+        std::fprintf(stderr, "[4B cb_stack pre-restore] top-32:");
+        for (int i = 32; i > 0; i -= 4)
+          std::fprintf(stderr, " %08x",
+              (unsigned)mem_readd(PM_CB_STACK_BASE + PM_CB_STACK_SIZE - i));
+        std::fprintf(stderr, "\n");
+      }
+      for (uint32_t i = 0; i < PM_CB_STACK_SIZE; ++i)
+        mem_writeb(PM_CB_STACK_BASE + i, saved_cb_stack[i]);
+      if (dosemu::g_debug.int4b_trace) {
+        std::fprintf(stderr, "[4B cb_stack restored] top-32:");
+        for (int i = 32; i > 0; i -= 4)
+          std::fprintf(stderr, " %08x",
+              (unsigned)mem_readd(PM_CB_STACK_BASE + PM_CB_STACK_SIZE - i));
+        std::fprintf(stderr, "\n");
+      }
 
       // Child exited via AH=4Ch; restore parent state.
       s_child_exit_pending = false;
@@ -4784,36 +4896,31 @@ Bitu dosemu_int21() {
       // dpmi_entry overwrote the starter-set LDT slots (1..5) with
       // ITS base addresses, so we must rewrite parent's bases first.
       if (saved_cr0_4b & 1) {
-        const uint32_t parent_cs_base = restored.cs * 16u;   // parent's RM seg
-        const uint32_t parent_ds_base = restored.ds * 16u;
-        const uint32_t parent_ss_base = restored.ss * 16u;
-        const uint32_t parent_es_base = restored.es * 16u;
-        write_ldt_descriptor(1, parent_cs_base, 0xFFFF, 0xFA, false);
-        write_ldt_descriptor(2, parent_ds_base, 0xFFFF, 0xF2, true);
-        write_ldt_descriptor(3, parent_ss_base, 0xFFFF, 0xF2, true);
-        write_ldt_descriptor(4, parent_es_base, 0xFFFF, 0xF2);
-        // Parent's PSP/env selectors also point at parent, but we
-        // didn't change their LDT slots (4/5) to child values if
-        // s_current_psp_seg was 0 going in -- restoring is safe.
-        // Now reload the segment registers from the LDT with PM
-        // semantics so Segs.phys is the actual descriptor base.
-        const uint16_t ldt_cs = (1 << 3) | 0x04 | 0x03;
-        const uint16_t ldt_ds = (2 << 3) | 0x04 | 0x03;
-        const uint16_t ldt_ss = (3 << 3) | 0x04 | 0x03;
-        const uint16_t ldt_es = (4 << 3) | 0x04 | 0x03;
-        CPU_SetSegGeneral(ds, ldt_ds);
-        CPU_SetSegGeneral(ss, ldt_ss);
-        CPU_SetSegGeneral(es, ldt_es);
-        // For CS we can't MOV CS -- manually refresh cached base.
+        // Parent was in PM.  The LDT snapshot/restore above already
+        // put parent's descriptors back; use the PARENT's saved
+        // selectors (not hardcoded starter-set values -- DJGPP's libc
+        // may have switched CS/DS/ES to LDT[6..8] for its 32-bit
+        // flat-model runtime).  CPU_SetSegGeneral re-reads the
+        // descriptor we just restored so Segs.phys is accurate.
+        CPU_SetSegGeneral(ds, restored.ds);
+        CPU_SetSegGeneral(ss, restored.ss);
+        CPU_SetSegGeneral(es, restored.es);
+        CPU_SetSegGeneral(fs, restored.fs);
+        CPU_SetSegGeneral(gs, restored.gs);
+        // CS can't be loaded via MOV -- refresh cached base from the
+        // descriptor directly.  cpu.gdt.GetDescriptor handles both
+        // GDT and LDT selectors (routes via the TI bit).
         Descriptor d;
-        cpu.gdt.GetDescriptor(ldt_cs, d);
-        Segs.val[cs]  = ldt_cs;
+        cpu.gdt.GetDescriptor(restored.cs, d);
+        Segs.val[cs]  = restored.cs;
         Segs.phys[cs] = d.GetBase();
       } else {
         SegSet16(cs, restored.cs);
         SegSet16(ds, restored.ds);
         SegSet16(ss, restored.ss);
         SegSet16(es, restored.es);
+        SegSet16(fs, restored.fs);
+        SegSet16(gs, restored.gs);
       }
       reg_eip = restored.eip;
       reg_esp = restored.esp;
@@ -4822,6 +4929,19 @@ Bitu dosemu_int21() {
       reg_ecx = restored.ecx; reg_edx = restored.edx;
       reg_esi = restored.esi; reg_edi = restored.edi;
       reg_flags = restored.eflags;
+
+      if (dosemu::g_debug.int4b_trace) {
+        Descriptor dcs;
+        cpu.gdt.GetDescriptor(Segs.val[cs], dcs);
+        std::fprintf(stderr,
+            "[4B exit]  cs:eip=%04x:%08x ss:esp=%04x:%08x ds=%04x es=%04x "
+            "fs=%04x gs=%04x efl=%08x cpl=%u cr0=%08x cs.base=%08x\n",
+            (unsigned)Segs.val[cs], reg_eip, (unsigned)Segs.val[ss],
+            reg_esp, (unsigned)Segs.val[ds], (unsigned)Segs.val[es],
+            (unsigned)Segs.val[fs], (unsigned)Segs.val[gs], reg_flags,
+            (unsigned)cpu.cpl, (unsigned)cpu.cr0,
+            (unsigned)dcs.GetBase());
+      }
 
       mcb_free(child_psp);
       if (restored.child_env_seg) mcb_free(restored.child_env_seg);
@@ -5483,7 +5603,7 @@ bool le_apply_fixups(const std::vector<uint8_t> &f, size_t le_off,
       // LE_MIN.EXE and for spotting early fixup-walker regressions);
       // suppress the rest unless DOSEMU_TRACE is set.  Real LE
       // binaries (wd.exe, vi.exe) have 13000+ fixups each.
-      if (total_fixups < 16 || std::getenv("DOSEMU_TRACE")) {
+      if (total_fixups < 16 || dosemu::g_debug.trace) {
         std::fprintf(stderr,
             "dosemu: LE fixup: page %u off 0x%04x type 0x%02x -> "
             "obj%u+0x%x = 0x%08x (at host 0x%05x)\n",
@@ -5626,7 +5746,7 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
   }
   if (!extender_detected
       && f.size() >= 0x40
-      && !std::getenv("DOSEMU_LE_AS_MZ")) {
+      && !dosemu::g_debug.le_as_mz) {
     const uint32_t le_off = rdd(f, 0x3C);
     if (le_off != 0 && le_off + 2 <= f.size()
         && ((f[le_off] == 'L' && f[le_off + 1] == 'E') ||
@@ -6175,7 +6295,7 @@ int run_program(const dosemu::Config &cfg) {
     // to the dynamic JIT when a program enters PM; that's fine for
     // speed but bypasses core_normal where DOSEMU_CPU_TRACE is
     // instrumented.  Force core=normal when the trace flag is set.
-    if (std::getenv("DOSEMU_CPU_TRACE")) {
+    if (dosemu::g_debug.cpu_trace) {
       if (auto *s = control->GetSection("cpu")) s->HandleInputline("core=normal");
     }
 
