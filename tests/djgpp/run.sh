@@ -25,7 +25,7 @@ if [[ ! -x build/dosemu ]]; then
     exit 1
 fi
 
-rm -f tests/djfile.tmp
+rm -f djfile.tmp
 
 # Note: ring-3 DPMI is now the default.  `DOSEMU_DPMI_RING0=1` is
 # available as an opt-out for the in-tree ring-0 DPMI fixtures.

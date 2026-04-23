@@ -879,10 +879,14 @@ constexpr uint32_t PM_CB_STACK_SIZE = 0x1000;
 // the DPL-3 encoding: `idx*8 | 3`.  For example PM_CS3_SEL = 0x50+3
 // = 0x53; the RPL is baked in so the selector itself specifies ring.
 constexpr uint16_t PM_TSS_SEL  = 0x48;        // GDT[9]:  TSS descriptor (DPL=0)
-constexpr uint16_t PM_CS3_SEL  = 0x53;        // GDT[10]: ring-3 code (DPL=3)
-constexpr uint16_t PM_DS3_SEL  = 0x5B;        // GDT[11]: ring-3 data (DPL=3)
-constexpr uint16_t PM_SS3_SEL  = 0x63;        // GDT[12]: ring-3 stack (DPL=3)
-constexpr uint16_t PM_ES3_SEL  = 0x6B;        // GDT[13]: ring-3 ES/PSP (DPL=3)
+// Unused symbols kept for GDT-layout documentation: the ring-3 code/
+// data/stack/ES aliases live in dedicated slots so it's obvious which
+// GDT index holds which selector, even though we read/write them via
+// the table rather than these names.
+[[maybe_unused]] constexpr uint16_t PM_CS3_SEL  = 0x53;  // GDT[10]: ring-3 code (DPL=3)
+[[maybe_unused]] constexpr uint16_t PM_DS3_SEL  = 0x5B;  // GDT[11]: ring-3 data (DPL=3)
+[[maybe_unused]] constexpr uint16_t PM_SS3_SEL  = 0x63;  // GDT[12]: ring-3 stack (DPL=3)
+[[maybe_unused]] constexpr uint16_t PM_ES3_SEL  = 0x6B;  // GDT[13]: ring-3 ES/PSP (DPL=3)
 // GDT[14] = ring-3 CB alias; LRET target for user_exception_return.
 constexpr uint16_t PM_CB3_SEL  = 0x73;        // GDT[14]: CB_SEG at DPL=3
 // GDT[15] = ring-3 data alias of the host exception-handler stack.
@@ -897,7 +901,7 @@ constexpr uint32_t TSS_SIZE  = 104;            // 32-bit TSS minimum
 // Ring-0 stack: reuse CB_STACK area (4KB) that's otherwise used for
 // AX=0303 callback scratch.  During a ring-3-client ring transition
 // the CPU will load SS=PM_CB_STACK, ESP=PM_CB_STACK_BASE+PM_CB_STACK_SIZE.
-constexpr uint32_t PM_RING0_STACK_TOP = PM_CB_STACK_BASE + PM_CB_STACK_SIZE;
+[[maybe_unused]] constexpr uint32_t PM_RING0_STACK_TOP = PM_CB_STACK_BASE + PM_CB_STACK_SIZE;
 
 // 32-bit PM reflection shims.  Each slot is an 8-byte 16-bit code
 // sequence that re-invokes the dosbox native callback for a real-mode

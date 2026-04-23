@@ -53,6 +53,7 @@ Thumbs.db
 # mktemp dir, so this only matters for developers running the
 # fixture straight from the command line.
 WROTE.TXT
+djfile.tmp
 
 # Post-build symlink created by src/CMakeLists.txt so dosbox finds
 # its Resources/ (Unicode mapping files, glshaders, etc.) without
