@@ -36,6 +36,31 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
     select().  Open Watcom wlink.exe uses this for its banner and
     was stalling on "invalid function" returns.
 
+    DOSEMU_PATH env var: host-side extension for the DOS PATH.  The
+    value is appended to the hardcoded "C:\\" and inherited by every
+    DOS program launched.  Makes Open Watcom's wcc386 + wlink find
+    their spawned dos4gw.exe when set to "C:\\BINW".  Also passes
+    WATCOM, INCLUDE, LIB, LIBPATH from the host env through to DOS
+    so the Watcom tools can find headers and libraries.
+
+    Open Watcom full-build investigation (2026-04-23).  With
+    DOSEMU_PATH + WATCOM + INCLUDE set and a minimal wlink.lnk
+    installed at binw/wlink.lnk, the pipeline `wcc386 hello.c` →
+    `wlink @link.cmd` succeeds through dosemu and produces a
+    22 KB DOS/4G LE binary.  The binary runs through wstub.exe ->
+    dos4gw.exe but hits "not a WATCOM program" from dos4gw's own
+    Watcom-signature check.  Root cause is the Open Watcom
+    release's incomplete library set: `__x386_start` /
+    `__x386_dbg_hook` / `__x32_stack_size` have no PUBDEF in any
+    shipped .lib/.obj; cstrtx3r.obj imports them as EXTDEF with no
+    defining object.  Working around with wlink `alias` directives
+    lets the link finish but the resulting binary fails dos4gw's
+    internal check (it reads the entry-point chain).  This is an
+    Open Watcom distribution bug, not a dosemu bug; our toolchain
+    path is functionally proven (compile OK, link mechanics OK,
+    stub-chain OK).  Adding WATCOM/DOSEMU_PATH env passthrough
+    makes the working compile step usable in make recipes.
+
     FreeCOM → DJ_DJE → DJ_WRITE three-level nesting chain VERIFIED
     working.  FC_SPAWN regression gate extended to cover it plus
     several other spawn permutations (HELLO.COM + DJ_WRITE +

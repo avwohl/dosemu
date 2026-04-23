@@ -6211,10 +6211,20 @@ bool build_env_block(const std::string &program_path) {
   };
 
   // Minimal DOS env: COMSPEC + PATH + a few host env vars that are
-  // commonly expected (HOME, USER, TMPDIR).
-  if (!put_string("COMSPEC=C:\\COMMAND.COM")) return false;
-  if (!put_string("PATH=C:\\"))               return false;
-  for (const char *key : {"HOME", "USER", "TMPDIR", "LANG", "TZ", "DJGPP"}) {
+  // commonly expected (HOME, USER, TMPDIR).  PATH can be extended by
+  // the host's DOSEMU_PATH env var so toolchains with multi-directory
+  // layouts (e.g. Open Watcom's binw/ alongside root) can locate
+  // their spawned children (dos4gw.exe etc).
+  std::string path_val = "C:\\";
+  if (const char *extra = std::getenv("DOSEMU_PATH"); extra && *extra) {
+    path_val += ';';
+    path_val += extra;
+  }
+  if (!put_string("COMSPEC=C:\\COMMAND.COM"))    return false;
+  if (!put_string("PATH=" + path_val))           return false;
+  for (const char *key : {"HOME", "USER", "TMPDIR", "LANG", "TZ",
+                          "DJGPP", "WATCOM", "INCLUDE", "LIB",
+                          "LIBPATH"}) {
     const char *val = std::getenv(key);
     if (val && *val) {
       std::string entry = std::string(key) + "=" + val;
