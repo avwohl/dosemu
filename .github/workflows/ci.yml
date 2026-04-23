@@ -692,15 +692,20 @@ jobs:
           grep -q 'dosemu-wrote-ok' WROTE.TXT
           grep -q 'ci-tail' WROTE.TXT
 
-      - name: DJGPP integration suite (ring-3 DPMI end-to-end)
+      - name: DJGPP + DPMI + shell + make integration suite
         run: |
-          # Seven DJGPP-compiled fixtures under tests/DJ_*.EXE exercise the
-          # ring-3 DPMI host end to end: direct write(), printf with format
-          # specs, argc/argv, getenv, fopen+fprintf+fgets round-trip,
-          # malloc/free stress, and stdin fread.  Markers of the form
-          # "dj-<name>=ok" confirm each reached its normal exit.
+          # The tests/djgpp/run.sh harness covers the full real-world
+          # stack: 10 DJGPP-compiled C fixtures (write, printf, argv,
+          # env, file I/O, malloc, stdin, signal, exec to a RM child,
+          # exec to a DJGPP child), a 2.3 MB C++ BIGTEST binary (STL +
+          # regex + global ctor/dtor), the MAKE gate (GNU make 4.4
+          # driving a Makefile through FreeCOM), the FREECOM gate
+          # (shell boots + ECHO roundtrips), and real-world DJGPP
+          # tools (grep/diff/cat/sed/sort/wc/gawk/gzip/ls/find/patch/
+          # tar/bc/m4/flex/seq/factor/basename).  Ring-3 DPMI is the
+          # default now; the suite doesn't set any opt-in env vars.
           #
-          # Each fixture is a COFF-go32-exe built by the andrewwutw
-          # DJGPP cross-compiler (see tests/djgpp/build.sh); the binaries
-          # are committed so CI doesn't need a DJGPP toolchain.
+          # All binaries are committed so CI doesn't need a DJGPP
+          # cross-compiler (see tests/djgpp/build.sh for the rebuild
+          # recipe).
           ./tests/djgpp/run.sh
