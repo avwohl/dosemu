@@ -34,18 +34,40 @@ when landed.  Suite is 29/29 at the start of the backlog.
    to no longer be a blocker.  (Subsequent compile+link failures
    are Watcom config issues -- missing system definition + libs --
    not dosemu bugs.)
-5. **DJGPP→DJGPP nested exec.**  Two partial fixes landed (CR0.PE
-   flip on child entry, child PSP JFT init) but the core issue
-   remains: between the child stub's RM argv[0]-open and its PM
-   AH=3D call, six bytes near `[DS:0x764]` get rewritten with
-   what looks like a return-address save (values like
-   `13 02 11 20` = 0x20110213 = child_cs_base + stub_entry_ip).
-   Specific byte at `[DS:0x764]` gets zeroed, turning the argv[0]
-   path into an empty string.  Top-level DJGPP doesn't make this
-   particular PM AH=3D call so it doesn't care.  Needs a careful
-   read of what DJGPP's go32-v2 stub stores/expects at this
-   offset in the nested case -- probably a `__dpmi_regs *` or
-   stubinfo pointer that's populated differently.
+5. **DJGPP→DJGPP nested exec.**  Two structural fixes landed
+   (CR0.PE flip on child entry, child PSP JFT init) which are
+   strictly correct but don't close the gap.  Deeper diagnosis:
+   - The DJGPP stub writes its argv[0] path at `[DS:0x764]`
+     during RM setup (same offset regardless of where the stub
+     is loaded).
+   - Between the stub's RM self-open and its later PM-mode
+     AH=3D (on the same `[DS:0x764]` address), the memory at
+     that offset gets overwritten -- empirically by the stub's
+     own stack frames / register save-restores during the extra
+     work it does when nested (more INT 21/31 round-trips than
+     top-level makes).
+   - Top-level DJGPP doesn't hit this because its stub follows
+     a shorter init path and the memory at `[DS:0x764]` is
+     never revisited.
+   - Tried: save/restore s_handles across the child (reverted --
+     DOS semantics require parent handles to pass through), PSP
+     JFT init (kept), CR0 flip (kept), PSP/env seg tracking
+     (landed earlier).  None flip the DJGPP-side init to match
+     the top-level path.
+   - Real fix probably lives inside the DJGPP stub's PM init --
+     needs either a stubinfo field we aren't populating, a
+     detection of "already in DPMI" that makes the stub skip
+     re-entry, or a path-buffer that survives the stub's stack
+     churn.  Not solvable from the bridge side without DJGPP
+     source-level understanding of what the stub is actually
+     trying to open at `[DS:0x764]` in PM and why it only takes
+     that branch in the nested case.
+
+   Closing this as "can't fix from our side right now" after
+   a full session of targeted investigation.  DJGPP-under-DJGPP
+   spawning is an unusual user-facing case -- DJ_EXEC→HELLO.COM
+   covers the common "DJGPP invokes real-mode child" pattern
+   and works cleanly.
 
 ## Larger
 6. **`make` with real recipes.**  Need FreeCOM (FreeDOS's
