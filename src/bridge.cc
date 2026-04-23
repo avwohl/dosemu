@@ -4598,8 +4598,27 @@ Bitu dosemu_int21() {
         mem_writeb(psp + 0x01, 0x20);
         mem_writeb(psp + 0x02, 0x00);
         mem_writeb(psp + 0x03, 0xA0);
+        // PSP[0x18..0x2B] = 20-byte Job File Table (handle -> SFT).
+        // Matches what top-level build_psp does; DJGPP's fstat walks
+        // this via PSP[0x34] (far pointer) and needs at least the
+        // std handles populated or it falls through to a fallback
+        // path that broke nested-DJGPP exec.
+        for (int i = 0x18; i <= 0x2B; i++) mem_writeb(psp + i, 0xFF);
+        mem_writeb(psp + 0x18, 0x00); // stdin
+        mem_writeb(psp + 0x19, 0x01); // stdout
+        mem_writeb(psp + 0x1A, 0x02); // stderr
+        mem_writeb(psp + 0x1B, 0x03); // aux
+        mem_writeb(psp + 0x1C, 0x04); // prn
         mem_writeb(psp + 0x2C, child_env & 0xFF);
         mem_writeb(psp + 0x2D, (child_env >> 8) & 0xFF);
+        // PSP[0x32] = max open handles (word).
+        mem_writeb(psp + 0x32, 20);
+        mem_writeb(psp + 0x33, 0);
+        // PSP[0x34..0x37] = far pointer to JFT (child_psp:0x18).
+        mem_writeb(psp + 0x34, 0x18);
+        mem_writeb(psp + 0x35, 0x00);
+        mem_writeb(psp + 0x36, child_psp & 0xFF);
+        mem_writeb(psp + 0x37, (child_psp >> 8) & 0xFF);
         // Copy command tail from the caller's parameter block.  The
         // pblock's [+2..+5] is a far pointer to a DOS-formatted
         // command tail: [len][tail bytes][0x0D].  DOS/4GW reads this
@@ -4652,7 +4671,16 @@ Bitu dosemu_int21() {
       reg_esp = child_regs.sp;
       reg_eax = child_regs.ax;
 
+      // Parent may be in PM (DJGPP parent under DPMI).  Child is
+      // entered as real-mode code (the MZ/.COM entry point).  Flip
+      // CR0.PE=0 so segment loads are interpreted as 16-bit real
+      // segments instead of PM selectors; restore on child exit.
+      const uint32_t saved_cr0_4b = cpu.cr0;
+      if (saved_cr0_4b & 1) CPU_SET_CRX(0, saved_cr0_4b & ~1u);
+
       DOSBOX_RunMachine();
+
+      if (saved_cr0_4b & 1) CPU_SET_CRX(0, saved_cr0_4b);
 
       // Child exited via AH=4Ch; restore parent state.
       s_child_exit_pending = false;
