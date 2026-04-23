@@ -5,14 +5,19 @@ bullet is a commit or a small series.  Mark done with ~~strike~~
 when landed.  Suite is 29/29 at the start of the backlog.
 
 ## Small (single-session)
-1. **LE selector fixups (types 0x02/0x03/0x06).**  `le_apply_fixups`
-   currently writes 0 for the selector field of these three fixup
-   types.  Replace with `objects[tgt_obj-1].ldt_sel`.  Unblocks
-   real Watcom binaries that use far pointers / vtables.
-2. **`flex -o out.c`.**  flex's getopt in this DJGPP build
-   probes the output file for read before creating it and bails
-   on ENOENT.  Investigate: may be flex-port quirk or an argv-
-   parsing edge case in our PSP cmd-tail encoding.
+1. ~~**LE selector fixups (types 0x02/0x03/0x06).**~~  Already done
+   in commit d21def3 (2026-04-21); the "Next-session pick list"
+   in the earlier-session notes below was stale when I wrote this
+   backlog.
+2. ~~**`flex -o out.c`.**~~ Investigated; argv parsing is correct
+   on our side (verified via DJ_ARGV).  With `-o` flex probes
+   the output file for read (AL=00, ENOENT → bails "can't open
+   out.c").  Pre-creating the file changes the error to
+   "could not create " (trailing space -- internal outfile
+   variable is cleared by flex's freopen-on-stdout dance).
+   Concluding this is a flex-port bug, not a dosemu issue.
+   Workaround: let flex write to its default `lex.yy.c`
+   (equivalently `lexyy.c` in 8.3) and rename afterwards.
 
 ## Medium (multi-session)
 3. **DOS/4GW transfer-buffer allocation.**  `wcc386.exe` +
