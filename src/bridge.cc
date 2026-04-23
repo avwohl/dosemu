@@ -4502,6 +4502,18 @@ Bitu dosemu_int21() {
         return_error(8);
         break;
       }
+      // Zero the entire allocated region before loading.  Reused MCB
+      // blocks retain whatever the previous owner wrote -- e.g. a
+      // parent's freed scratch buffer still has its COFF-read data.
+      // An MZ child that only covers the first few KB would leave
+      // stale parent bytes visible at child-data offsets like 0x628,
+      // which DJGPP's stub reads as a "was I previously in DPMI?"
+      // flag and takes a PM-broken nested-exec branch on non-zero.
+      {
+        const PhysPt base = static_cast<PhysPt>(child_psp) * 16u;
+        const size_t bytes = static_cast<size_t>(want) * 16u;
+        for (size_t i = 0; i < bytes; ++i) mem_writeb(base + i, 0);
+      }
 
       InitialRegs child_regs;
       if (!load_program_at(r.host_path, child_psp, child_regs)) {
