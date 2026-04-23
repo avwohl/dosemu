@@ -27,7 +27,8 @@ fi
 
 rm -f tests/djfile.tmp
 
-export DOSEMU_DPMI_RING3=1
+# Note: ring-3 DPMI is now the default.  `DOSEMU_DPMI_RING0=1` is
+# available as an opt-out for the in-tree ring-0 DPMI fixtures.
 
 pass=0
 fail=0
@@ -85,7 +86,7 @@ out.txt:
 	@echo make-hello > out.txt
 	@echo built
 MAKEEOF
-(cd "$mdir" && DOSEMU_DPMI_RING3=1 TMPDIR=C:\\TMP timeout 20 ./dosemu MAKE.EXE 2>/dev/null) > "$mdir/out"
+(cd "$mdir" && TMPDIR=C:\\TMP timeout 20 ./dosemu MAKE.EXE 2>/dev/null) > "$mdir/out"
 mout=$(tr -d '\r' < "$mdir/out")
 mfile=$(tr -d '\r' < "$mdir/out.txt" 2>/dev/null)
 rm -rf "$mdir"
@@ -154,9 +155,9 @@ gdir=$(mktemp -d)
 cp build/dosemu "$gdir/"
 cp tests/GREP.EXE "$gdir/"
 printf "alpha\nbeta\nalphabet\ngamma\n" > "$gdir/input.txt"
-(cd "$gdir" && DOSEMU_DPMI_RING3=1 ./dosemu GREP.EXE alpha input.txt 2>/dev/null) > "$gdir/out" && rc=$? || rc=$?
+(cd "$gdir" && ./dosemu GREP.EXE alpha input.txt 2>/dev/null) > "$gdir/out" && rc=$? || rc=$?
 got=$(tr -d '\r' < "$gdir/out")
-(cd "$gdir" && DOSEMU_DPMI_RING3=1 ./dosemu GREP.EXE nomatch input.txt 2>/dev/null) > /dev/null && rc2=$? || rc2=$?
+(cd "$gdir" && ./dosemu GREP.EXE nomatch input.txt 2>/dev/null) > /dev/null && rc2=$? || rc2=$?
 rm -rf "$gdir"
 if [[ "$rc" == "0" && "$got" == *"alpha"$'\n'"alphabet"* && "$rc2" == "1" ]]; then
     printf "  %-12s PASS\n" "GREP"
@@ -178,7 +179,7 @@ cp build/dosemu "$ddir/"
 cp tests/DIFF.EXE "$ddir/"
 printf "line1\nline2\nline3\n" > "$ddir/a.txt"
 printf "line1\nCHANGED\nline3\n" > "$ddir/b.txt"
-(cd "$ddir" && DOSEMU_DPMI_RING3=1 ./dosemu DIFF.EXE a.txt b.txt 2>/dev/null) > "$ddir/out" && drc=$? || drc=$?
+(cd "$ddir" && ./dosemu DIFF.EXE a.txt b.txt 2>/dev/null) > "$ddir/out" && drc=$? || drc=$?
 dgot=$(tr -d '\r' < "$ddir/out")
 rm -rf "$ddir"
 if [[ "$drc" == "1" && "$dgot" == *"2c2"* && "$dgot" == *"< line2"* && "$dgot" == *"> CHANGED"* ]]; then
@@ -196,7 +197,7 @@ fi
 cdir=$(mktemp -d)
 cp build/dosemu tests/CAT.EXE "$cdir/"
 printf "banana\napple\ncherry\n" > "$cdir/in.txt"
-(cd "$cdir" && DOSEMU_DPMI_RING3=1 ./dosemu CAT.EXE in.txt 2>/dev/null) > "$cdir/out" && crc=$? || crc=$?
+(cd "$cdir" && ./dosemu CAT.EXE in.txt 2>/dev/null) > "$cdir/out" && crc=$? || crc=$?
 cgot=$(tr -d '\r' < "$cdir/out")
 rm -rf "$cdir"
 if [[ "$crc" == "0" && "$cgot" == "banana"$'\n'"apple"$'\n'"cherry" ]]; then
@@ -212,7 +213,7 @@ fi
 sdir=$(mktemp -d)
 cp build/dosemu tests/SED.EXE "$sdir/"
 printf "hello world\nfoo bar\nhello again\n" > "$sdir/in.txt"
-(cd "$sdir" && DOSEMU_DPMI_RING3=1 ./dosemu SED.EXE 's/hello/HOWDY/' in.txt 2>/dev/null) > "$sdir/out" && src=$? || src=$?
+(cd "$sdir" && ./dosemu SED.EXE 's/hello/HOWDY/' in.txt 2>/dev/null) > "$sdir/out" && src=$? || src=$?
 sgot=$(tr -d '\r' < "$sdir/out")
 rm -rf "$sdir"
 if [[ "$src" == "0" && "$sgot" == *"HOWDY world"* && "$sgot" == *"HOWDY again"* ]]; then
@@ -228,7 +229,7 @@ fi
 odir=$(mktemp -d)
 cp build/dosemu tests/SORT.EXE "$odir/"
 printf "banana\napple\ncherry\nbanana\n" > "$odir/in.txt"
-(cd "$odir" && DOSEMU_DPMI_RING3=1 ./dosemu SORT.EXE in.txt 2>/dev/null) > "$odir/out" && orc=$? || orc=$?
+(cd "$odir" && ./dosemu SORT.EXE in.txt 2>/dev/null) > "$odir/out" && orc=$? || orc=$?
 ogot=$(tr -d '\r' < "$odir/out")
 rm -rf "$odir"
 if [[ "$orc" == "0" && "$ogot" == "apple"$'\n'"banana"$'\n'"banana"$'\n'"cherry" ]]; then
@@ -243,7 +244,7 @@ fi
 wdir=$(mktemp -d)
 cp build/dosemu tests/WC.EXE "$wdir/"
 printf "one\ntwo\nthree\nfour\n" > "$wdir/in.txt"
-(cd "$wdir" && DOSEMU_DPMI_RING3=1 ./dosemu WC.EXE -l in.txt 2>/dev/null) > "$wdir/out" && wrc=$? || wrc=$?
+(cd "$wdir" && ./dosemu WC.EXE -l in.txt 2>/dev/null) > "$wdir/out" && wrc=$? || wrc=$?
 wgot=$(tr -d '\r' < "$wdir/out" | tr -s ' ')
 rm -rf "$wdir"
 # wc output: "       4 in.txt" (leading whitespace compressed by tr -s)
@@ -260,7 +261,7 @@ fi
 adir=$(mktemp -d)
 cp build/dosemu tests/GAWK.EXE "$adir/"
 printf "1 2 3\n4 5 6\n" > "$adir/in.txt"
-(cd "$adir" && DOSEMU_DPMI_RING3=1 ./dosemu GAWK.EXE '{print $2}' in.txt 2>/dev/null) > "$adir/out" && arc=$? || arc=$?
+(cd "$adir" && ./dosemu GAWK.EXE '{print $2}' in.txt 2>/dev/null) > "$adir/out" && arc=$? || arc=$?
 agot=$(tr -d '\r' < "$adir/out")
 rm -rf "$adir"
 if [[ "$arc" == "0" && "$agot" == "2"$'\n'"5" ]]; then
@@ -282,8 +283,8 @@ zdir=$(mktemp -d)
 cp build/dosemu tests/GZIP.EXE "$zdir/"
 printf "alpha beta gamma delta epsilon alpha beta gamma delta epsilon\n" > "$zdir/in.txt"
 orig=$(tr -d '\r' < "$zdir/in.txt")
-(cd "$zdir" && DOSEMU_DPMI_RING3=1 ./dosemu GZIP.EXE -c in.txt 2>/dev/null) > "$zdir/in.gz" && zrc=$? || zrc=$?
-(cd "$zdir" && DOSEMU_DPMI_RING3=1 ./dosemu GZIP.EXE -dc in.gz 2>/dev/null) > "$zdir/out" && zrc2=$? || zrc2=$?
+(cd "$zdir" && ./dosemu GZIP.EXE -c in.txt 2>/dev/null) > "$zdir/in.gz" && zrc=$? || zrc=$?
+(cd "$zdir" && ./dosemu GZIP.EXE -dc in.gz 2>/dev/null) > "$zdir/out" && zrc2=$? || zrc2=$?
 roundtrip=$(tr -d '\r' < "$zdir/out")
 host_unzip_ok=1
 if command -v gunzip >/dev/null; then
@@ -309,7 +310,7 @@ cp build/dosemu tests/LS.EXE "$ldir/"
 echo "content-a" > "$ldir/a.txt"
 echo "content-b" > "$ldir/b.txt"
 mkdir "$ldir/subdir"
-(cd "$ldir" && DOSEMU_DPMI_RING3=1 ./dosemu LS.EXE 2>/dev/null) > "$ldir/out" && lrc=$? || lrc=$?
+(cd "$ldir" && ./dosemu LS.EXE 2>/dev/null) > "$ldir/out" && lrc=$? || lrc=$?
 lgot=$(tr -d '\r' < "$ldir/out")
 rm -rf "$ldir"
 # ls should list a.txt, b.txt, subdir, dosemu, ls.exe (case may vary).
@@ -331,7 +332,7 @@ fi
 fdir=$(mktemp -d)
 cp build/dosemu tests/FIND.EXE "$fdir/"
 echo hi > "$fdir/target.txt"
-(cd "$fdir" && DOSEMU_DPMI_RING3=1 ./dosemu FIND.EXE target.txt 2>/dev/null) > "$fdir/out" && frc=$? || frc=$?
+(cd "$fdir" && ./dosemu FIND.EXE target.txt 2>/dev/null) > "$fdir/out" && frc=$? || frc=$?
 fgot=$(tr -d '\r' < "$fdir/out")
 rm -rf "$fdir"
 if [[ "$frc" == "0" && "$fgot" == *"target.txt"* ]]; then
@@ -348,7 +349,7 @@ pdir=$(mktemp -d)
 cp build/dosemu tests/PATCH.EXE "$pdir/"
 printf "hello\nworld\n" > "$pdir/a.txt"
 printf "2c2\n< world\n---\n> WORLD\n" > "$pdir/p.diff"
-(cd "$pdir" && DOSEMU_DPMI_RING3=1 ./dosemu PATCH.EXE a.txt p.diff 2>/dev/null) >/dev/null && prc=$? || prc=$?
+(cd "$pdir" && ./dosemu PATCH.EXE a.txt p.diff 2>/dev/null) >/dev/null && prc=$? || prc=$?
 pfinal=$(tr -d '\r' < "$pdir/a.txt")
 rm -rf "$pdir"
 if [[ "$prc" == "0" && "$pfinal" == "hello"$'\n'"WORLD" ]]; then
@@ -366,10 +367,10 @@ tdir=$(mktemp -d)
 cp build/dosemu tests/TAR.EXE "$tdir/"
 echo "file1-content" > "$tdir/a.txt"
 echo "file2-content" > "$tdir/b.txt"
-(cd "$tdir" && DOSEMU_DPMI_RING3=1 ./dosemu TAR.EXE cf out.tar a.txt b.txt 2>/dev/null) >/dev/null && trc1=$? || trc1=$?
+(cd "$tdir" && ./dosemu TAR.EXE cf out.tar a.txt b.txt 2>/dev/null) >/dev/null && trc1=$? || trc1=$?
 mkdir "$tdir/ex"
 cp build/dosemu tests/TAR.EXE "$tdir/out.tar" "$tdir/ex/"
-(cd "$tdir/ex" && DOSEMU_DPMI_RING3=1 ./dosemu TAR.EXE xf out.tar 2>/dev/null) >/dev/null && trc2=$? || trc2=$?
+(cd "$tdir/ex" && ./dosemu TAR.EXE xf out.tar 2>/dev/null) >/dev/null && trc2=$? || trc2=$?
 tgot1=$(tr -d '\r' < "$tdir/ex/a.txt" 2>/dev/null)
 tgot2=$(tr -d '\r' < "$tdir/ex/b.txt" 2>/dev/null)
 rm -rf "$tdir"
@@ -388,7 +389,7 @@ fi
 # parsing, not just stdio buffered reads.
 bcdir=$(mktemp -d)
 cp build/dosemu tests/BC.EXE "$bcdir/"
-bcout=$(printf "2+2\n7*6\nquit\n" | (cd "$bcdir" && DOSEMU_DPMI_RING3=1 ./dosemu BC.EXE 2>/dev/null))
+bcout=$(printf "2+2\n7*6\nquit\n" | (cd "$bcdir" && ./dosemu BC.EXE 2>/dev/null))
 bcrc=$?
 rm -rf "$bcdir"
 bcout=$(echo "$bcout" | tr -d '\r')
@@ -406,7 +407,7 @@ fi
 mdir=$(mktemp -d)
 cp build/dosemu tests/M4.EXE "$mdir/"
 printf "define(\`GREET', \`Hi, \$1!')GREET(\`world')\n" > "$mdir/in.m4"
-(cd "$mdir" && DOSEMU_DPMI_RING3=1 ./dosemu M4.EXE in.m4 2>/dev/null) > "$mdir/out" && mrc=$? || mrc=$?
+(cd "$mdir" && ./dosemu M4.EXE in.m4 2>/dev/null) > "$mdir/out" && mrc=$? || mrc=$?
 mgot=$(tr -d '\r' < "$mdir/out")
 rm -rf "$mdir"
 if [[ "$mrc" == "0" && "$mgot" == "Hi, world!" ]]; then
@@ -424,7 +425,7 @@ fi
 xdir=$(mktemp -d)
 cp build/dosemu tests/FLEX.EXE "$xdir/"
 printf '%%%%\n[a-z]+ printf("word: %%s\\n", yytext);\n' > "$xdir/in.l"
-(cd "$xdir" && DOSEMU_DPMI_RING3=1 ./dosemu FLEX.EXE in.l 2>/dev/null) >/dev/null && xrc=$? || xrc=$?
+(cd "$xdir" && ./dosemu FLEX.EXE in.l 2>/dev/null) >/dev/null && xrc=$? || xrc=$?
 xlines=$(wc -l < "$xdir/lexyy.c" 2>/dev/null || echo 0)
 xhas_yylex=$(grep -c yylex "$xdir/lexyy.c" 2>/dev/null || echo 0)
 rm -rf "$xdir"

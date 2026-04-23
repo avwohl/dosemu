@@ -51,13 +51,18 @@ add_executable(dosemu
   debug_settings.cpp
 )
 
-# dosbox-staging searches <exe_dir>/resources for shaders, fonts, and
-# translation files.  Symlink the staging build's resources dir next to
-# our executable so these are found without needing a full install.
+# dosbox-staging searches $exe/../Resources (macOS) or $exe/resources
+# (other) for shaders, fonts, translation files, and Unicode
+# codepage-mapping tables.  Symlink the committed
+# dosbox-staging/Resources/ into BOTH spots so the lookup succeeds on
+# every platform without a full install.
 add_custom_command(TARGET dosemu POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E create_symlink
-          ${DB_BUILD}/resources
+          ${DB}/Resources
           $<TARGET_FILE_DIR:dosemu>/resources
+  COMMAND ${CMAKE_COMMAND} -E create_symlink
+          ${DB}/Resources
+          $<TARGET_FILE_DIR:dosemu>/../Resources
   VERBATIM)
 
 target_include_directories(dosemu PRIVATE
