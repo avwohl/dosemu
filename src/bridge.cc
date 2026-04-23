@@ -147,6 +147,21 @@ void mcb_init() {
   mem_writeb(m + 0, 'Z');                                   // last block
   mem_writew(m + 1, 0);                                     // free
   mem_writew(m + 3, MCB_ARENA_END - MCB_ARENA_START - 1);   // size
+
+  // Top-level program's own MCB lives one paragraph below PSP_SEG.
+  // FreeCOM (XMS_Swap build) reads this to discover its initial
+  // block size -- `mcb->mcb_size` becomes `SwapTransientSize`, the
+  // number of paragraphs to request back from AH=48 after a child
+  // exec.  Without this, FreeCOM reads garbage memory, ends up with
+  // SwapTransientSize=0, and `AH=48 BX=0` short-circuits its swap-in
+  // path.  The program's block nominally fills conventional memory
+  // between PSP_SEG and the MCB arena; AH=4Ah updates this size
+  // when the program shrinks itself before an exec.
+  const PhysPt p = (PSP_SEG - 1) * 16u;
+  mem_writeb(p + 0, 'M');                                   // more blocks above
+  mem_writew(p + 1, PSP_SEG);                               // owner = PSP
+  mem_writew(p + 3, MCB_ARENA_START - PSP_SEG - 1);         // size in paragraphs
+
   s_mcb_initialised = true;
 }
 
@@ -4647,9 +4662,17 @@ Bitu dosemu_int21() {
       // Real DOS programs start by shrinking their "own" block (the one
       // DOS implicitly allocated for the loaded .EXE/.COM) to free memory
       // for the heap.  That block isn't in our MCB chain -- the chain
-      // only covers the arena above the program image.  For blocks our
-      // chain doesn't know about, accept the resize as a no-op success
-      // so programs can proceed to AH=48h.
+      // only covers the arena above the program image.  For the
+      // top-level program (ES==PSP_SEG) we maintain a single MCB
+      // header at PSP_SEG-1, because FreeCOM's XMS_Swap build reads
+      // mcb_size to derive SwapTransientSize.  For other below-arena
+      // blocks (env segs etc.) we still accept as no-op success.
+      if (SegValue(es) == PSP_SEG) {
+        const PhysPt p = (PSP_SEG - 1) * 16u;
+        mem_writew(p + 3, reg_bx);
+        set_cf(false);
+        return CBRET_NONE;
+      }
       if (SegValue(es) < MCB_ARENA_START) {
         set_cf(false);
         return CBRET_NONE;

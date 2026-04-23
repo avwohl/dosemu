@@ -218,46 +218,42 @@ when landed.  Suite is 29/29 at the start of the backlog.
      char-device-at-EOF check `(attr & 0xc0) == 0x80`.
    - Added FREECOM regression gate to the test suite (31/31).
 
-   Remaining: spawning external programs through FreeCOM *returns
-   cleanly from AH=4B* now, but FreeCOM's REPL falls silent after
-   the child exits.  Traced the XMS_Swap path:
+   Remaining: **FreeCOM→RM-child works; FreeCOM→DJGPP-child has a
+   secondary bug.**
 
-       pre-spawn:
-         XMS AH=09 DX=0019       alloc 25 KB EMB -> handle 1
-         XMS AH=0B len=25120     src seg 0x2092:0 (FreeCOM transient)
-                                 dst h1:0        (into XMS)
-         XMS AH=0B len=0         src seg 0x0100:0, dst h1:0x6220
-                                 (end-of-chunk-list terminator)
-         AH=4B                   exec child
-         AH=4C                   child exits
+   Root cause of the primary hang was found by reading FreeCOM's
+   `shell/cswapc.c:189` (github.com/FDOS/freecom):
 
-       post-spawn:
-         AH=48 BX=0              alloc 0 paras (we return success w/ tiny seg)
-         XMS AH=0B len=0         src h1:0x6220 dst seg 0x2001:0
-                                 (only one restore move, len=0, wrong seg!)
-         ... hang ...
+       mcb = MK_SEG_PTR(struct MCB, SEG2MCB(_psp));
+       xms_block_size = SwapTransientSize = mcb->mcb_size;
 
-   Two observations:
-   (a) The restore move has **len=0**, not len=25120 as symmetry would
-       require.  FreeCOM's chunk-list it walks is coming back empty.
-   (b) The destination segment is **0x2001**, not the pre-spawn
-       0x2092.  That's where our child was loaded (MCB arena + 1).
-       FreeCOM appears to be trying to restore into child-land.
+   FreeCOM reads its own MCB header at `_psp-1` to discover its
+   initial block size, which then becomes `SwapTransientSize` --
+   the paragraph count it requests back from AH=48 after a child
+   exec.  Our runtime didn't write a top-level MCB at PSP_SEG-1,
+   so FreeCOM read garbage memory (often 0), `SwapTransientSize`
+   stayed 0, and the post-spawn `AH=48 BX=[SwapTransientSize]=0`
+   short-circuited the swap-in path.
 
-   Working theory: FreeCOM's restore-chunk-list lives in its
-   resident-resident portion (below the 4Ah-shrink boundary), but
-   some pointers in that list reference pre-spawn transient
-   addresses.  When the resident code runs post-spawn, those
-   pointers are stale.  Or FreeCOM expects AH=48 BX=0 to return the
-   SAME segment it had pre-spawn (we return whichever free block is
-   first) and uses that returned seg as the dst.
+   Fixed in this session:
+   - `mcb_init` now writes a proper MCB header at `PSP_SEG-1`
+     with owner=PSP_SEG and size=MCB_ARENA_START-PSP_SEG-1.
+   - AH=4Ah recognises ES==PSP_SEG as the top-level block and
+     updates the size field at `(PSP_SEG-1):3` so FreeCOM's
+     sequence of shrinks is observable.
+   - Added `FC_SPAWN` regression gate to tests/djgpp/run.sh:
+     FreeCOM spawns HELLO.COM, returns to REPL, accepts another
+     command.  Suite is now 37/37.
 
-   Fixing probably needs FreeCOM source inspection
-   (github.com/FDOS/freecom) to see what the post-spawn code
-   actually does with the AH=48 result and where the chunk list
-   lives.  Suite's MAKE test uses COMMAND.COM /c (one-shot, no
-   REPL resume) and passes, so this doesn't block anything we
-   ship.  Needs its own session.
+   **Remaining secondary bug:** FreeCOM spawning a DJGPP child
+   (DJ_WRITE.EXE) completes through the child's AH=4C cleanly,
+   the AH=4B exit restores identical FreeCOM state (verified via
+   DOSEMU_4B_TRACE) -- but the dynrec core then aborts with
+   "illegal option in dyn_mov_seg_ev" decoding the instruction
+   at FreeCOM's resumed CS:IP.  Same 4B entry/exit values work
+   for a .COM child; the DJGPP child's PM execution must be
+   corrupting something dosbox's dynrec cares about (JIT cache
+   of FreeCOM's code block perhaps).  Needs its own session.
 7. ~~**AH=4B AL=5** (Set execution state -- for debuggers).~~
    Stubbed as no-op success.  DOS 5+ IO.SYS is effectively the
    only caller in the wild; programs that test-probe the API are

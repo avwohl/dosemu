@@ -122,6 +122,26 @@ else
     fail=$((fail + 1))
 fi
 
+# FreeCOM spawning an external program and returning to the REPL.
+# Regression gate for the top-level MCB-at-PSP-1 fix (FreeCOM's
+# XMS_Swap build reads mcb->mcb_size to derive SwapTransientSize;
+# without a real MCB, it reads 0 and AH=48 BX=0 post-spawn is a
+# short-circuit that hangs the REPL).  Uses HELLO.COM because that
+# exercises only the RM path; the DJGPP-child case through FreeCOM
+# has a separate secondary issue tracked in WIP.
+fcs_dir=$(mktemp -d)
+cp build/dosemu tests/COMMAND.COM tests/HELLO.COM "$fcs_dir/"
+fcsout=$(printf 'HELLO.COM\r\necho post-spawn-ok\r\nexit\r\n' \
+    | (cd "$fcs_dir" && timeout 8 ./dosemu COMMAND.COM 2>/dev/null) | tr -d '\r')
+rm -rf "$fcs_dir"
+if echo "$fcsout" | grep -q 'post-spawn-ok' && echo "$fcsout" | grep -q 'dosemu-hello-ok'; then
+    printf "  %-12s PASS\n" "FC_SPAWN"
+    pass=$((pass + 1))
+else
+    printf "  %-12s FAIL (out=%q)\n" "FC_SPAWN" "$fcsout"
+    fail=$((fail + 1))
+fi
+
 # Extra assertion: DJ_ARGV called with a quoted multi-word arg must
 # deliver it as a single argv entry (regression gate for the PSP
 # cmd-tail quoting fix).
