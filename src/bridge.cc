@@ -4714,6 +4714,17 @@ Bitu dosemu_int21() {
       s_current_psp_seg = child_psp;
       s_current_env_seg = child_env;
 
+      // Snapshot parent's LDT state.  The child's dpmi_entry wipes
+      // the entire LDT before populating its starter set, which
+      // destroys any DPMI allocations the parent made (LDT[6..N]).
+      // On child exit we restore the snapshot so parent's post-
+      // spawn code finds its DPMI selectors intact.
+      std::vector<uint8_t> saved_ldt(LDT_BYTES);
+      for (uint32_t i = 0; i < LDT_BYTES; ++i)
+        saved_ldt[i] = mem_readb(LDT_BASE + i);
+      uint8_t saved_ldt_in_use[sizeof(s_ldt_in_use)];
+      std::memcpy(saved_ldt_in_use, s_ldt_in_use, sizeof(s_ldt_in_use));
+
       // Switch CPU to child entry state (a real-mode CS load; shim's
       // current execution will "resume" child flow via the main loop's
       // LOADIP reading these fresh values).
@@ -4734,7 +4745,20 @@ Bitu dosemu_int21() {
 
       DOSBOX_RunMachine();
 
-      if (saved_cr0_4b & 1) CPU_SET_CRX(0, saved_cr0_4b);
+      // Always restore parent's CR0 -- the child may have flipped PE
+      // (DJGPP child did PE=1 for its own DPMI entry, then exited with
+      // CR0.PE still set, but our parent may have been in RM when it
+      // called AH=4B (itself via simrm)).
+      CPU_SET_CRX(0, saved_cr0_4b);
+
+      // Restore parent's LDT.  Child's dpmi_entry wiped the whole
+      // table and re-populated slots 1..5 with child's bases.  Slots
+      // 6+ (which the parent may have allocated via INT 31 AX=0000)
+      // were lost.  Parent code using those selectors would read
+      // child-era memory; restore the full 2KB snapshot we took.
+      for (uint32_t i = 0; i < LDT_BYTES; ++i)
+        mem_writeb(LDT_BASE + i, saved_ldt[i]);
+      std::memcpy(s_ldt_in_use, saved_ldt_in_use, sizeof(s_ldt_in_use));
 
       // Child exited via AH=4Ch; restore parent state.
       s_child_exit_pending = false;
