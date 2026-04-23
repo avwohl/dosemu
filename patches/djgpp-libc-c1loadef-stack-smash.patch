@@ -1,13 +1,20 @@
-DJGPP libc: bound __crt0_load_environment_file's expansion buffer
+DJGPP libc: fix __crt0_load_environment_file buffer overflow
 
 Every program built against DJGPP libc 2.05 (last released Oct 2015)
 has a stack-buffer overflow in its startup.  __crt0_load_environment_
-file sizes its output buffer to the RAW djgpp.env file size, then
-expands %VAR% references into it with no upper bound.  A djgpp.env
-whose values recursively reference already-expanded variables --
-which the standard djgpp.env does every time it writes lines like
-`C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include` -- overflows the
-buffer once the substituted output grows past fsize.
+file sizes its output buffer to the RAW djgpp.env file size:
+
+    char *buf = alloca(fsize);
+
+then expands %VAR% references into it with no upper bound.  A
+djgpp.env whose values recursively reference already-expanded
+variables -- which the standard djgpp.env does every time it writes
+lines like
+
+    C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include
+
+-- overflows the buffer once the substituted output grows past
+fsize.
 
 Whether the overflow is visible depends on the caller's stack layout
 at startup.  delorie's gcc 9.3 and 12.2 cpp.exe both have a call
@@ -16,11 +23,14 @@ CPU pops `;%DJ` literal bytes from djgpp.env as EIP and traps #UD
 at a bogus address.  Smaller programs (and programs with a
 different startup stack profile) survive the overflow and run.
 
-Fix: size the output buffer generously (10x fsize + 4096), which
-covers any plausible expansion cascade while staying well under
-DJGPP's default stack size.  A fully-robust fix would also bound
-`*dp++ = *e++` against a computed end pointer; this one-liner
-matches the surrounding code style and closes the real-world crash.
+This patch replaces the fixed-size alloca with a malloc'd output
+buffer that realloc-grows on demand.  No write is done without
+first ensuring room at dp_off via ENSURE().  The buffer is freed
+after putenv() -- safe because DJGPP's putenv (libc/compat/stdlib/
+putenv.c) copies the value rather than retaining the caller's
+pointer.  No magic size multiplier, no "generous headroom" guess:
+the buffer grows by doubling only when the expansion actually
+overruns it.
 
 Reproducer: delorie gcc 9.3 or 12.2 cpp.exe, running under any
 DOS/DPMI host (DOSBox, dosemu2, etc.), with any djgpp.env whose
@@ -28,16 +38,134 @@ final expanded size >= 2683 bytes.
 
 --- a/src/libc/crt0/c1loadef.c
 +++ b/src/libc/crt0/c1loadef.c
-@@ -85,7 +85,11 @@ __crt0_load_environment_file(char *app_name)
+@@ -85,24 +85,57 @@
  	{
  	  if (this_prog)
  	  {
 -	    char *buf = alloca(fsize);
-+	    /* %VAR% expansion can grow the output well past fsize
-+	       (e.g., C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/...
-+	       recursively references an already-expanded variable).
-+	       10x+4K leaves headroom and still fits the default stack.  */
-+	    char *buf = alloca(fsize * 10 + 4096);
- 	    char *tb2 = buf;
- 	    char *sp=tb, *dp=tb2;
+-	    char *tb2 = buf;
+-	    char *sp=tb, *dp=tb2;
++	    /* Output buffer grows on demand -- %VAR% expansion can
++	       legitimately produce output much larger than the input
++	       line, especially for lines that recursively reference
++	       already-expanded variables (e.g. the standard djgpp.env
++	       line C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include).
++	       malloc so we can realloc; DJGPP's putenv copies the
++	       value (libc/compat/stdlib/putenv.c) so freeing the
++	       buffer after putenv is safe.  */
++	    size_t buf_sz = (size_t)fsize + 32;
++	    char *buf = (char *)malloc(buf_sz);
++	    if (!buf)
++	      continue;		/* skip this line on OOM */
++	    size_t dp_off = 0;		/* next write position in buf */
++	    size_t dirend_off = 0;	/* last path-sep during %VAR% expansion */
++	    size_t tb2_off = 0;		/* start of string we'll putenv */
++	    char *sp = tb;
++
++#define C1LOADEF_ENSURE(need) do {					\
++	      if (dp_off + (need) > buf_sz) {				\
++		size_t ns = buf_sz * 2;					\
++		while (ns < dp_off + (need) + 16) ns *= 2;		\
++		char *nb = (char *)realloc(buf, ns);			\
++		if (!nb) { free(buf); goto c1loadef_bail; }		\
++		buf = nb; buf_sz = ns;					\
++	      }								\
++	    } while (0)
++#define C1LOADEF_EMIT(c) do {						\
++	      C1LOADEF_ENSURE(1);					\
++	      buf[dp_off++] = (char)(c);				\
++	    } while (0)
++
  	    while (*sp != '=' && *sp != '\n' && *sp)
+-	      *dp++ = *sp++;
++	      C1LOADEF_EMIT(*sp++);
+ 	    if (*sp == '\n' || *sp == '\0')
+ 	    {
+ 	      tb = sp;
++	      free(buf);
+ 	      continue;
+ 	    }
+-	    if (*tb2 == '+')	/* non-overriding */
++	    if (buf[0] == '+')	/* non-overriding */
+ 	    {
+-	      *dp = 0;
+-	      tb2++;
+-	      if (getenv(tb2))
++	      C1LOADEF_ENSURE(1);
++	      buf[dp_off] = 0;
++	      tb2_off = 1;
++	      if (getenv(buf + tb2_off))
++	      {
++		free(buf);
+ 		continue;	/* while scanning bytes */
++	      }
+ 	    }
+-	    *dp++ = *sp++;	/* copy the '=' */
++	    C1LOADEF_EMIT(*sp++);	/* copy the '=' */
+ 	    while (*sp)
+ 	    {
+ 	      if (*sp == '%')
+@@ -110,12 +143,12 @@
+ 		char *pp;
+ 		if (sp[1] == '%')
+ 		{
+-		  *dp++ = '%';
++		  C1LOADEF_EMIT('%');
+ 		  sp += 2;
+ 		}
+ 		else
+ 		{
+-		  char ps, *e, *dirend;
++		  char ps, *e;
+ 		  int dirpart=0, apsemi=0;
+ 		  int mapup=0, maplow=0, mapfs=0, mapbs=0;
+ 		  while (strchr(":;/\\<>", sp[1]))
+@@ -135,35 +168,40 @@
+ 		  ps = *pp;
+ 		  *pp = 0;
+ 		  e = getenv(sp+1);
+-		  dirend = dp;
++		  dirend_off = dp_off;
+ 		  if (e)
+ 		  {
+ 		    while (*e)
+ 		    {
+ 		      char ec = *e++;
+ 		      if (strchr("\\/:", ec))
+-			dirend=dp;
++			dirend_off = dp_off;
+ 		      if (mapup) ec = toupper((unsigned char)ec);
+ 		      if (maplow) ec = tolower((unsigned char)ec);
+ 		      if (mapfs && ec == '\\') ec = '/';
+ 		      if (mapbs && ec == '/') ec = '\\';
+-		      *dp++ = ec;
++		      C1LOADEF_EMIT(ec);
+ 		    }
+ 		  }
+ 		  if (dirpart)
+-		    dp = dirend;
++		    dp_off = dirend_off;
+ 		  if (apsemi && e)
+-		    *dp++ = ';';
++		    C1LOADEF_EMIT(';');
+ 		  if (ps == 0)
+ 		    break;
+ 		  sp = pp+1;
+ 		}
+ 	      }
+ 	      else
+-		*dp++ = *sp++;
++		C1LOADEF_EMIT(*sp++);
+ 	    }
+-	    *dp++ = 0;
+-	    putenv(tb2);
++	    C1LOADEF_EMIT(0);
++	    putenv(buf + tb2_off);
++	    free(buf);
++	  c1loadef_bail:
++	    ;
++#undef C1LOADEF_EMIT
++#undef C1LOADEF_ENSURE
+ 	  }
+ 	}
+       }

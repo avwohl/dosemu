@@ -1,3 +1,109 @@
+# What's left to do — status snapshot (2026-04-23)
+
+Structured backlog as of end-of-session today.  Suite is 37/37 green.
+
+## Done this session
+
+    1ba0b1a  EMS/VCPI/HMA coverage + char-device routing + 3 probe tests
+    fbfb057  XMS Move handle=0 offset seg:off decoding
+    bcfcaeb  Top-level MCB at PSP_SEG-1 (FreeCOM REPL after RM spawn)
+    493d1c6  cpu.code.big + cpu.idt restore (FreeCOM REPL after PM spawn)
+    7450df0  WIP: richer DJGPP tools still crash under FreeCOM
+    5bf0572  WIP: narrowed to 2000-era libc vintage specifically
+    9c097ac  CI: document EMS/VCPI/HMA coverage
+
+## Open bugs (logged, not fixed)
+
+    Severity  Issue                                        Evidence / gating
+    --------  ------------------------------------------   ------------------
+    medium    2000-era DJGPP tools crash under FreeCOM     in-tree DJGPP works
+              (SEQ/WC/GREP/DIFF/FACTOR)                    same tools work direct
+    medium    FreeCOM→DJGPP→DJGPP grandchild chain         nested AH=4B paths
+    low       cpp.exe crash (DJGPP libc 2.05 stack smash)  patch in patches/
+              -- not our bug; DJGPP libc dormant since     + verify script
+              2015                                         + docs/djgpp-libc-*.md
+
+## Strategic backlog
+
+### Tier 1 — interactive shell & tooling
+
+    Item                                    Effort    Current    Want
+    ----                                    ------    -------    ----
+    FreeCOM + modern DJGPP programs         done      [x]        [x]
+    FreeCOM + RM children (HELLO.COM)       done      [x]        [x]
+    FreeCOM + 2000-era DJGPP tools          1-2 days  broken     [x]
+    GNU make + real recipes                 done      [x]        [x]
+
+### Tier 2 — development environment
+
+    Item                                    Effort       Current        Want
+    ----                                    ------       -------        ----
+    DJGPP gcc compile-link in-emulator      multi-sess   cpp.exe fails  [x]
+    Open Watcom wcc386.exe                  done         [x]            [x]
+    Open Watcom wlink.exe linking           partial      config issues  [x]
+    Full C++ program build in FreeCOM       1-2 weeks    blocked        stretch
+
+### Tier 3 — LE loader extensions for real Watcom tools
+
+    Piece                                   Effort    Unlocks
+    -----                                   ------    -------
+    DPMI service hand-off for LE client     1-2 days  wd.exe (Watcom debugger)
+    RM INT reflection for LE client         1 day     wd.exe, wpp386
+    Import resolution (imp-ord/imp-name)    1-2 days  Watcom utilities
+    Selector fixups 0x02/0x03/0x06          done      vtables, far func ptrs
+    LE arena > 1 MB                         done      wd.exe (600KB+)
+
+    Total tier 3: ~1 week to first real LE binary (wd.exe) running
+
+### Tier 4 — cosmetic / skippable
+
+    Item                                Why skip
+    ----                                --------
+    UMBs proper (C800-EFFF MCB arena)   Nothing we run uses DOS=UMB
+    DPMI 1.0 version advertise          Subfunctions already work;
+                                        bumping 0x0400 risks waking
+                                        stricter client paths
+    QEMM QPI / Stealth / MANIFEST       Proprietary, nothing requires it
+    DOS/4GW full DPMI handoff           Current bypass is user-invisible
+
+### Tier 5 — out of scope
+
+    Graphics / VGA / VESA              No plan; headless emulator
+    Sound (SB/Adlib/MPU)               No plan
+    Floppy / CD / disk images          No plan
+    Networking (packet driver, etc)    No plan
+    Games (most need tier 5)           No plan
+
+## Dependency ordering for what's achievable
+
+    1.  FreeCOM + 2000-era DJGPP tools     ┐
+                                           ├── independent
+    2.  Tier 3 LE loader pieces            ┘
+        ├─ DPMI service hand-off
+        ├─ RM INT reflection
+        └─ Import resolution
+
+    3.  cpp.exe fix   ← depends on: someone rebuilds DJGPP libc with our
+                                     patches/djgpp-libc-c1loadef-stack-smash.patch
+                                    OR patches the .zip binary
+                                    OR DJGPP revives (10-year dormant)
+
+## Recommendation
+
+- **Interactive shell robustness**: chase #1.  Deterministic fault EIP
+  per binary, known-good minimal case (DJ_WRITE), clean DPMI init
+  trace matching up to divergence point.  Tractable debug shape.
+- **Developer-tool coverage**: chase #2 (LE loader).  Each remaining
+  piece is bounded and additive.  `wd.exe` running is a visible
+  milestone.
+- **Long-game goodwill**: submit
+  `patches/djgpp-libc-c1loadef-stack-smash.patch` to
+  `djgpp@delorie.com` or PR to `andrewwutw/build-djgpp`.  The patch is
+  now properly robust (dynamic realloc, no magic multiplier) and has a
+  verification script.  Not coding work -- communications work.
+
+---
+
 # QEMM parity — EMS/VCPI/HMA covered for free (2026-04-23)
 
 User asked "what is left to do for full QEMM emulation?"  Survey

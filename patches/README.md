@@ -15,13 +15,39 @@ while chasing why gcc 12.2 `cpp.exe --version` crashes under dosemu with
 a recursive #MF fault when the standard delorie `djgpp.env` is in place.
 
 Root cause: `__crt0_load_environment_file` sizes its stack buffer to the
-raw djgpp.env file size, then expands `%VAR%` references into it with no
-upper bound.  Typical djgpp.env lines like
+raw djgpp.env file size via `alloca(fsize)`, then expands `%VAR%`
+references into it with no upper bound.  Typical djgpp.env lines like
 `C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include` recursively reference
 already-expanded variables, so the output outgrows the buffer.  Whether
 the overflow causes a crash depends on what's above `buf` in the caller's
 stack frame -- delorie-built cpp.exe happens to have a return address
 there and pops `;%DJ` bytes from djgpp.env on return.
+
+### Fix approach
+
+The patch replaces the `alloca(fsize)` with a **malloc'd buffer that
+realloc-grows on demand**.  Every byte written to the buffer goes
+through an `ENSURE(1)` check that doubles the buffer if the next write
+would overflow.  No magic size multiplier, no "generous headroom"
+guess -- the buffer grows by doubling only when expansion actually
+overruns it.
+
+Heap allocation is fine because DJGPP's `putenv`
+(`libc/compat/stdlib/putenv.c`) **copies** the value rather than
+retaining the caller's pointer, so freeing the buffer after
+`putenv()` is safe.  This is DJGPP-specific non-POSIX behavior but
+it's how DJGPP has always worked.
+
+### Verifying the fix
+
+`verify-c1loadef-patch.sh` downloads `djlsr205.zip`, builds a test
+harness that pre-populates `C_INCLUDE_PATH` with 40 KB before invoking
+`__crt0_load_environment_file`, and runs both the unpatched and
+patched versions.  Unpatched crashes with SIGBUS/SEGV; patched emits
+a 40 977-byte `C_INCLUDE_PATH` cleanly.
+
+Requirements: a C compiler, `patch`, `unzip`, `curl`, ~4 MB scratch.
+The script caches `/tmp/djlsr205.zip` across runs.
 
 See `../WIP.md` (section "The delorie cpp.exe SIGFPE") for the full
 investigation log, including the exact 2683-byte trigger threshold,

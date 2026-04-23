@@ -106,27 +106,60 @@ bisected EIP evidence.
 
 ## The fix
 
-`patches/djgpp-libc-c1loadef-stack-smash.patch`:
+`patches/djgpp-libc-c1loadef-stack-smash.patch` replaces the unbounded
+`alloca(fsize)` with a `malloc`'d buffer that realloc-grows on demand.
+Every write goes through an `ENSURE(1)` gate that doubles the buffer
+when the next write would overrun:
 
 ```c
 -    char *buf = alloca(fsize);
-+    /* %VAR% expansion can grow the output well past fsize
-+       (e.g., C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/...
-+       recursively references an already-expanded variable).
-+       10x+4K leaves headroom and still fits the default stack.  */
-+    char *buf = alloca(fsize * 10 + 4096);
+-    char *tb2 = buf;
+-    char *sp=tb, *dp=tb2;
+-    while (*sp != '=' && *sp != '\n' && *sp)
+-      *dp++ = *sp++;
++    size_t buf_sz = (size_t)fsize + 32;
++    char *buf = (char *)malloc(buf_sz);
++    if (!buf) continue;
++    size_t dp_off = 0, dirend_off = 0, tb2_off = 0;
++    char *sp = tb;
++
++#define C1LOADEF_ENSURE(need) do { \
++      if (dp_off + (need) > buf_sz) { \
++        size_t ns = buf_sz * 2; \
++        while (ns < dp_off + (need) + 16) ns *= 2; \
++        char *nb = (char *)realloc(buf, ns); \
++        if (!nb) { free(buf); goto c1loadef_bail; } \
++        buf = nb; buf_sz = ns; \
++      } \
++    } while (0)
++#define C1LOADEF_EMIT(c) do { \
++      C1LOADEF_ENSURE(1); \
++      buf[dp_off++] = (char)(c); \
++    } while (0)
++
++    while (*sp != '=' && *sp != '\n' && *sp)
++      C1LOADEF_EMIT(*sp++);
+     ...
++    putenv(buf + tb2_off);
++    free(buf);
 ```
 
-Size the stack buffer generously so the expansion has room.  DJGPP's
-default stack is 256 KB, so even `10 × fsize + 4K` on a pathological
-10 KB djgpp.env only uses 100 KB of stack -- comfortably safe.
+No magic size multiplier, no "generous headroom" guess -- the buffer
+grows by doubling only when expansion actually overruns it.
 
-A fully-robust fix would also bound `*dp++ = *e++` against a
-computed end pointer (and retry with a larger allocation on overrun,
-since djgpp.env can legitimately be large).  The one-liner above
-matches the surrounding code style and closes the real-world crash
-without refactoring the parser; feel free to write the bigger
-version for upstream.
+Heap allocation is fine because DJGPP's `putenv`
+(`libc/compat/stdlib/putenv.c`) copies the value rather than retaining
+the caller's pointer, so freeing the buffer after `putenv()` is safe.
+This is DJGPP-specific non-POSIX behavior but it's how DJGPP has
+always worked.
+
+### Verified
+
+`patches/verify-c1loadef-patch.sh` pulls `djlsr205.zip`, compiles a
+test harness that pre-populates `C_INCLUDE_PATH` with 40 KB of data
+and invokes `__crt0_load_environment_file`.  On un-patched 2.05:
+SIGBUS (rc=138).  Patched: emits the expected 40 977-byte expansion
+cleanly (rc=0).
 
 `patch --dry-run -p1` applies cleanly to `djlsr205.zip`'s source
 tree.
