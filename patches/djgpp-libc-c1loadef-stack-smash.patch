@@ -1,0 +1,43 @@
+DJGPP libc: bound __crt0_load_environment_file's expansion buffer
+
+Every program built against DJGPP libc 2.05 (last released Oct 2015)
+has a stack-buffer overflow in its startup.  __crt0_load_environment_
+file sizes its output buffer to the RAW djgpp.env file size, then
+expands %VAR% references into it with no upper bound.  A djgpp.env
+whose values recursively reference already-expanded variables --
+which the standard djgpp.env does every time it writes lines like
+`C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include` -- overflows the
+buffer once the substituted output grows past fsize.
+
+Whether the overflow is visible depends on the caller's stack layout
+at startup.  delorie's gcc 9.3 and 12.2 cpp.exe both have a call
+chain that puts a return address at buf+fsize+N, so on return the
+CPU pops `;%DJ` literal bytes from djgpp.env as EIP and traps #UD
+at a bogus address.  Smaller programs (and programs with a
+different startup stack profile) survive the overflow and run.
+
+Fix: size the output buffer generously (10x fsize + 4096), which
+covers any plausible expansion cascade while staying well under
+DJGPP's default stack size.  A fully-robust fix would also bound
+`*dp++ = *e++` against a computed end pointer; this one-liner
+matches the surrounding code style and closes the real-world crash.
+
+Reproducer: delorie gcc 9.3 or 12.2 cpp.exe, running under any
+DOS/DPMI host (DOSBox, dosemu2, etc.), with any djgpp.env whose
+final expanded size >= 2683 bytes.
+
+--- a/src/libc/crt0/c1loadef.c
++++ b/src/libc/crt0/c1loadef.c
+@@ -85,7 +85,11 @@ __crt0_load_environment_file(char *app_name)
+ 	{
+ 	  if (this_prog)
+ 	  {
+-	    char *buf = alloca(fsize);
++	    /* %VAR% expansion can grow the output well past fsize
++	       (e.g., C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/...
++	       recursively references an already-expanded variable).
++	       10x+4K leaves headroom and still fits the default stack.  */
++	    char *buf = alloca(fsize * 10 + 4096);
+ 	    char *tb2 = buf;
+ 	    char *sp=tb, *dp=tb2;
+ 	    while (*sp != '=' && *sp != '\n' && *sp)
