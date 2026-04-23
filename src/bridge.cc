@@ -3175,6 +3175,8 @@ Bitu dosemu_int31() {
       CPU_LIDT(0x3FF, 0);
 
       CPU_SET_CRX(0, saved_cr0 & ~1u);
+      std::fprintf(stderr, "[simrm-postcr0 0301] s_eax=%08x cr0=%08x\n",
+          (unsigned)s_eax, (unsigned)cpu.cr0);
 
       reg_eax = s_eax; reg_ebx = s_ebx; reg_ecx = s_ecx; reg_edx = s_edx;
       reg_esi = s_esi; reg_edi = s_edi; reg_ebp = s_ebp;
@@ -4438,12 +4440,6 @@ Bitu dosemu_int21() {
       // halts the emulator.
       if (!s_process_stack.empty()) {
         s_process_stack.back().child_exit_code = reg_al;
-        // Signal the simulate-RM-INT return path (if any) to propagate
-        // CBRET_STOP up through the INT 31 trampoline so the OUTER
-        // child RunMachine (from AH=4B) also unwinds.  Without this,
-        // AH=4C from PM via INT 31 AX=0300 would only unwind the RM
-        // INT's nested machine, then try to IRET back to the child's
-        // PM context -- which is dead and whose stack is gone.
         s_child_exit_pending = true;
         return CBRET_STOP;
       }
@@ -4746,10 +4742,43 @@ Bitu dosemu_int21() {
       s_current_env_seg = saved_env_seg;
       const ProcessState restored = s_process_stack.back();
       s_process_stack.pop_back();
-      SegSet16(cs, restored.cs);
-      SegSet16(ds, restored.ds);
-      SegSet16(ss, restored.ss);
-      SegSet16(es, restored.es);
+      // In PM, parent's segment selectors are LDT/GDT indices and
+      // their bases must come from the descriptor tables -- not from
+      // `val << 4` (which SegSet16 does).  Also, the child's
+      // dpmi_entry overwrote the starter-set LDT slots (1..5) with
+      // ITS base addresses, so we must rewrite parent's bases first.
+      if (saved_cr0_4b & 1) {
+        const uint32_t parent_cs_base = restored.cs * 16u;   // parent's RM seg
+        const uint32_t parent_ds_base = restored.ds * 16u;
+        const uint32_t parent_ss_base = restored.ss * 16u;
+        const uint32_t parent_es_base = restored.es * 16u;
+        write_ldt_descriptor(1, parent_cs_base, 0xFFFF, 0xFA, false);
+        write_ldt_descriptor(2, parent_ds_base, 0xFFFF, 0xF2, true);
+        write_ldt_descriptor(3, parent_ss_base, 0xFFFF, 0xF2, true);
+        write_ldt_descriptor(4, parent_es_base, 0xFFFF, 0xF2);
+        // Parent's PSP/env selectors also point at parent, but we
+        // didn't change their LDT slots (4/5) to child values if
+        // s_current_psp_seg was 0 going in -- restoring is safe.
+        // Now reload the segment registers from the LDT with PM
+        // semantics so Segs.phys is the actual descriptor base.
+        const uint16_t ldt_cs = (1 << 3) | 0x04 | 0x03;
+        const uint16_t ldt_ds = (2 << 3) | 0x04 | 0x03;
+        const uint16_t ldt_ss = (3 << 3) | 0x04 | 0x03;
+        const uint16_t ldt_es = (4 << 3) | 0x04 | 0x03;
+        CPU_SetSegGeneral(ds, ldt_ds);
+        CPU_SetSegGeneral(ss, ldt_ss);
+        CPU_SetSegGeneral(es, ldt_es);
+        // For CS we can't MOV CS -- manually refresh cached base.
+        Descriptor d;
+        cpu.gdt.GetDescriptor(ldt_cs, d);
+        Segs.val[cs]  = ldt_cs;
+        Segs.phys[cs] = d.GetBase();
+      } else {
+        SegSet16(cs, restored.cs);
+        SegSet16(ds, restored.ds);
+        SegSet16(ss, restored.ss);
+        SegSet16(es, restored.es);
+      }
       reg_eip = restored.eip;
       reg_esp = restored.esp;
       reg_ebp = restored.ebp;
