@@ -1174,13 +1174,16 @@ Bitu dosemu_dpmi_entry() {
       write_idt_gate(v, PM_CB_SEL, exc_cb, bits32);
   }
 
-  // Ring-3 DPMI entry (DOSEMU_DPMI_RING3=1) -- experimental.  32-bit
-  // clients only; 16-bit goes down the ring-0 path below.  Real DPMI
-  // hosts (CWSDPMI, Windows 3.x, QEMM) run clients at CPL=3 with the
-  // host at CPL=0 so exceptions cleanly transition through the TSS.
-  // Our existing fixtures run at ring 0 and would need updating to
-  // use this path -- opt-in for now.
-  if (bits32 && dosemu::g_debug.dpmi_ring3) {
+  // Ring-3 DPMI entry.  This is what real hosts (CWSDPMI, Windows,
+  // QEMM) give clients -- CPL=3 with the host at CPL=0, so exceptions
+  // cleanly transition through the TSS.  We now default to this for
+  // 32-bit clients because every real-world DPMI binary (DJGPP, DOS4GW
+  // programs via the host) expects it; legacy in-tree fixtures that
+  // were written against the old ring-0 path can opt back in with
+  // DOSEMU_DPMI_RING0.  DOSEMU_DPMI_RING3 is still honoured for
+  // backward compatibility with any scripts that set it.
+  const bool want_ring3 = bits32 && !dosemu::g_debug.dpmi_ring0;
+  if (want_ring3) {
     // CWSDPMI-style ring-3 entry: allocate LDT slots for the client's
     // CS/DS/SS/ES aliases (not GDT slots -- real DPMI hosts put
     // client selectors in the LDT, so stub code that checks TI bit
@@ -1220,13 +1223,14 @@ Bitu dosemu_dpmi_entry() {
     for (auto &c : s_seg2desc_cache) c = 0;
     for (uint32_t off = 0; off < LDT_BYTES; ++off)
       mem_writeb(LDT_BASE + off, 0);
-    // CWSDPMI convention (CONTROL.C ~L469): initial client CS is
-    // 16-bit regardless of AX=1 entry.  Stubs that request 32-bit
-    // DPMI still start in 16-bit code and far-jump to their 32-bit
-    // section after DPMI setup.  Giving a 32-bit CS here causes the
-    // decoder to misinterpret the stub's 16-bit setup code and hit
-    // a spurious #UD (observed with DJGPP go32 stub at offset 0x28b).
-    // Slot 1: client code  (DPL=3, code readable, 16-bit) -- 0xFA access
+    // CWSDPMI convention (CONTROL.C line 469): client CS is always
+    // 16-bit regardless of the AX=1 "32-bit DPMI" entry.  The
+    // initial selector just aliases the caller's RM CS; stubs that
+    // want 32-bit code alloc their own 32-bit LDT descriptor via
+    // AX=0000 and far-jump to it.  DJGPP's go32 stub does exactly
+    // this.  Our earlier attempt to honour "bits32" and hand out a
+    // 32-bit CS up front misreads the stub's 16-bit setup code
+    // (observed #UD at go32 stub offset 0x28b).
     write_ldt_descriptor(1, cs_base, 0xFFFF, 0xFA, false);
     ldt_set(1, true);
     // Slot 2: client data  (DPL=3, data r/w) -- 0xF2 access

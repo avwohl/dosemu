@@ -15,7 +15,8 @@ struct DebugSettings {
   void reload();
 
   // Runtime behavior switches
-  bool dpmi_ring3;       // DOSEMU_DPMI_RING3
+  bool dpmi_ring3;       // DOSEMU_DPMI_RING3 (opt-in, now default on)
+  bool dpmi_ring0;       // DOSEMU_DPMI_RING0 (opt-out for legacy ring-0 fixtures)
   bool force_dpmi;       // DOSEMU_FORCE_DPMI
   bool no_dpmi;          // DOSEMU_NO_DPMI
   bool le_as_mz;         // DOSEMU_LE_AS_MZ

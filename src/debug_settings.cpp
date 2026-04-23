@@ -39,6 +39,7 @@ void DebugSettings::reload() {
 DebugSettings::DebugSettings() {
   // --- Runtime behavior switches ---
   dpmi_ring3    = env_present("DOSEMU_DPMI_RING3");
+  dpmi_ring0    = env_present("DOSEMU_DPMI_RING0");
   force_dpmi    = env_present("DOSEMU_FORCE_DPMI");
   no_dpmi       = env_present("DOSEMU_NO_DPMI");
   le_as_mz      = env_present("DOSEMU_LE_AS_MZ");

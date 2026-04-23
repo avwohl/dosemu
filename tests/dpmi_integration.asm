@@ -41,8 +41,58 @@ BITS 16
     test ax, ax
     jnz  switch_failed
 
-BITS 32
+    ; CWSDPMI (and dosemu by default) hands the client a 16-bit CS
+    ; regardless of the AX=1 "32-bit PM" entry (control.c:469
+    ; hardcodes D=0).  Stubs that want 32-bit code alloc their own
+    ; descriptor and far-jump to it.  Do exactly that before running
+    ; the 32-bit test body.
 
+    ; 2a. AX=0000 alloc one LDT descriptor.
+    mov ax, 0000h
+    mov cx, 1
+    int 31h
+    jc  switch_failed
+    mov bx, ax                     ; bx = new selector (save for later writes)
+
+    ; 2b. AX=0006 get base of current 16-bit CS -> CX:DX.
+    push bx
+    mov ax, 0006h
+    mov bx, cs
+    int 31h
+    mov di, cx                     ; save segment base hi
+    mov si, dx                     ; save segment base lo
+    pop bx
+
+    ; 2c. AX=0007 set new sel's base to the same.
+    push bx
+    mov ax, 0007h
+    mov cx, di
+    mov dx, si
+    int 31h
+    pop bx
+
+    ; 2d. AX=0008 set limit to 0xFFFF (1:1 byte granularity is fine).
+    push bx
+    mov ax, 0008h
+    mov cx, 0
+    mov dx, 0FFFFh
+    int 31h
+    pop bx
+
+    ; 2e. AX=0009 set access rights: CL=0xFA (P=1, DPL=3, code r/x),
+    ;     CH=0x40 (D=1 so this is a 32-bit code segment).
+    mov ax, 0009h
+    mov cx, 40FAh
+    int 31h
+
+    ; 2f. Patch the selector into the 48-bit far pointer and jump.
+    ;     Assembler can't know bx at build time; runtime-patch it.
+    mov word [fptr_sel], bx
+
+    o32 jmp far [fptr_off]
+
+BITS 32
+pm32_entry:
     ; -- 3. AX=0400 version ---------------------------------------
     mov eax, 0400h
     int 31h
@@ -201,6 +251,13 @@ base_hi           dw 0
 base_lo           dw 0
 h_si              dw 0
 h_di              dw 0
+
+; Far pointer for the 32-bit `o32 jmp far [fptr_off]` out of the
+; DPMI-entry 16-bit CS into our self-allocated 32-bit code selector.
+; 4-byte offset + 2-byte selector (= m16:32).  The selector field is
+; patched at runtime after AX=0000 gives us the slot.
+fptr_off          dd pm32_entry
+fptr_sel          dw 0
 
 ok_msg              db 'dpmi-integration=ok', 13, 10, '$'
 fail_ver_msg        db 'dpmi-integration=fail-ver', 13, 10, '$'

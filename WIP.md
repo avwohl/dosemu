@@ -134,22 +134,20 @@ when landed.  Suite is 29/29 at the start of the backlog.
    only caller in the wild; programs that test-probe the API are
    satisfied by CF=0.  If a real caller ever shows up we'll
    implement the state-switch for real.
-8. **QEMM parity** -- structural DPMI-host gap mentioned in the
-   earlier-session notes below.  **Progress:** the ring-3 path
-   (`DOSEMU_DPMI_RING3=1`) handles all 25 DPMI_* fixtures except
-   one (`DPMI_INTEGRATION`) with zero changes, so we're mostly
-   there.  The remaining issue is the client-CS bitness at DPMI
-   entry: CWSDPMI gives a 32-bit CS when AX=1, but our entry
-   path hands out 16-bit (because DJGPP go32 stubs start in
-   16-bit code and far-jump to their own 32-bit selector).
-   Making the ring-3 path default needs: (a) either honour AX
-   at entry properly and fix whatever in the DJGPP go32 stub
-   assumed a 16-bit initial CS, OR add a per-client hint (MZ
-   stub signature?) to keep DJGPP on 16-bit and everyone else
-   on 32-bit; and (b) migrate the eight DPMI_STAGE* fixtures
-   (which currently run at ring 0 by not opting in) to the
-   ring-3 path.  Defer until one of those is actually blocking
-   something.
+8. ~~**QEMM parity**~~  **Done.**  Ring-3 DPMI (CPL=3 client,
+   CPL=0 host via TSS) is now the default for 32-bit DPMI
+   entries; `DOSEMU_DPMI_RING0=1` opts back into the legacy
+   ring-0 mode for anyone who needs it.  All 25 in-tree DPMI
+   fixtures pass in the new default, plus the full 32-entry
+   DJGPP/real-world suite.  Clarification on CWSDPMI
+   behaviour: checked CWSDPMI's `control.c:469` -- it hardcodes
+   the CS D-bit to 0, so client CS is always 16-bit at entry
+   regardless of AX=1 32-bit PM.  DJGPP's go32 stub relies on
+   this (its init code is 16-bit).  `DPMI_INTEGRATION.COM` had
+   been getting away with a 32-bit CS only because our old
+   ring-0 path handed one out from GDT[1]; updated its .asm to
+   do the proper alloc-selector-+-far-jump dance that real
+   32-bit clients do, and now everyone agrees.
 
 ## Maintenance / paper cuts
 9. ~~**`DPMI_STAGE3.COM`** hangs -- not in CI.~~  Removed.  The
