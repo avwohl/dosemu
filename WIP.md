@@ -48,18 +48,41 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
     installed at binw/wlink.lnk, the pipeline `wcc386 hello.c` →
     `wlink @link.cmd` succeeds through dosemu and produces a
     22 KB DOS/4G LE binary.  The binary runs through wstub.exe ->
-    dos4gw.exe but hits "not a WATCOM program" from dos4gw's own
-    Watcom-signature check.  Root cause is the Open Watcom
-    release's incomplete library set: `__x386_start` /
-    `__x386_dbg_hook` / `__x32_stack_size` have no PUBDEF in any
-    shipped .lib/.obj; cstrtx3r.obj imports them as EXTDEF with no
-    defining object.  Working around with wlink `alias` directives
-    lets the link finish but the resulting binary fails dos4gw's
-    internal check (it reads the entry-point chain).  This is an
-    Open Watcom distribution bug, not a dosemu bug; our toolchain
-    path is functionally proven (compile OK, link mechanics OK,
-    stub-chain OK).  Adding WATCOM/DOSEMU_PATH env passthrough
-    makes the working compile step usable in make recipes.
+    dos4gw.exe but hits "not a WATCOM program" (DOS/4GW error
+    1012) from dos4gw's own Watcom-signature check.
+
+    Root cause, confirmed by exhaustively scanning all 272
+    shipped .lib/.obj files: `__x386_start` / `__x386_dbg_hook` /
+    `__x32_stack_size` have NO PUBDEF anywhere in the
+    open-watcom-v2 Current-build release.  cstrtx3r.obj references
+    them as EXTDEF; Open Watcom source at bld/clib/startup/a/
+    cstrtx32.asm shows these as `extrn` from an unspecified
+    provider.  Even Open Watcom's own owcc driver produces
+    binaries that dos4gw rejects with "not a WATCOM program" --
+    verified by running the owcc output against dos4gw with
+    DOSEMU_PATH set.  So this is NOT a dosemu bug: the
+    open-watcom-v2 release is incompatible with its own bundled
+    dos4gw.exe.  The symbols are presumably supposed to be
+    resolved at load time via a DOS/4GW binding mechanism that
+    isn't documented and isn't activated by the shipped
+    wlsystem.lnk defaults.
+
+    Workaround found: the `system x32r` / `system x32s` flavors
+    use a separate DOS/32A extender (dos32a.exe is shipped) that
+    has its own startup library x32b.lib.  x32b.lib is ALSO
+    missing from the release, so same problem.
+
+    Pipeline machinery verified working end-to-end through dosemu:
+    - wcc386 hello.c -> valid 363-byte OMF (`Code size: 26`)
+    - wcc hello.c -ml -> valid 363-byte 16-bit OMF
+    - wlink @link.cmd -> 22KB LE binary created and written
+    - wstub.exe loads dos4gw.exe from DOSEMU_PATH
+    - dos4gw.exe starts, reads target, does its signature check,
+      fails per the release bug described above
+    16-bit link also works; the resulting DOS exe silently exits
+    after AH=30/63/66/4A startup without calling print, suggesting
+    an emulator gap in Watcom's 16-bit CRT init we haven't
+    diagnosed.  Separate session.
 
     FreeCOM → DJ_DJE → DJ_WRITE three-level nesting chain VERIFIED
     working.  FC_SPAWN regression gate extended to cover it plus

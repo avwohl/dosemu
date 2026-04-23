@@ -4383,10 +4383,19 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
-    case 0x63: {  // Get lead-byte table (DBCS).  Report "no DBCS" via a
-                  // NUL pointer.
-      SegSet16(ds, 0);
-      reg_si = 0;
+    case 0x63: {  // Get lead-byte table (DBCS).  Return a 4-byte terminator
+                  // table at a fixed location (0x0900) indicating "no DBCS"
+                  // rather than DS:SI=0:0 -- programs that read through the
+                  // returned pointer treat 0:0 as a DBCS table overlapping
+                  // the IVT and misbehave.  The table format is a list of
+                  // [lo,hi] ranges terminated by [0,0].
+      constexpr uint32_t dbcs_tab = 0x0900;
+      mem_writeb(dbcs_tab + 0, 0);
+      mem_writeb(dbcs_tab + 1, 0);
+      mem_writeb(dbcs_tab + 2, 0);
+      mem_writeb(dbcs_tab + 3, 0);
+      SegSet16(ds, 0x0090);
+      reg_si = 0x0000;
       reg_al = 0;
       set_cf(false);
       return CBRET_NONE;
