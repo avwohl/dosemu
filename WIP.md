@@ -35,8 +35,9 @@ when landed.  Suite is 29/29 at the start of the backlog.
    are Watcom config issues -- missing system definition + libs --
    not dosemu bugs.)
 5. **DJGPP→DJGPP nested exec.**  Child runs end-to-end and
-   prints `dj-write=ok`.  Seven layered root causes found and
-   fixed.  Parent resume still hits a fault; deferred.
+   prints `dj-write=ok`.  Eight layered root causes found and
+   fixed.  Parent resume still hits a fault inside parent's
+   libc; deferred.
    - **#5.1 (b46f43a):** Path reconstruction for empty `[DS:0x764]`.
    - **#5.2 (9f8cc2a):** Zero child MCB before MZ load.
    - **#5.3 (281e20f):** Preserve client's RM SP in dpmi_entry
@@ -49,18 +50,28 @@ when landed.  Suite is 29/29 at the start of the backlog.
    - **#5.7 (9b020e9):** Snapshot+restore full 2KB LDT memory
      around child execution -- child's dpmi_entry wipes all 256
      slots, clobbering parent's DPMI allocations in slots 6+.
+   - **#5.8 (99a63cf):** Snapshot+restore s_pm_exc[] (PM exception
+     handlers).  Child's libc installs its own via DPMI AX=0203;
+     those handler addresses point into child-memory that's freed
+     on exit.  Any post-spawn parent fault would have dispatched
+     to the stale child handler and recursive-faulted.  With this
+     fix, the fault-dispatcher no longer loops, and the DJGPP
+     SIGSEGV message now correctly reports "program=DJ_DJE.EXE"
+     (the parent) with LDT[6] base=0x120000 (parent's correct
+     base, restored from snapshot).
 
-   **Remaining:** After all seven fixes, parent resume trips a
-   PM-exception-dispatcher recursive-fault loop.  The fault is
-   at CS=0x37 (LDT[6]) with a base mutation between our LDT
-   restore (0x120000) and the fault site (0x1d0000).  Something
-   modifies LDT[6] between the two points -- possibly a late
-   INT 31 AX=0007 (set base) from the parent's libc.  Not yet
-   diagnosed.
+   **Remaining:** Parent now reaches its own libc and hits a
+   #GP at eip=0x7314 (parent CS base 0x120000) with error=0x0020
+   (trying to load GDT[4] = ring-0 ES selector).  Likely the
+   parent's libc signal-handler thunk expects some CPU state
+   (TSS? FS/GS?) that's not fully restored.  Bridge-side
+   ProcessState tracks cs/ds/ss/es but not fs/gs, and doesn't
+   restore TSS.  Further investigation deferred.
 
-   **Suite: 29/29.  DJGPP→HELLO.COM clean.  DJGPP→DJGPP child
-   now runs + produces correct output; parent post-resume still
-   crashes in fault-dispatcher.**
+   **Suite: 29/29.  DJGPP→HELLO.COM clean (DJ_EXEC test).
+   DJGPP→DJGPP child runs + produces correct output; parent
+   reaches its own libc post-spawn then faults on a state item
+   we're not yet tracking.**
 
 ## Larger
 6. **`make` with real recipes.**  Need FreeCOM (FreeDOS's
