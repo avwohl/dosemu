@@ -3812,6 +3812,21 @@ Bitu dosemu_int21() {
     }
 
     case 0x3F: {  // Read from handle BX, CX bytes, into DS:DX.
+      // Addressing width tracks the caller's mode:
+      //   - 32-bit PM client (direct INT 21 from flat PM): DS:EDX /
+      //     ECX bytes (full 32-bit offset + count).
+      //   - Sim-RM INT 21 (client set up RMCS with DX/CX): we're
+      //     invoked in RM, so DX/CX are the canonical values and
+      //     high halves of EDX/ECX may be stale.
+      //   - 16-bit PM: same as RM for our purposes (offset fits in
+      //     16 bits, count fits in 16 bits).
+      // DJGPP's cpp.exe uses the first form with a 32-bit offset
+      // whose low-16 bits are frequently zero; reg_dx alone silently
+      // wrote to DS:0 (= start of cpp's code segment) and corrupted
+      // the running program.
+      const bool pm32 = cpu.pmode && s_int_gate_bits32;
+      const uint32_t off32 = pm32 ? reg_edx : reg_dx;
+      const uint32_t count = pm32 ? reg_ecx : reg_cx;
       int  fd        = -1;
       bool text_mode = false;
       int *pending   = nullptr;
@@ -3836,9 +3851,9 @@ Bitu dosemu_int21() {
         text_mode = false;
         pending = &it->second.read_pending;
       }
-      const PhysPt dst = SegPhys(ds) + reg_dx;
-      uint16_t out = 0;
-      while (out < reg_cx) {
+      const PhysPt dst = SegPhys(ds) + off32;
+      uint32_t out = 0;
+      while (out < count) {
         if (text_mode && *pending >= 0) {
           mem_writeb(dst + out++, static_cast<uint8_t>(*pending));
           *pending = -1;
@@ -3851,13 +3866,14 @@ Bitu dosemu_int21() {
         if (text_mode && byte == 0x1A) break;    // DOS text-EOF marker
         if (text_mode && byte == '\n') {
           mem_writeb(dst + out++, '\r');
-          if (out < reg_cx) mem_writeb(dst + out++, '\n');
-          else              *pending = '\n';
+          if (out < count) mem_writeb(dst + out++, '\n');
+          else             *pending = '\n';
         } else {
           mem_writeb(dst + out++, byte);
         }
       }
-      reg_ax = out;
+      if (pm32) reg_eax = out;
+      else      reg_ax  = static_cast<uint16_t>(out);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -3873,16 +3889,21 @@ Bitu dosemu_int21() {
         fd = it->second.fd;
         text_mode = it->second.text_mode;
       }
-      std::vector<uint8_t> buf(reg_cx);
-      const PhysPt src = SegPhys(ds) + reg_dx;
-      for (uint16_t i = 0; i < reg_cx; ++i) buf[i] = mem_readb(src + i);
+      // 32-bit PM: use full EDX/ECX.  RM/16-bit PM: DX/CX (high
+      // halves may be stale).  Same mode-aware select as AH=3F.
+      const bool pm32 = cpu.pmode && s_int_gate_bits32;
+      const uint32_t count = pm32 ? reg_ecx : reg_cx;
+      const uint32_t off32 = pm32 ? reg_edx : reg_dx;
+      std::vector<uint8_t> buf(count);
+      const PhysPt src = SegPhys(ds) + off32;
+      for (uint32_t i = 0; i < count; ++i) buf[i] = mem_readb(src + i);
       if (dosemu::g_debug.write_trace) {
         std::fprintf(stderr,
-            "[write] fd=%d cx=%u ds=%04x(b=%08x) dx=%04x bytes:",
-            (int)reg_bx, (unsigned)reg_cx,
+            "[write] fd=%d count=%u ds=%04x(b=%08x) off=%08x bytes:",
+            (int)reg_bx, (unsigned)count,
             (unsigned)SegValue(ds), (unsigned)SegPhys(ds),
-            (unsigned)reg_dx);
-        for (uint16_t i = 0; i < reg_cx && i < 40; ++i)
+            (unsigned)off32);
+        for (uint32_t i = 0; i < count && i < 40; ++i)
           std::fprintf(stderr, " %02x", buf[i]);
         std::fprintf(stderr, "\n");
       }
@@ -3899,7 +3920,8 @@ Bitu dosemu_int21() {
       if (n < 0) { return_error(0x05); break; }
       // Report the caller's full byte count as consumed even when text-mode
       // filtering compressed the output -- that's what DOS programs expect.
-      reg_ax = reg_cx;
+      if (pm32) reg_eax = count;
+      else      reg_ax  = static_cast<uint16_t>(count);
       set_cf(false);
       return CBRET_NONE;
     }
