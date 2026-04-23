@@ -49,8 +49,21 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
     ----                                    ------       -------        ----
     DJGPP gcc compile-link in-emulator      multi-sess   cpp.exe fails  [x]
     Open Watcom wcc386.exe                  done         [x]            [x]
-    Open Watcom wlink.exe linking           partial      config issues  [x]
+    Open Watcom wlink.exe                   done         [x]            [x]
+    Open Watcom wcl386.exe                  done         [x]            [x]
+    Open Watcom owcc.exe                    done         [x]            [x]
+    Open Watcom wd.exe (LE, runs init)      done         [x]            [x]
     Full C++ program build in FreeCOM       1-2 weeks    blocked        stretch
+
+All six Open Watcom tools run cleanly under dosemu as of this session.
+`wcc386 hello.c` produces a valid OMF object file end-to-end.  Tool
+banners + help output are complete.  Remaining gaps are Watcom-config
+issues (missing `dos4g` system definition, missing `clib3r.lib`,
+missing `*.dip` files for wd.exe) -- not dosemu bugs.
+
+Added INT 21 AH=06 (Direct Console I/O) handling: DL!=0xFF writes to
+stdout; DL==0xFF non-blocking read from stdin.  Watcom wlink needs
+this for its console output path.
 
 ### Tier 3 — LE loader extensions for real Watcom tools
 

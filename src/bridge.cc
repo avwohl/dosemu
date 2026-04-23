@@ -3746,6 +3746,32 @@ Bitu dosemu_int21() {
       return CBRET_NONE;
     }
 
+    case 0x06: {  // Direct console I/O.  DL!=0xFF: write DL to stdout.
+      // DL==0xFF: non-blocking read from stdin.  ZF=1 + AL=0 if no char,
+      // else ZF=0 + AL=char.  Watcom's wlink uses this for console output.
+      if (reg_dl != 0xFF) {
+        std::fputc(reg_dl, stdout);
+        std::fflush(stdout);
+        reg_al = reg_dl;
+        CALLBACK_SZF(false);
+        return CBRET_NONE;
+      }
+      fd_set rd; FD_ZERO(&rd); FD_SET(STDIN_FILENO, &rd);
+      struct timeval zero = {0, 0};
+      if (::select(STDIN_FILENO + 1, &rd, nullptr, nullptr, &zero) > 0) {
+        uint8_t c;
+        if (::read(STDIN_FILENO, &c, 1) == 1) {
+          if (c == '\n') c = '\r';
+          reg_al = c;
+          CALLBACK_SZF(false);
+          return CBRET_NONE;
+        }
+      }
+      reg_al = 0;
+      CALLBACK_SZF(true);
+      return CBRET_NONE;
+    }
+
     case 0x0A: {  // Buffered input.  DS:DX -> [max_len][actual_len][data...]
       const PhysPt buf = SegPhys(ds) + reg_dx;
       const uint8_t max = mem_readb(buf);
