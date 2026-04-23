@@ -1,3 +1,53 @@
+# The delorie cpp.exe SIGFPE — root cause found (2026-04-23)
+
+Spent a session chasing `cpp.exe --version` crashing with vec=16 #MF
+recursive-fault under the standard 123-line delorie `djgpp.env`.
+Bisected the trigger to **djgpp.env >= 2683 bytes**; same failure in
+both gcc 9.3 and gcc 12.2 `cpp.exe`; the fault EIP's bytes in both
+are `;%DJ` — literal ASCII from djgpp.env's `%DJDIR%` substitutions,
+i.e. a return address popped off a stack that was smashed.
+
+**Bug is in DJGPP libc**, not in dosemu and not in GCC.  Source:
+`src/libc/crt0/c1loadef.c` (djlsr205.zip):
+
+```c
+char *buf = alloca(fsize);        // stack buffer = raw file size
+...
+/* %VAR% expansion: */
+e = getenv(sp+1);
+if (e)
+  while (*e)
+    *dp++ = *e++;                 // unbounded copy into buf
+```
+
+`alloca(fsize)` sizes the output buffer to the **input** file size.
+Every `%VAR%` reference then expands into the buffer with no bound.
+If the expanded output grows past `fsize` -- which happens easily
+with lines like `C_INCLUDE_PATH=%/>;C_INCLUDE_PATH%%DJDIR%/include`
+that recursively reference already-expanded variables -- the writes
+overrun the stack.
+
+Why cpp.exe specifically falls over but our own DJGPP-built binaries
+(including a 2.3 MB C++ BIGTEST with STL/regex) don't: the overrun
+lands on *whatever's above buf in the caller frame*, which is
+call-chain-specific.  delorie-built cpp.exe's startup call chain
+puts a useful return address right at that offset; our freshly-built
+programs don't happen to.
+
+Evidence gathered (all in main as of commit df00afc onward):
+- `tests/BIGTEST.EXE` is a 2.3 MB DJGPP-built C++ binary that runs
+  clean with the full djgpp.env; regression gate.
+- gcc 9.3 and 12.2 cpp.exe fail at the same 2683-byte threshold with
+  the same `;%DJ` bogus EIP.
+- Trimming djgpp.env or pre-expanding `%DJDIR%` doesn't dodge it
+  (any size >= 2683 triggers the overrun).
+
+Not practical to fix in-tree without rebuilding DJGPP libc + every
+tool linked against it; documented here so the next person chasing
+"cpp.exe hangs in dosemu" finds the real culprit.
+
+---
+
 # What's left — 2026-04-22 backlog
 
 Work this list in order, top to bottom. Small wins first; each
