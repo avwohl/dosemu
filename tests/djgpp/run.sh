@@ -521,6 +521,44 @@ else
     fail=$((fail + 1))
 fi
 
+# Open Watcom compile-link-run pipeline (optional -- requires a
+# complete OW install at ~/ow with patches/watcom-wlink.lnk dropped
+# into ~/ow/binw/wlink.lnk).  See docs/watcom-setup.md.  When the
+# install isn't present this test is skipped silently.
+if [[ -f ~/ow/binw/wcc386.exe && -f ~/ow/binw/wlink.exe \
+      && -f ~/ow/binw/wstub.exe && -f ~/ow/binw/dos4gw.exe ]]; then
+    # Make sure wlink.lnk exists (drop ours if the install doesn't have one)
+    if [[ ! -f ~/ow/binw/wlink.lnk ]]; then
+        cp patches/watcom-wlink.lnk ~/ow/binw/wlink.lnk
+    fi
+    watdir=$(mktemp -d)
+    cp -R ~/ow/binw ~/ow/h ~/ow/lib386 "$watdir/"
+    cp build/dosemu "$watdir/"
+    cat > "$watdir/hello.c" <<'HELLOCEOF'
+#include <stdio.h>
+int main(void) { printf("wat-compile-link-run-ok\n"); return 0; }
+HELLOCEOF
+    cat > "$watdir/link.cmd" <<'LINKEOF'
+system dos4g
+file hello
+name hello.exe
+LINKEOF
+    watout=$(cd "$watdir" && \
+        WATCOM='C:\' INCLUDE='C:\H' DOSEMU_PATH='C:\BINW' \
+        ./dosemu binw/wcc386.exe hello.c 2>/dev/null && \
+        WATCOM='C:\' DOSEMU_PATH='C:\BINW' \
+        ./dosemu binw/wlink.exe @link.cmd 2>/dev/null && \
+        DOSEMU_PATH='C:\BINW' ./dosemu hello.exe 2>/dev/null | tr -d '\r')
+    rm -rf "$watdir"
+    if echo "$watout" | grep -q 'wat-compile-link-run-ok'; then
+        printf "  %-12s PASS\n" "WATCOM"
+        pass=$((pass + 1))
+    else
+        printf "  %-12s FAIL (out=%q)\n" "WATCOM" "$watout"
+        fail=$((fail + 1))
+    fi
+fi
+
 echo ""
 echo "  ${pass} passed, ${fail} failed"
 exit "$fail"

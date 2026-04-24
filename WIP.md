@@ -43,46 +43,38 @@ Structured backlog as of end-of-session today.  Suite is 37/37 green.
     WATCOM, INCLUDE, LIB, LIBPATH from the host env through to DOS
     so the Watcom tools can find headers and libraries.
 
-    Open Watcom full-build investigation (2026-04-23).  With
-    DOSEMU_PATH + WATCOM + INCLUDE set and a minimal wlink.lnk
-    installed at binw/wlink.lnk, the pipeline `wcc386 hello.c` →
-    `wlink @link.cmd` succeeds through dosemu and produces a
-    22 KB DOS/4G LE binary.  The binary runs through wstub.exe ->
-    dos4gw.exe but hits "not a WATCOM program" (DOS/4GW error
-    1012) from dos4gw's own Watcom-signature check.
+    Open Watcom full-build WORKS (2026-04-23).  `wcc386 hello.c
+    && wlink @link.cmd && dosemu hello.exe` runs end-to-end and
+    prints `hello-watcom-ok`.  Works for multi-arg programs too;
+    verified `fact.c` → `12! = 479001600`.
 
-    Root cause, confirmed by exhaustively scanning all 272
-    shipped .lib/.obj files: `__x386_start` / `__x386_dbg_hook` /
-    `__x32_stack_size` have NO PUBDEF anywhere in the
-    open-watcom-v2 Current-build release.  cstrtx3r.obj references
-    them as EXTDEF; Open Watcom source at bld/clib/startup/a/
-    cstrtx32.asm shows these as `extrn` from an unspecified
-    provider.  Even Open Watcom's own owcc driver produces
-    binaries that dos4gw rejects with "not a WATCOM program" --
-    verified by running the owcc output against dos4gw with
-    DOSEMU_PATH set.  So this is NOT a dosemu bug: the
-    open-watcom-v2 release is incompatible with its own bundled
-    dos4gw.exe.  The symbols are presumably supposed to be
-    resolved at load time via a DOS/4GW binding mechanism that
-    isn't documented and isn't activated by the shipped
-    wlsystem.lnk defaults.
+    The blocker was NOT a code issue -- it was the open-watcom-v2
+    Current-build release shipping no usable `binw/wlink.lnk`.
+    wlink's default synthesis of system definitions produced
+    malformed LE binaries that dos4gw rejected.
 
-    Workaround found: the `system x32r` / `system x32s` flavors
-    use a separate DOS/32A extender (dos32a.exe is shipped) that
-    has its own startup library x32b.lib.  x32b.lib is ALSO
-    missing from the release, so same problem.
+    Fix: drop the minimal `system dos4g` block from Watcom 11.0c's
+    wlsystem.lnk (just `format os2 le`, `op stub=wstub.exe`,
+    libpath entries for lib386 / lib386/dos) at
+    `$WATCOM/binw/wlink.lnk`.  The full setup (download URLs,
+    environment variables, example build commands) is documented
+    in `docs/watcom-setup.md`.  A ready-to-use config is shipped
+    at `patches/watcom-wlink.lnk`.
 
-    Pipeline machinery verified working end-to-end through dosemu:
-    - wcc386 hello.c -> valid 363-byte OMF (`Code size: 26`)
-    - wcc hello.c -ml -> valid 363-byte 16-bit OMF
-    - wlink @link.cmd -> 22KB LE binary created and written
-    - wstub.exe loads dos4gw.exe from DOSEMU_PATH
-    - dos4gw.exe starts, reads target, does its signature check,
-      fails per the release bug described above
-    16-bit link also works; the resulting DOS exe silently exits
-    after AH=30/63/66/4A startup without calling print, suggesting
-    an emulator gap in Watcom's 16-bit CRT init we haven't
-    diagnosed.  Separate session.
+    Wcc386's emitted .obj files embed their own "library clib3r"
+    directives via OMF comments, so the linker pulls in clib3r.lib
+    and its startup automatically once the `system dos4g` spec is
+    in place.  No explicit `libfile` needed.  The cstrtx3r.obj
+    imports of __x386_start / __x386_dbg_hook / __x32_stack_size
+    are resolved AT LOAD TIME by dos4gw.exe's binding machinery;
+    wlink's job is just to make the LE entry chain point at the
+    right trampoline, and the 11.0c-style system spec does that.
+
+    What still doesn't work: 16-bit `wcc` + `system dos` link
+    produces a DOS .exe that silently exits after AH=30/63/66/4A
+    startup without calling print.  Likely a Watcom 16-bit CRT
+    init path we don't fully emulate.  Not pursued -- 32-bit
+    DOS/4G covers most real Watcom programs.
 
     FreeCOM → DJ_DJE → DJ_WRITE three-level nesting chain VERIFIED
     working.  FC_SPAWN regression gate extended to cover it plus
