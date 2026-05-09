@@ -127,8 +127,15 @@ if(APPLE)
   find_library(OPUSFILE opusfile REQUIRED)
   find_library(IIR iir REQUIRED)
   find_library(PNG png REQUIRED)
+  find_library(SDL2_NET SDL2_net REQUIRED
+    HINTS /opt/homebrew/opt/sdl2_net/lib /usr/local/opt/sdl2_net/lib)
+  find_library(FLUIDSYNTH fluidsynth REQUIRED
+    HINTS /opt/homebrew/opt/fluid-synth/lib /usr/local/opt/fluid-synth/lib)
+  find_library(SLIRP slirp REQUIRED
+    HINTS /opt/homebrew/opt/libslirp/lib /usr/local/opt/libslirp/lib)
   target_link_libraries(dosiz PRIVATE
     ${SPEEX} ${OPUSFILE} ${IIR} ${PNG} z
+    ${SDL2_NET} ${FLUIDSYNTH} ${SLIRP}
     "-framework CoreFoundation"
     "-framework CoreAudio"
     "-framework AudioUnit"
