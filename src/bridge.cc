@@ -1031,6 +1031,16 @@ uint16_t s_le_exc_cb32_off = 0;    // CB_IRETD shared handler
 //   EDX:EAX = quotient (div) or remainder (mod)
 uint16_t s_int80_cb32_off  = 0;
 
+// INT 0x1A — BIOS time-of-day services. dosbox-staging owns a real
+// INT1A_Handler that reads the BIOS_TIMER counter; that handler is
+// reachable in real mode but not in PM (its IVT entry points at
+// BIOS_SEG, which our PM IDT-setup loop skips because it only
+// reflects CB_SEG handlers). MicroPython's mp_hal_ticks_ms() does
+// `xor eax,eax; int 0x1A` from PM, so we plumb a CB_IRETD callback
+// that replicates the AH=00 case directly (read BIOS_TIMER memory,
+// split into CX:DX, reset BIOS_24_HOURS_FLAG into AL).
+uint16_t s_int1a_cb32_off  = 0;
+
 // Per-vector PM exception trampoline offsets, and the
 // user_exception_return trampoline -- all in CB_SEG.  Built at startup
 // so AX=0203 just has to install the corresponding IDT gate pointing at
@@ -1206,6 +1216,10 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   // regardless of the entry-bitness flag.
   if (s_int80_cb32_off)
     write_idt_gate(0x80, PM_CB_SEL, s_int80_cb32_off, true);
+  // INT 0x1A — BIOS time-of-day (see dosiz_int1a). 32-bit gate only;
+  // 16-bit DPMI clients that hit INT 0x1A still see the IVT/BIOS path.
+  if (s_int1a_cb32_off)
+    write_idt_gate(0x1A, PM_CB_SEL, s_int1a_cb32_off, true);
   CPU_LIDT(IDT_LIMIT, IDT_BASE);
 }
 
@@ -3763,6 +3777,28 @@ Bitu dosiz_int80() {
   }
   reg_eax = static_cast<uint32_t>(result & 0xFFFFFFFFu);
   reg_edx = static_cast<uint32_t>((result >> 32) & 0xFFFFFFFFu);
+  return CBRET_NONE;
+}
+
+// INT 0x1A — BIOS time-of-day. See the comment near s_int1a_cb32_off.
+// Only AH=00 (Get System Time) is implemented; that's what the
+// MicroPython port hits via bios_ticks(). Other AH values fall
+// through with CF cleared and registers untouched, matching the
+// "function not supported but didn't fault" shape DOS clients tend
+// to expect from a missing BIOS extension.
+Bitu dosiz_int1a() {
+  const uint8_t ah = (reg_eax >> 8) & 0xFF;
+  if (ah == 0x00) {
+    // Dosbox's real-mode INT1A_Handler in src/ints/bios.cpp: read
+    // BIOS_TIMER (linear 0x46c), split into CX:DX, copy
+    // BIOS_24_HOURS_FLAG (0x470) into AL, then clear the flag.
+    const uint32_t ticks = mem_readd(0x46Cu);
+    const uint8_t  flag  = mem_readb(0x470u);
+    mem_writeb(0x470u, 0);
+    reg_eax = (reg_eax & ~0xFFu) | flag;
+    reg_ecx = (reg_ecx & 0xFFFF0000u) | ((ticks >> 16) & 0xFFFFu);
+    reg_edx = (reg_edx & 0xFFFF0000u) | (ticks & 0xFFFFu);
+  }
   return CBRET_NONE;
 }
 
@@ -6584,6 +6620,18 @@ void dosiz_startup() {
   {
     const RealPt rp = int80_cb32.Get_RealPointer();
     s_int80_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
+
+  // INT 0x1A — BIOS time-of-day (PM reflection). dosbox-staging's
+  // real-mode INT1A_Handler runs from BIOS_SEG, which the PM IDT
+  // setup loop skips (it only reflects CB_SEG-resident handlers).
+  // Install a CB_IRETD callback so PM clients hit a working AH=00
+  // implementation.
+  CALLBACK_HandlerObject int1a_cb32;
+  int1a_cb32.Install(&dosiz_int1a, CB_IRETD, "dosiz Int 1A (PM BIOS time)");
+  {
+    const RealPt rp = int1a_cb32.Get_RealPointer();
+    s_int1a_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
   }
 
   // INT 31h callbacks: real-mode IVT entry + two PM entry points (16-bit
