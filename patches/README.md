@@ -6,6 +6,20 @@ Applied to the dosbox-staging submodule at build time by the top-level
 Makefile.  Required so dosiz can link against libdosbox.a and call the
 entry points that upstream marks `static`.
 
+## `core-normal-cpu-trace.patch`
+
+Applied to the dosbox-staging submodule at build time by the top-level
+Makefile.  Adds two env-var-gated diagnostics to the normal CPU core:
+
+- `DOSEMU_CPU_TRACE=1` -- once we're in protected mode, log up to
+  `DOSEMU_CPU_TRACE_LINES` (default 200) instruction-fetch lines with
+  `cs:eip`, the next six opcode bytes, and `cpl`/`esp`/`ss`/`ssb`.
+- `DOSEMU_BYTEWATCH=0xADDR` -- watch a single linear byte and log every
+  change, with the `cs:eip` and pmode flag at the moment of change.
+
+Both default to off (no overhead unless the env var is set), so the
+patch is safe to leave applied in release builds.
+
 ## `djgpp-libc-c1loadef-stack-smash.patch`
 
 Not applied anywhere -- we don't rebuild DJGPP libc as part of the dosiz
