@@ -4004,8 +4004,28 @@ static void dosiz_pktdrv_rx_drain() {
 
 // TIMER hookup — dosbox calls this on every emulator tick (~1ms).
 // Signature is void(*)(void); see include/timer.h.
+//
+// Also advance BIOS_TIMER here.  dosbox's INT8_Handler (hooked to
+// IRQ0 in RM) increments it, but our PM clients don't see IRQ0 in
+// PM (the IDT loop reflects only CB_SEG handlers, and the PIC's
+// master IRQ vector base in PM isn't 0x08 anyway).  Without this,
+// guest busy-waits on bios_ticks() (e.g. MP's mp_hal_delay_ms) loop
+// forever because BIOS_TIMER never advances.  18.2 BIOS ticks ≈ 1
+// second ≈ 1000 emulator ticks; advance one BIOS tick every 55 emu
+// ticks to match the 18.2Hz BIOS rate.
 extern "C" void dosiz_pktdrv_tick(void) {
   dosiz_pktdrv_rx_drain();
+  // Advance BIOS_TIMER every emulator tick (~1000Hz, vs the standard
+  // 18.2Hz).  IRQ0's INT8_Handler doesn't reach the guest in PM (PIC
+  // base-vector remap, no PM IDT gate for the remapped vector), so
+  // without this MP's bios_ticks() busy-waits never see BIOS_TIMER
+  // advance and hang.  Running it faster than the standard rate means
+  // guest sleep_ms returns more eagerly; that's a "fast clock" but
+  // works fine for sleep_ms / DHCP timing -- and avoids a separate
+  // "PM exception during long busy-wait" issue that the 18.2Hz rate
+  // triggers (root cause not yet known; possibly a dosbox-emulator
+  // internal sanity check).
+  mem_writed(0x46Cu, mem_readd(0x46Cu) + 1);
 }
 
 // Open the SLIRP ethernet backend. Called once at startup.
