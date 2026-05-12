@@ -35,6 +35,9 @@
 #include "regs.h"
 #include "programs.h"
 #include "loguru.hpp"
+#include "ethernet.h"
+#include "dos_inc.h"
+#include "timer.h"
 
 // Four helpers in dosbox-staging's sdlmain.cpp that were file-local.  We
 // patched them to external linkage so dosiz can drive the pre-StartUp
@@ -1040,6 +1043,35 @@ uint16_t s_int80_cb32_off  = 0;
 // that replicates the AH=00 case directly (read BIOS_TIMER memory,
 // split into CX:DX, reset BIOS_24_HOURS_FLAG into AL).
 uint16_t s_int1a_cb32_off  = 0;
+
+// Native virtual Crynwr packet driver state. dosiz installs itself as
+// the Crynwr packet driver at INT 0x60, bypassing NE2000.COM-as-TSR
+// (which would require AH=31h TSR support + preload plumbing we don't
+// have). Forwards send/recv between the guest's Crynwr client and
+// dosbox-staging's SLIRP ethernet backend.
+uint16_t s_int60_cb_off    = 0;
+uint16_t s_int60_cb_seg    = 0;
+// Registered receiver — Crynwr's access_type stores ES:DI here; we
+// far-call it from the SLIRP RX poller with phase=0 (give buffer) and
+// phase=1 (copy done).
+uint16_t s_pktdrv_rx_seg   = 0;
+uint16_t s_pktdrv_rx_off   = 0;
+uint8_t  s_pktdrv_rcv_mode = 3;    // default: broadcast + own-node
+bool     s_pktdrv_active   = false; // set true on first access_type
+// AH=0x99 polling-RX extension (dos_emu/dosiz). The guest hands us
+// flat-32 PM linear addresses for an RX buffer + pending flag + len
+// word; dosiz writes incoming frames directly to those addresses and
+// flips the flag. Lets us deliver packets without far-calling guest
+// code, sidestepping the reentrancy hazard of CALLBACK_RunRealFar
+// from a TIMER tick handler.
+uint32_t s_pktdrv_polling_buf     = 0;
+uint32_t s_pktdrv_polling_pending = 0;
+uint32_t s_pktdrv_polling_len     = 0;
+bool     s_pktdrv_polling_active  = false;
+// Synthetic MAC handed back by AH=06 get_address. Same byte pattern
+// dosbox-staging's NE2000 emulation defaults to so DHCP leases that
+// hash on MAC come back stable.
+constexpr uint8_t s_pktdrv_mac[6] = {0xAC, 0xDE, 0x48, 0x88, 0x99, 0xAA};
 
 // Per-vector PM exception trampoline offsets, and the
 // user_exception_return trampoline -- all in CB_SEG.  Built at startup
@@ -3800,6 +3832,176 @@ Bitu dosiz_int1a() {
     reg_edx = (reg_edx & 0xFFFF0000u) | (ticks & 0xFFFFu);
   }
   return CBRET_NONE;
+}
+
+// INT 0x60 — native virtual Crynwr packet driver. See s_int60_cb_off
+// comment for the design rationale. The guest hits this through INT 0x60
+// expecting Crynwr Packet Driver Spec v1.10 semantics; we implement
+// enough of the surface for MicroPython's pktdrv_uc386dos.c (mTCP and
+// other DOS clients use the same surface).
+//
+// Signature byte sequence "PKT DRVR" must live at offset 3 of the
+// installed handler's segment so guests' driver_detect scan finds us.
+// (Placed at PM_CB_SEG + s_int60_cb_off - sign_off; arranged at install.)
+Bitu dosiz_int60() {
+  const uint8_t ah = (reg_eax >> 8) & 0xFF;
+  switch (ah) {
+    case 0x01: {  // driver_info: AL=if_class, BX=if_type, DL=if_number,
+                  // DS:SI = name, CX=basic+ext info packed
+      reg_eax = (reg_eax & 0xFFFFFF00u) | 0x01;   // class = 1 (Ethernet DIX)
+      reg_ebx = (reg_ebx & 0xFFFF0000u) | 0xFFFF; // type  = any
+      reg_edx = (reg_edx & 0xFFFFFF00u);          // if_number = 0
+      reg_ecx = (reg_ecx & 0xFFFF0000u) | 0x0202; // basic class, version=2
+      // DS:SI -> driver name not strictly required for our clients;
+      // leave it pointing at a benign zero string in low memory.
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x02: {  // access_type: register receiver
+                  // ES:DI = receiver, BX=if_type, DL=if_number,
+                  // DS:SI = type pattern, CX = type len
+      // Store the receiver. We deliberately ignore the type filter
+      // and deliver every packet to the registered handler — that
+      // sidesteps the multi-registration complexity Crynwr clients
+      // would otherwise need (one for ARP 0x0806, one for IP 0x0800).
+      s_pktdrv_rx_seg = SegValue(es);
+      s_pktdrv_rx_off = static_cast<uint16_t>(reg_edi & 0xFFFF);
+      s_pktdrv_active = true;
+      // Handle = arbitrary nonzero value the client treats opaquely.
+      reg_eax = (reg_eax & 0xFFFF0000u) | 0x0001;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x03: {  // release_type: unregister
+      s_pktdrv_active = false;
+      s_pktdrv_rx_seg = 0;
+      s_pktdrv_rx_off = 0;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x04: {  // send_pkt: DS:SI = packet, CX = length
+      const uint16_t len = static_cast<uint16_t>(reg_ecx & 0xFFFF);
+      if (len == 0 || len > 1514) {
+        reg_eax = (reg_eax & 0xFFFF00FFu) | (0x05 << 8);  // err = bad len
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      // Copy packet out of guest memory and forward to SLIRP via
+      // dosbox-staging's ethernet backend (opened at startup —
+      // see dosiz_pktdrv_open_ethernet()).
+      const PhysPt src = SegPhys(ds) + (reg_esi & 0xFFFF);
+      static uint8_t tx_buf[1514];
+      for (uint16_t i = 0; i < len; ++i) {
+        tx_buf[i] = mem_readb(src + i);
+      }
+      extern void dosiz_pktdrv_tx(const uint8_t *buf, uint16_t len);
+      dosiz_pktdrv_tx(tx_buf, len);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x05: {  // terminate: per-handle cleanup; we just clear active
+      s_pktdrv_active = false;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x06: {  // get_address: ES:DI = buffer, CX = max len -> CX = actual len
+      const uint16_t cx = static_cast<uint16_t>(reg_ecx & 0xFFFF);
+      if (cx < 6) {
+        reg_eax = (reg_eax & 0xFFFF00FFu) | (0x09 << 8);  // err = no space
+        set_cf(true);
+        return CBRET_NONE;
+      }
+      const PhysPt dst = SegPhys(es) + (reg_edi & 0xFFFF);
+      for (int i = 0; i < 6; ++i) mem_writeb(dst + i, s_pktdrv_mac[i]);
+      reg_ecx = (reg_ecx & 0xFFFF0000u) | 6;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x14: {  // set_rcv_mode: BX = handle (ignored), CX = mode
+      s_pktdrv_rcv_mode = static_cast<uint8_t>(reg_ecx & 0xFF);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x15: {  // get_rcv_mode: BX = handle (ignored) -> AX = mode
+      reg_eax = (reg_eax & 0xFFFF0000u) | s_pktdrv_rcv_mode;
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    case 0x99: {  // dos_emu/dosiz polling-RX extension
+                  // EDI = flat addr of rx_buf
+                  // ESI = flat addr of rx_pending (uint32 flag)
+                  // ECX = flat addr of rx_len     (uint32 length)
+      s_pktdrv_polling_buf     = reg_edi;
+      s_pktdrv_polling_pending = reg_esi;
+      s_pktdrv_polling_len     = reg_ecx;
+      s_pktdrv_polling_active  = (s_pktdrv_polling_buf != 0);
+      set_cf(false);
+      return CBRET_NONE;
+    }
+    default: {
+      // Unsupported function: report "bad command" per Crynwr spec
+      // (DH=1) and set CF.
+      reg_eax = (reg_eax & 0xFFFF00FFu) | (0x01 << 8);  // err = bad command
+      set_cf(true);
+      return CBRET_NONE;
+    }
+  }
+}
+
+// SLIRP backend used by dosiz's INT 0x60 packet driver. Opened once at
+// startup and reused for both TX and RX. Lives as a file-scope pointer
+// so the periodic RX poller can drain it without ferrying it through a
+// global.
+static EthernetConnection *s_pktdrv_eth = nullptr;
+
+
+// AH=04 transmit helper — copies into a local buffer and ships via SLIRP.
+void dosiz_pktdrv_tx(const uint8_t *buf, uint16_t len) {
+  if (s_pktdrv_eth) {
+    s_pktdrv_eth->SendPacket(buf, len);
+  }
+}
+
+// Periodic RX drain — pulled from dosbox's TIMER tick. Writes each
+// SLIRP-delivered packet directly into the guest's polling-RX buffer
+// (registered via AH=0x99). No guest code is invoked here, so this is
+// safe to run from TIMER_AddTickHandler context — we're just doing
+// memory writes through dosbox's flat-physical address space. (PM
+// flat selectors have base=0 so the guest's flat-32 linear addresses
+// coincide with the host's PhysPt.)
+static void dosiz_pktdrv_rx_drain() {
+  if (!s_pktdrv_polling_active || !s_pktdrv_eth) return;
+  // Only deliver one packet per drain — if the guest hasn't cleared
+  // the pending flag yet, skip this tick. Prevents overwriting an
+  // un-consumed frame.
+  if (mem_readd(s_pktdrv_polling_pending) != 0) return;
+  s_pktdrv_eth->GetPackets([](const uint8_t *packet, int len) -> int {
+    if (!s_pktdrv_polling_active || len <= 0 || len > 1514) return 0;
+    if (mem_readd(s_pktdrv_polling_pending) != 0) return 0;
+    const PhysPt dst = static_cast<PhysPt>(s_pktdrv_polling_buf);
+    for (int i = 0; i < len; ++i) {
+      mem_writeb(dst + i, packet[i]);
+    }
+    mem_writed(s_pktdrv_polling_len, static_cast<uint32_t>(len));
+    mem_writed(s_pktdrv_polling_pending, 1);
+    return 0;
+  });
+}
+
+// TIMER hookup — dosbox calls this on every emulator tick (~1ms).
+// Signature is void(*)(void); see include/timer.h.
+extern "C" void dosiz_pktdrv_tick(void) {
+  dosiz_pktdrv_rx_drain();
+}
+
+// Open the SLIRP ethernet backend. Called once at startup.
+static void dosiz_pktdrv_open_ethernet() {
+  s_pktdrv_eth = ETHERNET_OpenConnection("slirp");
+  if (!s_pktdrv_eth) {
+    std::fprintf(stderr,
+        "dosiz: ethernet/slirp backend unavailable; INT 0x60 packet "
+        "driver will accept guest calls but RX/TX will no-op.\n");
+  }
 }
 
 // Bitness-aware wrappers: dosbox callbacks can't pass parameters, so
@@ -6632,6 +6834,54 @@ void dosiz_startup() {
   {
     const RealPt rp = int1a_cb32.Get_RealPointer();
     s_int1a_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
+
+  // INT 0x60 — native virtual Crynwr packet driver. See dosiz_int60()
+  // and the s_int60_* statics above for the design. The Crynwr spec
+  // requires "PKT DRVR" at offset +3 of the handler so guests' IVT
+  // scan finds us; we allocate a real-mode paragraph, hand-roll a stub
+  // that JMPs over the signature, and far-jumps to a dosbox callback
+  // that runs dosiz_int60.
+  CALLBACK_HandlerObject int60_cb;
+  int60_cb.Install(&dosiz_int60, CB_IRET, "dosiz Int 60 (Crynwr pktdrv)");
+  uint16_t stub_seg = 0;
+  uint16_t stub_paragraphs = 1;
+  if (DOS_AllocateMemory(&stub_seg, &stub_paragraphs) && stub_seg != 0) {
+    const RealPt cb_rp   = int60_cb.Get_RealPointer();
+    const uint16_t cb_seg = static_cast<uint16_t>((cb_rp >> 16) & 0xFFFF);
+    const uint16_t cb_off = static_cast<uint16_t>(cb_rp & 0xFFFF);
+    const PhysPt stub_base = static_cast<PhysPt>(stub_seg) * 16u;
+    // 00-01: JMP SHORT +9   (over the 8-byte signature, lands at 0x0B)
+    mem_writeb(stub_base + 0x00, 0xEB);
+    mem_writeb(stub_base + 0x01, 0x09);
+    // 02:    NOP padding so signature lands cleanly at 0x03.
+    mem_writeb(stub_base + 0x02, 0x90);
+    // 03-0A: "PKT DRVR" signature (required by Crynwr scan).
+    const char sig[8] = {'P','K','T',' ','D','R','V','R'};
+    for (int i = 0; i < 8; ++i)
+      mem_writeb(stub_base + 0x03 + i, static_cast<uint8_t>(sig[i]));
+    // 0B-0F: JMP FAR to the dosbox callback that runs dosiz_int60.
+    //   EA off_lo off_hi seg_lo seg_hi
+    mem_writeb(stub_base + 0x0B, 0xEA);
+    mem_writeb(stub_base + 0x0C, static_cast<uint8_t>(cb_off & 0xFF));
+    mem_writeb(stub_base + 0x0D, static_cast<uint8_t>((cb_off >> 8) & 0xFF));
+    mem_writeb(stub_base + 0x0E, static_cast<uint8_t>(cb_seg & 0xFF));
+    mem_writeb(stub_base + 0x0F, static_cast<uint8_t>((cb_seg >> 8) & 0xFF));
+    // Point IVT[0x60] at the stub. The CPU will land at offset 0,
+    // jump over the signature, then far-jump to the callback.
+    mem_writew(0x60 * 4 + 0, 0x0000);
+    mem_writew(0x60 * 4 + 2, stub_seg);
+    s_int60_cb_seg = stub_seg;
+    s_int60_cb_off = 0;
+    dosiz_pktdrv_open_ethernet();
+    extern void dosiz_pktdrv_tick(void);
+    TIMER_AddTickHandler(&dosiz_pktdrv_tick);
+    LOG_MSG("dosiz: Crynwr pktdrv installed at INT 60h, stub at %04x:0000",
+            stub_seg);
+  } else {
+    std::fprintf(stderr,
+        "dosiz: failed to allocate stub paragraph for INT 0x60 "
+        "Crynwr pktdrv; networking unavailable.\n");
   }
 
   // INT 31h callbacks: real-mode IVT entry + two PM entry points (16-bit
