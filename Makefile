@@ -34,8 +34,15 @@ all: build
 patch: $(PATCH_MARKER)
 
 $(PATCH_MARKER): $(PATCHES)
-	cd $(DB_SRC) && $(foreach p,$(PATCHES),patch -p1 < ../$(p) &&) true
-	touch $@
+	@cd $(DB_SRC) && for p in $(addprefix ../,$(PATCHES)); do \
+	  if git apply --check -R "$$p" >/dev/null 2>&1; then \
+	    echo "  patch: skip (applied) $$p"; \
+	  else \
+	    echo "  patch: apply        $$p"; \
+	    git apply "$$p" || exit 1; \
+	  fi; \
+	done
+	@touch $@
 
 # Build the dosbox-staging libraries via its own meson build.
 dosbox: patch $(DB_BUILD)/libdosbox.a
