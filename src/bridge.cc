@@ -1015,6 +1015,22 @@ uint16_t s_int31_cb32_off  = 0;
 uint16_t s_le_exc_cb16_off = 0;    // CB_IRET  shared handler
 uint16_t s_le_exc_cb32_off = 0;    // CB_IRETD shared handler
 
+// INT 0x80 — uc386's private 64-bit divide/modulo trap. The toolchain
+// emits `INT 0x80` for any `long long / long long` or `long long %
+// long long` op when the operands' high halves aren't both zero (the
+// codegen optimizer can sometimes fold them out, but in the worst
+// case any 64-bit arithmetic falls back to this). dos_emu services
+// it directly in its on_int hook; dosiz needs a real IDT gate plus
+// a host callback so PM clients can use the same trap.
+//
+// Protocol:
+//   EDX:EAX = numerator  (high:low)
+//   EBX:ECX = denominator (high:low)
+//   ESI low byte = operation: 0=udiv, 1=sdiv, 2=umod, 3=smod
+// Result:
+//   EDX:EAX = quotient (div) or remainder (mod)
+uint16_t s_int80_cb32_off  = 0;
+
 // Per-vector PM exception trampoline offsets, and the
 // user_exception_return trampoline -- all in CB_SEG.  Built at startup
 // so AX=0203 just has to install the corresponding IDT gate pointing at
@@ -1184,6 +1200,12 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
     write_idt_gate(0x21, PM_CB_SEL, int21_cb_off, bits32);
   if (int31_cb_off)
     write_idt_gate(0x31, PM_CB_SEL, int31_cb_off, bits32);
+  // INT 0x80 — uc386 64-bit divide/modulo trap. The handler runs only
+  // through a 32-bit gate (uc386 emits this trap from 32-bit code
+  // only) so we install it unconditionally when the cb_off is known,
+  // regardless of the entry-bitness flag.
+  if (s_int80_cb32_off)
+    write_idt_gate(0x80, PM_CB_SEL, s_int80_cb32_off, true);
   CPU_LIDT(IDT_LIMIT, IDT_BASE);
 }
 
@@ -3704,6 +3726,46 @@ Bitu dosiz_int31() {
   }
 }
 
+// INT 0x80 — uc386 private 64-bit divide / modulo trap.  See the
+// comment near s_int80_cb32_off for the register-passing protocol.
+// uc386's `dos_emu` services this same trap inside its `on_int`
+// hook; the dosiz port plumbs it as a real CB_IRETD callback so
+// PM-mode clients hit the IDT gate naturally.
+Bitu dosiz_int80() {
+  const uint32_t edx = reg_edx;
+  const uint32_t eax = reg_eax;
+  const uint32_t ebx = reg_ebx;
+  const uint32_t ecx = reg_ecx;
+  const uint8_t  op  = reg_esi & 0xFF;
+
+  const uint64_t num_u = (static_cast<uint64_t>(edx) << 32) | eax;
+  const uint64_t den_u = (static_cast<uint64_t>(ebx) << 32) | ecx;
+  if (den_u == 0) {
+    // Match dos_emu's behavior: produce a deterministic zero on
+    // divide-by-zero rather than raising #DE.  uc386 callers wrap
+    // this trap in a higher-level division path that handles the
+    // zero case at the language level.
+    reg_eax = 0;
+    reg_edx = 0;
+    return CBRET_NONE;
+  }
+  uint64_t result;
+  if (op == 0) {                        // udiv
+    result = num_u / den_u;
+  } else if (op == 2) {                 // umod
+    result = num_u % den_u;
+  } else {                              // sdiv (1) or smod (3)
+    const int64_t num_s = static_cast<int64_t>(num_u);
+    const int64_t den_s = static_cast<int64_t>(den_u);
+    const int64_t q = num_s / den_s;
+    const int64_t r = num_s % den_s;
+    result = static_cast<uint64_t>(op == 1 ? q : r);
+  }
+  reg_eax = static_cast<uint32_t>(result & 0xFFFFFFFFu);
+  reg_edx = static_cast<uint32_t>((result >> 32) & 0xFFFFFFFFu);
+  return CBRET_NONE;
+}
+
 // Bitness-aware wrappers: dosbox callbacks can't pass parameters, so
 // we encode the gate bitness by registering a distinct C function for
 // each and having it toggle s_int_gate_bits32 around the real handler
@@ -6119,12 +6181,96 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
       }
       const LeObject &eo = objects[entry_obj_1 - 1];
       const LeObject &so = objects[stack_obj_1 - 1];
-      const uint16_t ds_sel = (auto_obj_1 && auto_obj_1 <= objects.size())
-          ? objects[auto_obj_1 - 1].ldt_sel : so.ldt_sel;
+
+      // Allocate flat (base=0, limit=4G) selectors for both CS and
+      // DS/ES/SS.
+      //
+      // The LE/LX object model strictly says each object gets its own
+      // selector with a tight base/limit, but every real-world DOS
+      // DPMI host (PMODE/W, DOS/32A, DOS4G, CWSDPMI when paired with
+      // extenders that opt in) instead hands the client flat 4G code
+      // and data selectors, because the toolchains targeting DOS
+      // extenders (Watcom in particular) emit code that uses 32-bit
+      // flat addressing. LE fixup type 0x07 (32-bit linear) likewise
+      // patches the absolute post-load linear address into the
+      // instruction stream — only meaningful through a flat selector.
+      //
+      // Both selectors matter:
+      //
+      //   - Flat DS/ES/SS: a `mov edx, _string_in_obj2 / int 21h
+      //     AH=0x40` with a tight per-object DS covers only one
+      //     object's range, so the limit-trapped read returns 0
+      //     instead of the string bytes. Verified empirically with
+      //     the freedos_micro_python port's bridge stub: marker
+      //     writes emitted NULs because DS pointed at obj 3 (BSS)
+      //     while the strings live in obj 2.
+      //
+      //   - Flat CS: an `lea eax, _main / call eax` (cdecl indirect
+      //     call) loads the linear address of _main from the fixup
+      //     and jumps to it. With per-object CS the offset is
+      //     interpreted as relative to obj 1's tight base, blowing
+      //     past its limit. With a flat CS the linear address is
+      //     the absolute jump target.
+      //
+      // ESP also needs the linear translation: in object-relative
+      // SS the LE header's stack_esp is the offset within the stack
+      // object (= stack object virt_size). Under flat SS, the program
+      // expects ESP to be a linear address, so we add the stack
+      // object's host_base to land it at the actual top-of-stack
+      // page.
+      //
+      // EIP needs the same linear translation for the entry: the LE
+      // header's entry_eip is an offset within the entry code object,
+      // and under flat CS we want the absolute linear entry address.
+      MEM_A20_Enable(true);
+      const uint16_t flat_run = ldt_find_run(2);
+      uint16_t flat_data_sel = 0;
+      uint16_t flat_code_sel = 0;
+      if (flat_run != 0) {
+        // Slot 0: flat data (R/W). access=0x92 = present, DPL=0, data, writable.
+        write_ldt_descriptor(flat_run, 0u, 0xFFFFFu, 0x92, true);
+        // Slot 1: flat code (R/X). access=0x9A = present, DPL=0, code, readable.
+        write_ldt_descriptor(flat_run + 1, 0u, 0xFFFFFu, 0x9A, true);
+        // write_ldt_descriptor doesn't take a granularity flag, so
+        // patch the high byte (offset +6: limit-high nibble + G/D/B
+        // flags) directly. G=1 (page granularity, limit 4G-1), D=1
+        // (32-bit default), limit-high nibble = 0xF.
+        const PhysPt p_data = LDT_BASE + flat_run * 8u + 6u;
+        const PhysPt p_code = LDT_BASE + (flat_run + 1) * 8u + 6u;
+        mem_writeb(p_data, 0xCF);
+        mem_writeb(p_code, 0xCF);
+        ldt_set(flat_run, true);
+        ldt_set(flat_run + 1, true);
+        flat_data_sel = static_cast<uint16_t>((flat_run << 3) | 0x04);
+        flat_code_sel = static_cast<uint16_t>(
+            ((flat_run + 1) << 3) | 0x04);
+        std::fprintf(stderr,
+            "dosiz: LE flat selectors: data sel=0x%04x slot=%u, "
+            "code sel=0x%04x slot=%u "
+            "(both base=0 limit=4G D=1 G=1)\n",
+            flat_data_sel, flat_run, flat_code_sel, flat_run + 1);
+      } else {
+        std::fprintf(stderr,
+            "dosiz: LE: no LDT room for flat selectors, "
+            "falling back to per-object CS/DS/SS — "
+            "programs using 32-bit flat addressing will misbehave\n");
+      }
+
+      const uint16_t cs_sel = flat_code_sel != 0
+          ? flat_code_sel : eo.ldt_sel;
+      const uint16_t ds_sel = flat_data_sel != 0 ? flat_data_sel
+          : (auto_obj_1 && auto_obj_1 <= objects.size()
+                ? objects[auto_obj_1 - 1].ldt_sel : so.ldt_sel);
+      const uint16_t ss_sel = flat_data_sel != 0
+          ? flat_data_sel : so.ldt_sel;
+      const uint32_t esp_lin = flat_data_sel != 0
+          ? (so.host_base + stack_esp) : stack_esp;
+      const uint32_t eip_lin = flat_code_sel != 0
+          ? (eo.host_base + entry_eip) : entry_eip;
 
       std::fprintf(stderr,
           "dosiz: LE entry CS=%04x:EIP=%08x SS=%04x:ESP=%08x DS=%04x\n",
-          eo.ldt_sel, entry_eip, so.ldt_sel, stack_esp, ds_sel);
+          cs_sel, eip_lin, ss_sel, esp_lin, ds_sel);
 
       // Stage GDT/IDT so dosiz_startup just has to flip CR0 and jump.
       // Gate bitness matches entry object's BIG flag -- mismatched
@@ -6133,11 +6279,11 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
 
       out.is_pm    = true;
       out.is_32bit = eo.is_big;
-      out.cs       = eo.ldt_sel;
-      out.ss       = so.ldt_sel;
+      out.cs       = cs_sel;
+      out.ss       = ss_sel;
       out.pm_ds    = ds_sel;
-      out.pm_eip   = entry_eip;
-      out.pm_esp   = stack_esp;
+      out.pm_eip   = eip_lin;
+      out.pm_esp   = esp_lin;
       // Fill the RM-side fields with something sane; they're not
       // consumed on the is_pm path but gcc will warn about unused-init.
       out.ip = 0;
@@ -6426,6 +6572,18 @@ void dosiz_startup() {
     const RealPt rp = int21_cb32.Get_RealPointer();
     s_int21_cb32_seg = static_cast<uint16_t>((rp >> 16) & 0xFFFF);
     s_int21_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
+  }
+
+  // INT 0x80 — uc386 64-bit divide/modulo trap (see dosiz_int80 above).
+  // Only the 32-bit gate variant is needed: uc386's codegen emits
+  // INT 0x80 only from 32-bit code (16-bit math doesn't need it).
+  // We use the same CB_IRETD shape as int21_cb32 so the IDT gate's
+  // 32-bit frame unwinds correctly.
+  CALLBACK_HandlerObject int80_cb32;
+  int80_cb32.Install(&dosiz_int80, CB_IRETD, "dosiz Int 80 (uc386 64-bit math)");
+  {
+    const RealPt rp = int80_cb32.Get_RealPointer();
+    s_int80_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
   }
 
   // INT 31h callbacks: real-mode IVT entry + two PM entry points (16-bit
