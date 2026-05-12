@@ -1051,6 +1051,12 @@ uint16_t s_int1a_cb32_off  = 0;
 // dosbox-staging's SLIRP ethernet backend.
 uint16_t s_int60_cb_off    = 0;
 uint16_t s_int60_cb_seg    = 0;
+// 32-bit PM IDT gate offset for INT 0x60 (separate dosbox callback so
+// the gate's IRETD frame unwinds cleanly).  PM clients hit this when
+// they issue `INT 0x60` from a 32-bit code segment without going
+// through DPMI fn 0x0300.  Without it the gate has no descriptor and
+// dosbox aborts with "Gate Selector points to illegal descriptor".
+uint16_t s_int60_cb32_off  = 0;
 // Registered receiver — Crynwr's access_type stores ES:DI here; we
 // far-call it from the SLIRP RX poller with phase=0 (give buffer) and
 // phase=1 (copy done).
@@ -1252,6 +1258,14 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   // 16-bit DPMI clients that hit INT 0x1A still see the IVT/BIOS path.
   if (s_int1a_cb32_off)
     write_idt_gate(0x1A, PM_CB_SEL, s_int1a_cb32_off, true);
+  // INT 0x60 — Crynwr packet driver (see dosiz_int60).  PM clients that
+  // call INT 0x60 directly (without DPMI fn 0x0300) hit this gate.
+  // The handler is reached via a hand-built PM_SHIM slot (32-bit IRETD
+  // wrapper around int60_cb) -- see dosiz_startup near the IVT-stub
+  // setup.  16-bit DPMI clients reach the same handler via the RM IVT
+  // entry written in dosiz_startup.
+  if (s_int60_cb32_off)
+    write_idt_gate(0x60, PM_SHIM_SEL, s_int60_cb32_off, true);
   CPU_LIDT(IDT_LIMIT, IDT_BASE);
 }
 
@@ -3995,8 +4009,25 @@ extern "C" void dosiz_pktdrv_tick(void) {
 }
 
 // Open the SLIRP ethernet backend. Called once at startup.
+//
+// SlirpEthernetConnection holds an internally-default-constructed
+// std::function<int(const uint8_t*, int)> as its receive callback;
+// it's only populated when GetPackets() is called.  But slirp_input
+// can synthesise immediate replies (DHCP-server response, ICMP echo)
+// from inside the same SendPacket() call, which then invokes the
+// (still empty) callback and throws std::bad_function_call.  Prime
+// the callback here so the first SendPacket can't trip that.
 static void dosiz_pktdrv_open_ethernet() {
   s_pktdrv_eth = ETHERNET_OpenConnection("slirp");
+  if (s_pktdrv_eth) {
+    // Prime get_packet_callback with a no-op so slirp's synchronous
+    // reply path (e.g. DHCP OFFER from inside slirp_input) doesn't
+    // hit an empty std::function.  The real callback that delivers
+    // frames into the guest's polling buffer gets installed when
+    // dosiz_pktdrv_rx_drain runs from the TIMER tick.
+    s_pktdrv_eth->GetPackets(
+        [](const uint8_t * /*packet*/, int /*len*/) -> int { return 0; });
+  }
   if (!s_pktdrv_eth) {
     std::fprintf(stderr,
         "dosiz: ethernet/slirp backend unavailable; INT 0x60 packet "
@@ -6315,8 +6346,15 @@ void le_launch_pm_prep(bool bits32) {
   // (CB_IRET pops 6 bytes).  Mixing produces corrupt frames.
   const uint16_t cb_off = bits32 ? s_le_exc_cb32_off : s_le_exc_cb16_off;
   if (cb_off) {
-    for (int v = 0; v < 0x20; ++v)
+    for (int v = 0; v < 0x20; ++v) {
+      // INT 0x1A is in the exception-vector range but is a software
+      // interrupt (BIOS time-of-day), not a CPU exception.  Leave the
+      // specific dosiz_int1a gate that pm_setup_gdt_and_idt installed
+      // intact -- overwriting it sends MP's bios_ticks() into the
+      // exception-trampoline path on its first time.ticks_ms call.
+      if (v == 0x1A) continue;
       write_idt_gate(v, PM_CB_SEL, cb_off, bits32);
+    }
   }
 }
 
@@ -6842,6 +6880,10 @@ void dosiz_startup() {
   // scan finds us; we allocate a real-mode paragraph, hand-roll a stub
   // that JMPs over the signature, and far-jumps to a dosbox callback
   // that runs dosiz_int60.
+  // One CB_IRET callback covers both real-mode INT 0x60 (the IVT stub
+  // JMPs to it) and PM INT 0x60 (via a hand-built PM_SHIM slot below).
+  // Using two CALLBACK_HandlerObjects exceeds dosbox's CB_MAX=128 once
+  // the rest of dosiz + dosbox's BIOS/DOS kernels register theirs.
   CALLBACK_HandlerObject int60_cb;
   int60_cb.Install(&dosiz_int60, CB_IRET, "dosiz Int 60 (Crynwr pktdrv)");
   uint16_t stub_seg = 0;
@@ -6873,6 +6915,39 @@ void dosiz_startup() {
     mem_writew(0x60 * 4 + 2, stub_seg);
     s_int60_cb_seg = stub_seg;
     s_int60_cb_off = 0;
+    // Build a PM_SHIM slot for INT 0x60 so PM clients (32-bit code that
+    // issues `INT 0x60` directly, not via DPMI fn 0x0300) hit a gate
+    // with a matching IRETD frame.  The shim bytes are FE 38 lo hi (the
+    // dosbox native-call marker pointing at int60_cb) followed by
+    // `66 CF` (IRETD).  Same shape as the reflective shims built in
+    // pm_setup_gdt_and_idt's IVT-scan loop, just hand-installed here
+    // because IVT[0x60] points at the PKT-DRVR stub, not CB_SEG.
+    {
+      const PhysPt cb_stub = static_cast<PhysPt>(cb_seg) * 16u + cb_off;
+      int scan = -1;
+      for (int i = 0; i < 5; ++i) {
+        if (mem_readb(cb_stub + i) == 0xFE
+            && mem_readb(cb_stub + i + 1) == 0x38) {
+          scan = i;
+          break;
+        }
+      }
+      if (scan >= 0) {
+        const uint8_t cb_lo_b = mem_readb(cb_stub + scan + 2);
+        const uint8_t cb_hi_b = mem_readb(cb_stub + scan + 3);
+        const uint16_t slot_off = 0x60 * PM_SHIM_SLOT_BYTES;
+        const PhysPt shim = PM_SHIM_BASE + slot_off;
+        int i = 0;
+        mem_writeb(shim + i++, 0xFE);  // native-call marker
+        mem_writeb(shim + i++, 0x38);
+        mem_writeb(shim + i++, cb_lo_b);
+        mem_writeb(shim + i++, cb_hi_b);
+        mem_writeb(shim + i++, 0x66);  // 32-bit prefix
+        mem_writeb(shim + i++, 0xCF);  // IRETD
+        for (; i < PM_SHIM_SLOT_BYTES; ++i) mem_writeb(shim + i, 0x90);
+        s_int60_cb32_off = slot_off;
+      }
+    }
     dosiz_pktdrv_open_ethernet();
     extern void dosiz_pktdrv_tick(void);
     TIMER_AddTickHandler(&dosiz_pktdrv_tick);
