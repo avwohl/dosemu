@@ -38,6 +38,7 @@
 #include "ethernet.h"
 #include "dos_inc.h"
 #include "timer.h"
+#include "inout.h"
 
 // Four helpers in dosbox-staging's sdlmain.cpp that were file-local.  We
 // patched them to external linkage so dosiz can drive the pre-StartUp
@@ -1923,6 +1924,7 @@ Bitu dosiz_le_exc_handle16(int vec) {
 // specific exception still needs the fault CS:EIP which we do have.
 Bitu dosiz_le_exc_any32() { return dosiz_le_exc_handle32(-1); }
 Bitu dosiz_le_exc_any16() { return dosiz_le_exc_handle16(-1); }
+
 RealPt s_rm_stop_ptr = 0;
 
 // No-op callback handed back by AX=0305/0306 as state-save and raw-
@@ -1974,6 +1976,16 @@ bool pm_exc_has_err_code(int vec) {
 }
 
 Bitu dosiz_pm_exc_dispatch(int vec) {
+  // Ring-0 clients (LE-loaded MicroPython etc.) reach this same per-
+  // vector trampoline because pm_setup_gdt_and_idt wires it for both
+  // ring-3 (CWSDPMI/DJGPP) and ring-0 (LE direct-entry) callers.  At
+  // ring-0 the CPU pushed a 3-dword frame on the *client's* stack (no
+  // ring change, no TSS stack switch, no outer SS/ESP), so the ring-3
+  // CWSDPMI frame layout below would read garbage.  Detect ring-0 by
+  // cpu.cpl and route to the LE handler with the vector now known.
+  if (cpu.cpl == 0) {
+    return dosiz_le_exc_handle32(vec);
+  }
   // Runs at ring-0 via the IDT gate (PM_CB_SEL has DPL=0).  The
   // ring-3 client was at cpl=3 when the exception fired, so CPU did a
   // ring-change dispatch: ring-0 SS:ESP is our PM_CB_STACK scratch,
@@ -3983,23 +3995,14 @@ void dosiz_pktdrv_tx(const uint8_t *buf, uint16_t len) {
 // memory writes through dosbox's flat-physical address space. (PM
 // flat selectors have base=0 so the guest's flat-32 linear addresses
 // coincide with the host's PhysPt.)
+static int dosiz_pktdrv_rx_deliver(const uint8_t *packet, int len);
 static void dosiz_pktdrv_rx_drain() {
   if (!s_pktdrv_polling_active || !s_pktdrv_eth) return;
   // Only deliver one packet per drain — if the guest hasn't cleared
   // the pending flag yet, skip this tick. Prevents overwriting an
   // un-consumed frame.
   if (mem_readd(s_pktdrv_polling_pending) != 0) return;
-  s_pktdrv_eth->GetPackets([](const uint8_t *packet, int len) -> int {
-    if (!s_pktdrv_polling_active || len <= 0 || len > 1514) return 0;
-    if (mem_readd(s_pktdrv_polling_pending) != 0) return 0;
-    const PhysPt dst = static_cast<PhysPt>(s_pktdrv_polling_buf);
-    for (int i = 0; i < len; ++i) {
-      mem_writeb(dst + i, packet[i]);
-    }
-    mem_writed(s_pktdrv_polling_len, static_cast<uint32_t>(len));
-    mem_writed(s_pktdrv_polling_pending, 1);
-    return 0;
-  });
+  s_pktdrv_eth->GetPackets(&dosiz_pktdrv_rx_deliver);
 }
 
 // TIMER hookup — dosbox calls this on every emulator tick (~1ms).
@@ -4028,6 +4031,22 @@ extern "C" void dosiz_pktdrv_tick(void) {
   mem_writed(0x46Cu, mem_readd(0x46Cu) + 1);
 }
 
+// Shared RX-delivery lambda installed into slirp's get_packet_callback.
+// Used both at open (so synchronous slirp_input replies aren't dropped
+// by an empty std::function -> bad_function_call) and on every TIMER
+// tick's GetPackets() call to keep slirp's callback slot populated.
+static int dosiz_pktdrv_rx_deliver(const uint8_t *packet, int len) {
+  if (!s_pktdrv_polling_active || len <= 0 || len > 1514) return 0;
+  if (mem_readd(s_pktdrv_polling_pending) != 0) return 0;
+  const PhysPt dst = static_cast<PhysPt>(s_pktdrv_polling_buf);
+  for (int i = 0; i < len; ++i) {
+    mem_writeb(dst + i, packet[i]);
+  }
+  mem_writed(s_pktdrv_polling_len, static_cast<uint32_t>(len));
+  mem_writed(s_pktdrv_polling_pending, 1);
+  return 0;
+}
+
 // Open the SLIRP ethernet backend. Called once at startup.
 //
 // SlirpEthernetConnection holds an internally-default-constructed
@@ -4035,18 +4054,15 @@ extern "C" void dosiz_pktdrv_tick(void) {
 // it's only populated when GetPackets() is called.  But slirp_input
 // can synthesise immediate replies (DHCP-server response, ICMP echo)
 // from inside the same SendPacket() call, which then invokes the
-// (still empty) callback and throws std::bad_function_call.  Prime
-// the callback here so the first SendPacket can't trip that.
+// callback synchronously.  Install the real RX-delivery lambda right
+// at open so even those synchronous replies reach the guest's polling
+// buffer -- otherwise DHCP OFFER (which slirp's DHCP server returns
+// from inside slirp_input) is silently dropped and the lease never
+// completes.
 static void dosiz_pktdrv_open_ethernet() {
   s_pktdrv_eth = ETHERNET_OpenConnection("slirp");
   if (s_pktdrv_eth) {
-    // Prime get_packet_callback with a no-op so slirp's synchronous
-    // reply path (e.g. DHCP OFFER from inside slirp_input) doesn't
-    // hit an empty std::function.  The real callback that delivers
-    // frames into the guest's polling buffer gets installed when
-    // dosiz_pktdrv_rx_drain runs from the TIMER tick.
-    s_pktdrv_eth->GetPackets(
-        [](const uint8_t * /*packet*/, int /*len*/) -> int { return 0; });
+    s_pktdrv_eth->GetPackets(&dosiz_pktdrv_rx_deliver);
   }
   if (!s_pktdrv_eth) {
     std::fprintf(stderr,
@@ -6373,9 +6389,23 @@ void le_launch_pm_prep(bool bits32) {
       // intact -- overwriting it sends MP's bios_ticks() into the
       // exception-trampoline path on its first time.ticks_ms call.
       if (v == 0x1A) continue;
-      write_idt_gate(v, PM_CB_SEL, cb_off, bits32);
+      // For 32-bit LE clients, prefer the per-vector trampoline (the
+      // same pm_exc_cb_objs[v] used by DPMI; dosiz_pm_exc_dispatch
+      // routes to dosiz_le_exc_handle32 when cpu.cpl==0).  That way
+      // the crash dump shows which vector fired instead of "unknown".
+      const uint16_t per = bits32 ? s_pm_exc_cb32_off[v] : 0;
+      write_idt_gate(v, PM_CB_SEL, per ? per : cb_off, bits32);
     }
   }
+  // Mask hardware IRQs at the PIC so they don't fire into the PM IDT
+  // at the default 0x08..0x0F / 0x70..0x77 vectors -- those land on
+  // our exception trampolines (the LE client typically hasn't remapped
+  // the PIC at PM entry).  BIOS_TIMER is driven from
+  // dosiz_pktdrv_tick (TIMER_AddTickHandler), and the only other host
+  // hardware the LE client needs is the SLIRP backend we poll on the
+  // same tick, so masking all 16 IRQs is fine for headless dosiz runs.
+  IO_WriteB(0x21, 0xFF);   // master PIC IMR: all IRQs masked
+  IO_WriteB(0xA1, 0xFF);   // slave PIC IMR:  all IRQs masked
 }
 
 // Load an MZ .EXE at the given PSP segment (image goes at psp_seg + 0x10).
