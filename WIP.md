@@ -1,3 +1,34 @@
+# Windows status (2026-05-19) — Smalltalk-80 bring-up
+
+Drove a real DJGPP-cross app (st80-2026 Smalltalk-80) end-to-end.
+Three dosiz fixes this session, all committed + pushed origin/main:
+
+- `5d26bdc` bridge.cc AH=3F: replaced one-`::read()`-per-byte
+  with a 16 KiB block-read fast path for the binary case
+  (text-mode path preserved). A DJGPP image load issues huge
+  binary reads; byte-at-a-time was too slow to finish.
+- `5d26bdc` dosiz.cc: `_setmode` host std{in,out,err} to binary
+  on `_WIN32`. The MinGW CRT was injecting a 2nd CR into the
+  guest's already-CRLF output (`\r\r\n`) and would mangle binary
+  guest output. dosiz must be a transparent stdio pipe.
+- `f18940c` patches/dosbox-cb-max-256.patch: CB_MAX 128→250.
+  `dosiz --window` aborted ~0.4s into init for ANY program
+  (`CALLBACK: Can't allocate handler`) — dosiz's ~77 own
+  callbacks + dosbox's windowed-mode mouse/sound/SVGA exceed
+  128. uint8_t caps it at 250 (static_assert <255); ~2x
+  headroom. Added to Makefile PATCHES.
+
+Result: the Smalltalk headless tools run byte-for-byte correct
+under dosiz (499-bytecode trace == Xerox reference; 18391
+objects load bit-identical vs native). `dosiz --window
+st80.exe` now boots past the VESA/mouse probe and runs steadily
+(no mouse-driver error — dosbox's DOS mouse driver is live in
+windowed mode). Suite holds 35/37 (EMS_PROBE/DJ_SIGNAL
+pre-existing). NEXT for GUI verification: an in-emulator
+framebuffer dump (this dev box's session is locked, so a
+host-side screenshot only sees the lock screen) — also the
+st80 dos-plan D2/D3 screenshot exit-criterion.
+
 # Windows DJGPP status (2026-05-18)
 
 First real exercise of the Windows (MSYS2 mingw64) build running
