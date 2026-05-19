@@ -41,48 +41,53 @@ Still failing on Windows (narrow, logged, not the global-hang):
 
     EMS_PROBE   rc=1 marker missing  (EMS feature)
     DJ_SIGNAL   rc=1 marker missing  (signal delivery)
-    st80_run    #GP at `<start>` 0x19f0 push %ds / 0x19f1 pop %es,
-                err 0xfffc (bad DS ~0xffff). UPDATE (commit
-                `79e120b`): ruled out format misdetect
-                (DOSIZ_LE_AS_MZ no help; MZ header identical to
-                working CXX.EXE). It is NOT first entry — trace
-                shows crt0 runs far (AH=44/19/71 filename work on
-                "ST80RUN.EXE", simrm INT21), then `INT 31h
-                AX=0E01` (Set Coproc Emulation), then control
-                lands back at _start (0x19f0) with DS clobbered.
-                _start has a re-entry guard (testb $1,0x6175d;
-                jne) so multi-entry is by design; a later entry
-                gets bad DS. CXX.EXE (same DJGPP 12.2 C++)
-                completes. UPDATE: 0E00/0E01 handlers are
-                benign; crash is in DJGPP crt0 (argv0
-                canonicalize) — after `INT 31h AX=0E01` returns,
-                control lands at _start 0x19f0 with garbage
-                EBX/EDX/EBP=0xffffffff but ESI/EDI preserved
-                from the 0E01 call. Smells like an int-31
-                dispatch RETURN-frame / IDT gate-width (16 vs
-                32) corruption — same class as `1b42bec` (0x0205
-                gate width) but on the int-31 return /
-                `pm_setup_gdt_and_idt` bits32 path, not 0x0205.
-                st80_run-specific (CXX.EXE 591KB C++ + 35 GNU
-                utils fine). NEEDS your in-flight DPMI gate-width
-                rework — flagging rather than speculatively
-                patching core DPMI mid-rewrite.
+    st80_run    RESOLVED (2026-05-19) — was NOT a dosiz bug.
+                The #GP at `<start>` `pop %es` was an st80
+                portability bug: its Interpreter embeds a 2 MiB
+                RealWordMemory by value and st80_run declared it
+                as a STACK local, so main()'s `sub esp,~0x205150`
+                underflowed DJGPP's small default stack; ESP
+                wrapped, ret ran into zeroed memory, the CPU
+                sledded into _start, #GP on `pop es` with a wild
+                stack. Fixed in st80 (heap-allocate via
+                make_unique). dosiz was innocent here — the
+                earlier "int-31 gate-width" theory was wrong;
+                disregard it. With the st80 fix, st80_run runs
+                under dosiz, reaches main, opens SNAPSHOT.IM.
 
-                DIAGNOSTIC BUG found: DOSIZ_CPU_TRACE emits ZERO
-                instruction lines even on a SUCCESSFUL run
-                (tested DJ_PRINTF) — only the "forcing
-                core=normal" notice prints. The patched
-                core_normal trace hook never fires (dynamic core
-                still used, or the patch isn't applied in this
-                build). This makes instruction-level debugging
-                of the st80_run #GP impossible — worth fixing
-                independently; it gates the above.
+                Two GENUINE dosiz items surfaced while finding
+                this:
+
+                1. DOSIZ_CPU_TRACE was completely non-functional
+                   because `patches/core-normal-cpu-trace.patch`
+                   was never applied (the idempotent `make
+                   patch` skip + my own marker-touch left it
+                   out; `git status` in the submodule showed
+                   only sdlmain/enet patched, not core_normal).
+                   AND a naming mismatch: the patch keys the
+                   trace off **DOSEMU_CPU_TRACE /
+                   DOSEMU_CPU_TRACE_LINES**, but DEBUGGING.md
+                   documents it as DOSIZ_CPU_TRACE (which only
+                   forces core=normal). Recommend: align the env
+                   var name (pick one) and make `make` rebuild
+                   libdosbox when patches/ change (it currently
+                   only builds libdosbox.a if missing, so a
+                   patch change doesn't trigger a core rebuild).
+
+                2. Possible AH=3F read-count sizing: st80_run's
+                   image loader now fails at Interpreter::init()
+                   — loadObjectTable does read(fd,&otLen,4) but
+                   the AH=3F trace shows `ECX=000e0004` for that
+                   4-byte read (high word stale). If pm32 picks
+                   reg_ecx, dosiz over-reads a small DJGPP libc
+                   read. UNCONFIRMED — being instrumented next;
+                   may instead be SEEK_END file_size. (35/37
+                   suite + DJ_FILE still pass, so any issue is
+                   narrow.)
 
                 External repro: github avwohl/smalltalk80-2026
-                DOS port; C:\s\st80t\ST80RUN.EXE (no args
-                reproduces). gdb angle: break
-                dosiz_le_exc_handle32, inspect the client int-31
-                return frame at AX=0E01 vs CXX.EXE.
+                DOS port; C:\s\st80t\ST80RUN.EXE SNAPSHOT.IM
+                (needs the heap-alloc st80 fix, commit 9a9b1c8).
 
 ---
 
