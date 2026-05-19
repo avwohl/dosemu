@@ -506,12 +506,12 @@ void close_find_state(FindState &st) {
 
 // --- Host <-> guest helpers -----------------------------------------------
 
-// Read a NUL-terminated DOS path from guest memory at seg:off.
-std::string read_dos_string(uint16_t seg, uint16_t off, size_t max = 260) {
-  const PhysPt base = seg * 16;
+// Read a NUL-terminated DOS path from an already-resolved linear
+// guest address.  Used by read_dos_path() below.
+std::string read_dos_string_lin(PhysPt lin, size_t max = 260) {
   std::string s;
   for (size_t i = 0; i < max; ++i) {
-    const uint8_t c = mem_readb(base + off + i);
+    const uint8_t c = mem_readb(lin + i);
     if (c == 0) break;
     s += static_cast<char>(c);
   }
@@ -551,6 +551,19 @@ std::string dos_to_host(const std::string &dos_path) {
   // If the exact path resolves, use it.
   struct stat st;
   if (::stat(literal.c_str(), &st) == 0) return literal;
+
+#ifdef _WIN32
+  // Windows/NTFS is case-insensitive, so the POSIX segment walk
+  // below is unnecessary here -- and actively harmful: `base` is a
+  // drive-letter host path (C:\...), but that walk assumes a
+  // `/`-rooted POSIX tree (opendir("/"), segment-by-segment).  It
+  // turns C:\temp\src\dosiz/foo into the invalid "/C:\temp\src\..."
+  // which ::open rejects with EINVAL -- so EVERY create of a
+  // not-yet-existing file (which legitimately fails the stat above)
+  // broke on Windows.  Hand back the literal; mixed '/'+'\' is fine
+  // for the Win32 file APIs and open(O_CREAT) does the right thing.
+  return literal;
+#endif
 
   // Fall back to a case-insensitive walk segment by segment.  DOS paths
   // are case-insensitive and programs freely uppercase (DJGPP's argv0
@@ -860,6 +873,23 @@ int allocate_handle(int fd, bool text_mode) {
 // original real-mode INT 21h callback is entered with CS still
 // 16-bit and no gate prefix is present.
 bool s_int_gate_bits32 = false;
+
+// Read a DOS path argument (DS:DX / DS:SI / ES:DI) using the SAME
+// addressing rule as the AH=3F/40 buffer code: SegPhys() yields the
+// descriptor base in PM and seg*16 in RM, and a 32-bit PM client
+// (DJGPP's direct INT 21h: 2.05 libc opens/creates this way) passes
+// the full pointer in the E-register, whose low 16 bits are
+// frequently zero.  The old read_dos_path(ds, reg_dx, reg_edx)
+// path used seg*16 + 16-bit offset, which is only correct for the
+// real-mode / simulate-real-mode route -- direct 32-bit PM INT 21h
+// (open/create/unlink/stat/exec/...) silently read DS:0 and every
+// file operation failed on such clients (e.g. fopen returned NULL).
+std::string read_dos_path(SegNames seg, uint32_t off16, uint32_t off32,
+                          size_t max = 260) {
+  const bool pm32 = cpu.pmode && s_int_gate_bits32;
+  const PhysPt lin = SegPhys(seg) + (pm32 ? off32 : off16);
+  return read_dos_string_lin(lin, max);
+}
 
 void set_cf(bool val) {
   // Flip bit 0 (CF) on the FLAGS word the CPU will pop on IRET.
@@ -4237,7 +4267,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x3C: {  // Create file; CX=attr, DS:DX=path.  Returns handle in AX.
-      const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path = read_dos_path(ds, reg_dx, reg_edx);
       const Resolved    r        = resolve_path(dos_path);
       if (dosiz::g_debug.open_trace) {
         std::fprintf(stderr,
@@ -4261,7 +4291,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x3D: {  // Open file; AL=mode, DS:DX=path.  Returns handle in AX.
-      std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      std::string dos_path = read_dos_path(ds, reg_dx, reg_edx);
       // DJGPP stub quirk on nested exec: the go32-v2 stub clears the
       // RM argv[0] scratch buffer at `[DS:0x764]` (writing 0x00 to
       // byte 0) after switching to PM -- but some PM-side code still
@@ -4540,7 +4570,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x4E: {  // Find first: CX=attr mask, DS:DX=ASCIIZ path/pattern
-      const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path = read_dos_path(ds, reg_dx, reg_edx);
       auto [dir_part, pat_part]  = split_dir_pattern(dos_path);
 
       const std::string host_dir = dir_part.empty()
@@ -4683,7 +4713,7 @@ Bitu dosiz_int21() {
       // and later fd ops returned EBADF spuriously.  We implement a
       // minimal pass-through: resolve relative paths against cwd,
       // prepend the current drive, uppercase, write to ES:DI.
-      const std::string src = read_dos_string(SegValue(ds), reg_si);
+      const std::string src = read_dos_path(ds, reg_si, reg_esi);
       // Split off drive letter if any.
       std::string path = src;
       char drive = s_current_drive;
@@ -4857,8 +4887,8 @@ Bitu dosiz_int21() {
     }
 
     case 0x56: {  // rename: DS:DX = old name, ES:DI = new name
-      const std::string old_dos = read_dos_string(SegValue(ds), reg_dx);
-      const std::string new_dos = read_dos_string(SegValue(es), reg_di);
+      const std::string old_dos = read_dos_path(ds, reg_dx, reg_edx);
+      const std::string new_dos = read_dos_path(es, reg_di, reg_edi);
       const std::string old_h   = dos_to_host(old_dos);
       const std::string new_h   = dos_to_host(new_dos);
       if (::rename(old_h.c_str(), new_h.c_str()) < 0) {
@@ -4932,7 +4962,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x39: {  // mkdir: DS:DX = path
-      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path  = read_dos_path(ds, reg_dx, reg_edx);
       const std::string host_path = dos_to_host(dos_path);
       if (dosiz_mkdir(host_path.c_str(), 0755) < 0) { return_error(0x03); break; }
       set_cf(false);
@@ -4940,7 +4970,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x3A: {  // rmdir: DS:DX = path
-      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path  = read_dos_path(ds, reg_dx, reg_edx);
       const std::string host_path = dos_to_host(dos_path);
       if (::rmdir(host_path.c_str()) < 0) { return_error(0x10); break; }  // current dir
       set_cf(false);
@@ -4948,7 +4978,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x41: {  // unlink: DS:DX = path
-      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path  = read_dos_path(ds, reg_dx, reg_edx);
       const std::string host_path = dos_to_host(dos_path);
       if (::unlink(host_path.c_str()) < 0) { return_error(0x02); break; }
       set_cf(false);
@@ -4956,7 +4986,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x3B: {  // Change directory: DS:DX = path
-      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path  = read_dos_path(ds, reg_dx, reg_edx);
       const std::string host_path = dos_to_host(dos_path);
       struct stat st;
       if (stat(host_path.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
@@ -4995,7 +5025,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x43: {  // Get/set file attributes.  DS:DX = path, AL: 0 get, 1 set.
-      const std::string dos_path  = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path  = read_dos_path(ds, reg_dx, reg_edx);
       const std::string host_path = dos_to_host(dos_path);
       if (reg_al == 0) {
         struct stat st;
@@ -5213,7 +5243,7 @@ Bitu dosiz_int21() {
         return_error(1);
         break;
       }
-      const std::string dos_path = read_dos_string(SegValue(ds), reg_dx);
+      const std::string dos_path = read_dos_path(ds, reg_dx, reg_edx);
       const Resolved    r        = resolve_path(dos_path);
       if (dosiz::g_debug.int4b_trace) {
         std::fprintf(stderr, "[4B] dos='%s' -> host='%s' exists=%d\n",
@@ -5681,7 +5711,7 @@ Bitu dosiz_int21() {
     case 0x6C: {  // Extended open/create.  BX=mode, CX=attr, DX=action,
                   // DS:SI=path.  Returns AX=handle, CX=action-taken
                   // (1=opened, 2=created, 3=truncated).
-      const std::string dos_path = read_dos_string(SegValue(ds), reg_si);
+      const std::string dos_path = read_dos_path(ds, reg_si, reg_esi);
       const Resolved    r        = resolve_path(dos_path);
       const bool exists = (::access(r.host_path.c_str(), F_OK) == 0);
       const uint16_t action = reg_dx;
@@ -5836,7 +5866,7 @@ Bitu dosiz_int21() {
       // not supported" instead of giving it a canonicalized path.
       // Delegate to the AH=60 logic (builds a "C:\...\" path).
       if (reg_al == 0x60 || reg_al == 0xA0) {
-        const std::string src = read_dos_string(SegValue(ds), reg_si);
+        const std::string src = read_dos_path(ds, reg_si, reg_esi);
         std::string path = src;
         char drive = s_current_drive;
         if (path.size() >= 2 && path[1] == ':') {
