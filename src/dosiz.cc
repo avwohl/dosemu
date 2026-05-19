@@ -16,6 +16,11 @@
 #include <unistd.h>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 static void print_usage(const char *prog) {
   std::fprintf(stderr,
     "Usage: %s [options] <program.exe> [args...]\n"
@@ -42,6 +47,17 @@ static bool ends_with(const std::string &s, const std::string &suffix) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+  // dosiz is a transparent pipe for the DOS guest's stdio. The guest
+  // (e.g. a DJGPP program in text mode) already emits CR LF itself;
+  // if our own MinGW CRT stdio handles are in text mode, write() of a
+  // guest "\r\n" gets a *second* CR injected (-> "\r\r\n") and any
+  // binary guest output is mangled. Force host std{in,out,err} binary
+  // so guest bytes pass through verbatim — the guest owns line endings.
+  _setmode(_fileno(stdin),  _O_BINARY);
+  _setmode(_fileno(stdout), _O_BINARY);
+  _setmode(_fileno(stderr), _O_BINARY);
+#endif
   dosiz::Config cfg;
 
   int i = 1;

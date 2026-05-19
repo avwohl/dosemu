@@ -4447,23 +4447,42 @@ Bitu dosiz_int21() {
       }
       const PhysPt dst = SegPhys(ds) + off32;
       uint32_t out = 0;
-      while (out < count) {
-        if (text_mode && *pending >= 0) {
-          mem_writeb(dst + out++, static_cast<uint8_t>(*pending));
-          *pending = -1;
-          continue;
+      if (!text_mode) {
+        // Binary fast path: block reads instead of one ::read() per
+        // byte.  A DJGPP O_BINARY disk read (e.g. a 60 KB Smalltalk
+        // image chunk) would otherwise cost ~60 K host syscalls and
+        // crawl.  DOS AH=3F has read-fully semantics here, so loop
+        // until `count` is satisfied or EOF/error.
+        uint8_t buf[16384];
+        while (out < count) {
+          size_t want = count - out;
+          if (want > sizeof(buf)) want = sizeof(buf);
+          ssize_t n = ::read(fd, buf, want);
+          if (n < 0)  { return_error(0x05); set_cf(true); reg_ax = out; return CBRET_NONE; }
+          if (n == 0) break;  // EOF
+          for (ssize_t i = 0; i < n; ++i)
+            mem_writeb(dst + out + static_cast<uint32_t>(i), buf[i]);
+          out += static_cast<uint32_t>(n);
         }
-        uint8_t byte;
-        ssize_t n = ::read(fd, &byte, 1);
-        if (n < 0)  { return_error(0x05); set_cf(true); reg_ax = out; return CBRET_NONE; }
-        if (n == 0) break;  // EOF
-        if (text_mode && byte == 0x1A) break;    // DOS text-EOF marker
-        if (text_mode && byte == '\n') {
-          mem_writeb(dst + out++, '\r');
-          if (out < count) mem_writeb(dst + out++, '\n');
-          else             *pending = '\n';
-        } else {
-          mem_writeb(dst + out++, byte);
+      } else {
+        while (out < count) {
+          if (*pending >= 0) {
+            mem_writeb(dst + out++, static_cast<uint8_t>(*pending));
+            *pending = -1;
+            continue;
+          }
+          uint8_t byte;
+          ssize_t n = ::read(fd, &byte, 1);
+          if (n < 0)  { return_error(0x05); set_cf(true); reg_ax = out; return CBRET_NONE; }
+          if (n == 0) break;  // EOF
+          if (byte == 0x1A) break;    // DOS text-EOF marker
+          if (byte == '\n') {
+            mem_writeb(dst + out++, '\r');
+            if (out < count) mem_writeb(dst + out++, '\n');
+            else             *pending = '\n';
+          } else {
+            mem_writeb(dst + out++, byte);
+          }
         }
       }
       if (pm32) reg_eax = out;
