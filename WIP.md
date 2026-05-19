@@ -53,12 +53,36 @@ Still failing on Windows (narrow, logged, not the global-hang):
                 _start has a re-entry guard (testb $1,0x6175d;
                 jne) so multi-entry is by design; a later entry
                 gets bad DS. CXX.EXE (same DJGPP 12.2 C++)
-                completes. NEXT: full DOSIZ_CPU_TRACE (whole
-                file) to see the exact jump/ret to 0x19f0 with
-                bad DS; check INT 31h AX=0E00/0E01 handler; diff
-                st80_run vs CXX COFF section table. External
-                repro: github avwohl/smalltalk80-2026 DOS port;
-                C:\s\st80t\ST80RUN.EXE (no args reproduces).
+                completes. UPDATE: 0E00/0E01 handlers are
+                benign; crash is in DJGPP crt0 (argv0
+                canonicalize) — after `INT 31h AX=0E01` returns,
+                control lands at _start 0x19f0 with garbage
+                EBX/EDX/EBP=0xffffffff but ESI/EDI preserved
+                from the 0E01 call. Smells like an int-31
+                dispatch RETURN-frame / IDT gate-width (16 vs
+                32) corruption — same class as `1b42bec` (0x0205
+                gate width) but on the int-31 return /
+                `pm_setup_gdt_and_idt` bits32 path, not 0x0205.
+                st80_run-specific (CXX.EXE 591KB C++ + 35 GNU
+                utils fine). NEEDS your in-flight DPMI gate-width
+                rework — flagging rather than speculatively
+                patching core DPMI mid-rewrite.
+
+                DIAGNOSTIC BUG found: DOSIZ_CPU_TRACE emits ZERO
+                instruction lines even on a SUCCESSFUL run
+                (tested DJ_PRINTF) — only the "forcing
+                core=normal" notice prints. The patched
+                core_normal trace hook never fires (dynamic core
+                still used, or the patch isn't applied in this
+                build). This makes instruction-level debugging
+                of the st80_run #GP impossible — worth fixing
+                independently; it gates the above.
+
+                External repro: github avwohl/smalltalk80-2026
+                DOS port; C:\s\st80t\ST80RUN.EXE (no args
+                reproduces). gdb angle: break
+                dosiz_le_exc_handle32, inspect the client int-31
+                return frame at AX=0E01 vs CXX.EXE.
 
 ---
 
