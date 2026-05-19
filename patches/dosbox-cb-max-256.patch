@@ -1,0 +1,24 @@
+diff --git a/include/callback.h b/include/callback.h
+index e077273ca..3b2cf865c 100644
+--- a/include/callback.h
++++ b/include/callback.h
+@@ -58,7 +58,18 @@ enum {
+ };
+ 
+ using callback_number_t = uint8_t;
+-#define CB_MAX		128
++// dosiz raises this from stock dosbox's 128. dosiz implements a full
++// ring-3 DPMI host on top of dosbox and allocates ~77 callbacks of
++// its own (32 RM callbacks + 32 PM exception vectors + ~13 DPMI/INT
++// entry points). Stock dosbox uses ~50; in --window mode the DOS
++// mouse driver + sound + full SVGA/VESA push the dosbox baseline
++// past 128 total and `dosiz --window` aborted in CALLBACK_Allocate
++// before any guest ran. 250 is the max that fits callback_number_t
++// (uint8_t; the static_assert below requires CB_MAX < 255) and is
++// ~2x headroom. Layout stays well clear of the F000 BIOS: callbacks
++// occupy F000:1000..1000+CB_MAX*CB_SIZE, RunRealInt stubs follow,
++// ending ~F000:3540 — far below the Tandy/BIOS area at F000:A084+.
++#define CB_MAX		250
+ #define CB_SIZE		32
+ #define CB_SEG		0xF000
+ #define CB_SOFFSET	0x1000
