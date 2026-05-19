@@ -19,23 +19,41 @@ execute ANY DJGPP program on Windows:
   (DJ_PRINTF/WRITE/ARGV/ENV/MALLOC/STDIN/EXEC, BIGTEST,
   VCPI/HMA probes). A trivial DJGPP hello runs clean.
 
-Still failing on Windows (newly *exposed* by the fix — could not
-run before; logged, not yet fixed):
+UPDATE (later same day, commit `b6c609c`): fixed two more
+Windows bugs the O_BINARY fix had exposed —
 
-    EMS_PROBE   rc=1 marker missing
-    DJ_FILE     rc=1 marker missing  (file round-trip)
-    DJ_SIGNAL   rc=1 marker missing
-    st80_run    #GP very early: POP ES of a 0xffff selector at
-                CS:EIP 0037:000019f1, before main. Trivial COFF
-                is fine; a ~805 KB COFF that loads a 596 KB data
-                file is not -- size/layout dependent, likely
-                shares a cause with DJ_FILE. (External repro:
-                github avwohl/smalltalk80-2026 DOS port;
-                C:\s\st80t\ST80RUN.EXE -n 499 SNAPSHOT.IM.)
+- All INT 21h path handlers read the filename via
+  `read_dos_string(SegValue(ds), reg_dx)` = seg*16 + 16-bit
+  offset. Correct only for the RM / sim-RM route; DJGPP 2.05's
+  direct 32-bit PM INT 21h passes the path in EDX (low16 often 0)
+  with DS a selector, so they read DS:0 garbage and every path op
+  failed. Added `read_dos_path` (SegPhys()/pm32 rule, same as the
+  AH=3F/40 buffer code); repointed all 13 callsites.
+- `dos_to_host`'s case-insensitive fallback walk is POSIX-only;
+  for a not-yet-existing file (every create) on Windows it
+  mangled the `C:\` base into invalid `/C:\...` → ::open EINVAL.
+  Skip the walk on Windows (NTFS is case-insensitive).
 
-These are narrow Windows feature/edge bugs, not the global-hang
-(which is fixed). Next Windows session: chase DJ_FILE (smallest
-repro) and the st80_run #GP together.
+Suite now **35/37 PASS** on Windows (gawk/gzip/tar/sed/flex/m4/
+patch/… real DJGPP utilities + C++ all run). DJ_FILE passes.
+
+Still failing on Windows (narrow, logged, not the global-hang):
+
+    EMS_PROBE   rc=1 marker missing  (EMS feature)
+    DJ_SIGNAL   rc=1 marker missing  (signal delivery)
+    st80_run    #GP on the VERY FIRST COFF instruction:
+                `<start>` 0x19f0 `push %ds` / 0x19f1 `pop %es`
+                faults (err 0xfffc) — dosiz hands this client an
+                INVALID DS selector (~0xffff) at COFF entry. HI,
+                a 591 KB C++ test, and 35 GNU utils all get a
+                valid DS; only st80_run.exe / st80.exe don't,
+                even with no args (crashes before main, not
+                size alone — CXX.EXE 591 KB is fine). Next:
+                DOSIZ_DPMI_TRACE + DOSIZ_LDT_TRACE at transfer,
+                find the COFF trait that trips the bad-selector
+                path. External repro: github
+                avwohl/smalltalk80-2026 DOS port;
+                C:\s\st80t\ST80RUN.EXE (no args reproduces).
 
 ---
 
