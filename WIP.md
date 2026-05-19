@@ -41,18 +41,23 @@ Still failing on Windows (narrow, logged, not the global-hang):
 
     EMS_PROBE   rc=1 marker missing  (EMS feature)
     DJ_SIGNAL   rc=1 marker missing  (signal delivery)
-    st80_run    #GP on the VERY FIRST COFF instruction:
-                `<start>` 0x19f0 `push %ds` / 0x19f1 `pop %es`
-                faults (err 0xfffc) — dosiz hands this client an
-                INVALID DS selector (~0xffff) at COFF entry. HI,
-                a 591 KB C++ test, and 35 GNU utils all get a
-                valid DS; only st80_run.exe / st80.exe don't,
-                even with no args (crashes before main, not
-                size alone — CXX.EXE 591 KB is fine). Next:
-                DOSIZ_DPMI_TRACE + DOSIZ_LDT_TRACE at transfer,
-                find the COFF trait that trips the bad-selector
-                path. External repro: github
-                avwohl/smalltalk80-2026 DOS port;
+    st80_run    #GP at `<start>` 0x19f0 push %ds / 0x19f1 pop %es,
+                err 0xfffc (bad DS ~0xffff). UPDATE (commit
+                `79e120b`): ruled out format misdetect
+                (DOSIZ_LE_AS_MZ no help; MZ header identical to
+                working CXX.EXE). It is NOT first entry — trace
+                shows crt0 runs far (AH=44/19/71 filename work on
+                "ST80RUN.EXE", simrm INT21), then `INT 31h
+                AX=0E01` (Set Coproc Emulation), then control
+                lands back at _start (0x19f0) with DS clobbered.
+                _start has a re-entry guard (testb $1,0x6175d;
+                jne) so multi-entry is by design; a later entry
+                gets bad DS. CXX.EXE (same DJGPP 12.2 C++)
+                completes. NEXT: full DOSIZ_CPU_TRACE (whole
+                file) to see the exact jump/ret to 0x19f0 with
+                bad DS; check INT 31h AX=0E00/0E01 handler; diff
+                st80_run vs CXX COFF section table. External
+                repro: github avwohl/smalltalk80-2026 DOS port;
                 C:\s\st80t\ST80RUN.EXE (no args reproduces).
 
 ---
