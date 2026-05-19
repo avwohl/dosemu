@@ -884,11 +884,14 @@ bool s_int_gate_bits32 = false;
 // real-mode / simulate-real-mode route -- direct 32-bit PM INT 21h
 // (open/create/unlink/stat/exec/...) silently read DS:0 and every
 // file operation failed on such clients (e.g. fopen returned NULL).
+PhysPt dos_arg_addr(SegNames seg, uint32_t off16, uint32_t off32) {
+  const bool pm32 = cpu.pmode && s_int_gate_bits32;
+  return SegPhys(seg) + (pm32 ? off32 : off16);
+}
+
 std::string read_dos_path(SegNames seg, uint32_t off16, uint32_t off32,
                           size_t max = 260) {
-  const bool pm32 = cpu.pmode && s_int_gate_bits32;
-  const PhysPt lin = SegPhys(seg) + (pm32 ? off32 : off16);
-  return read_dos_string_lin(lin, max);
+  return read_dos_string_lin(dos_arg_addr(seg, off16, off32), max);
 }
 
 void set_cf(bool val) {
@@ -4740,7 +4743,7 @@ Bitu dosiz_int21() {
       canon += ':';
       canon += path;
       if (canon.size() > 127) canon.resize(127);   // leave room for NUL
-      const PhysPt dst = SegPhys(es) + reg_di;
+      const PhysPt dst = dos_arg_addr(es, reg_di, reg_edi);
       for (size_t i = 0; i < canon.size(); ++i)
         mem_writeb(dst + i, static_cast<uint8_t>(canon[i]));
       mem_writeb(dst + canon.size(), 0);
@@ -4764,7 +4767,7 @@ Bitu dosiz_int21() {
       // locale tables live in the BIOS-data-area-adjacent scratch
       // region we reserve at 0x0700-0x0A00 (unused by DOS).
       const uint16_t cx_in = reg_cx;
-      const PhysPt dst = SegPhys(es) + reg_di;
+      const PhysPt dst = dos_arg_addr(es, reg_di, reg_edi);
       uint8_t buf[64] = {0};
       size_t n = 0;
 
@@ -5151,7 +5154,7 @@ Bitu dosiz_int21() {
       char drive = s_current_drive;
       if (reg_dl != 0) drive = 'A' + (reg_dl - 1);
       const std::string &cwd = s_drive_cwd[drive];   // "" if not set
-      const PhysPt dst = SegPhys(ds) + reg_si;
+      const PhysPt dst = dos_arg_addr(ds, reg_si, reg_esi);
       for (size_t i = 0; i < cwd.size() && i < 63; ++i)
         mem_writeb(dst + i, static_cast<uint8_t>(cwd[i]));
       mem_writeb(dst + std::min(cwd.size(), size_t{63}), 0);
@@ -5891,7 +5894,7 @@ Bitu dosiz_int21() {
         canon += path;
         // LFN buffer is 260 bytes; leave room for NUL.
         if (canon.size() > 259) canon.resize(259);
-        const PhysPt dst = SegPhys(es) + reg_di;
+        const PhysPt dst = dos_arg_addr(es, reg_di, reg_edi);
         for (size_t i = 0; i < canon.size(); ++i)
           mem_writeb(dst + i, static_cast<uint8_t>(canon[i]));
         mem_writeb(dst + canon.size(), 0);
