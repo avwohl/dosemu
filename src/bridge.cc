@@ -76,6 +76,21 @@ static inline int setenv(const char *name, const char *value, int /*overwrite*/)
 #include <sys/select.h>
 #define dosiz_mkdir(path, mode) ::mkdir((path), (mode))
 #endif
+
+// DOS INT 21h file handles are byte-exact: the kernel performs NO
+// CR/LF or Ctrl-Z translation on AH=3D/3C/3F/40 (any text cooking is
+// a C-runtime concern layered above, which dosiz does itself in the
+// AH=3F handler).  So every host file we open for a guest MUST be
+// opened binary.  On Windows the CRT defaults file handles to TEXT
+// mode, where ::read() collapses CRLF and — fatally for loading a
+// COFF/MZ image — returns EOF at the first 0x1A byte, which made the
+// DJGPP go32-v2 stub spin forever re-reading its own payload. POSIX
+// has no such distinction, so O_BINARY is absent there; define it
+// to 0 so the same flag is safe on every platform.
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
 #include <ctime>
 #include <map>
 #include <memory>
@@ -4211,7 +4226,8 @@ Bitu dosiz_int21() {
             "[create] CX=%04x path='%s' -> host='%s'\n",
             (unsigned)reg_cx, dos_path.c_str(), r.host_path.c_str());
       }
-      int fd = ::open(r.host_path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+      int fd = ::open(r.host_path.c_str(),
+                      O_RDWR | O_CREAT | O_TRUNC | O_BINARY, 0644);
       if (fd < 0) {
         if (dosiz::g_debug.open_trace) {
           std::fprintf(stderr, "[create] -> errno=%d (%s)\n", errno, strerror(errno));
@@ -4303,7 +4319,7 @@ Bitu dosiz_int21() {
         case 1: flags = O_WRONLY; break;
         case 2: flags = O_RDWR;   break;
       }
-      int fd = ::open(r.host_path.c_str(), flags);
+      int fd = ::open(r.host_path.c_str(), flags | O_BINARY);
       if (fd < 0) { return_error(0x02); break; }
       // DOS AH=3Dh refuses to open directories (returns error 05h
       // access denied).  POSIX open(2) on a dir succeeds and only
@@ -5675,7 +5691,7 @@ Bitu dosiz_int21() {
       else if (truncate_existing) { flags |= O_TRUNC; action_taken = 3; }
       else { action_taken = 1; }
 
-      int fd = ::open(r.host_path.c_str(), flags, 0644);
+      int fd = ::open(r.host_path.c_str(), flags | O_BINARY, 0644);
       if (fd < 0) { return_error(0x05); break; }
       int h = allocate_handle(fd, r.text_mode);
       if (h < 0) { ::close(fd); return_error(0x04); break; }
