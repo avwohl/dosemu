@@ -3052,7 +3052,25 @@ Bitu dosiz_int31() {
     }
 
     case 0x0205: {  // Set Protected Mode Interrupt Vector
-      const bool bits32 = cpu.code.big;
+      // dosiz: bits32 must reflect the TARGET handler's code segment
+      // width, not the dispatcher's current cpu.code.big. We're being
+      // called via int 31 from a CB_IRETD context; cpu.code.big may
+      // not reliably mirror the client's CS at this point. Probe the
+      // descriptor pointed by reg_cx (the new handler's CS selector)
+      // and use its D-flag. Fall back to cpu.code.big if the lookup
+      // fails (preserves prior behavior for invalid selectors).
+      bool bits32 = cpu.code.big;
+      if ((reg_cx & 0xfffc) != 0) {
+        Descriptor cs_desc;
+        bool ok = false;
+        if (reg_cx & 0x4) {
+          // LDT — use LDT lookup.
+          ok = cpu.gdt.GetDescriptor(reg_cx, cs_desc);  // GetDescriptor handles TI bit
+        } else {
+          ok = cpu.gdt.GetDescriptor(reg_cx, cs_desc);
+        }
+        if (ok) bits32 = cs_desc.Big() > 0;
+      }
       write_idt_gate(reg_bl, reg_cx, reg_edx, bits32);
       set_cf(false);
       return CBRET_NONE;
