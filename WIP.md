@@ -1,3 +1,44 @@
+# Windows DJGPP status (2026-05-18)
+
+First real exercise of the Windows (MSYS2 mingw64) build running
+DJGPP clients. Found + fixed the bug that made dosiz unable to
+execute ANY DJGPP program on Windows:
+
+- Root cause: the three guest-file `::open()` sites in
+  `src/bridge.cc` had no `O_BINARY`. POSIX ignores it (Linux/macOS
+  unaffected — suite green there), but the Windows CRT defaults
+  handles to TEXT mode: `::read()` collapses CRLF and returns EOF
+  at the first 0x1A. Loading any COFF/MZ image (every DJGPP .exe)
+  short-read, and the go32-v2 stub spun forever re-reading its
+  own payload (observed: infinite `INT 31h AX=0300 -> INT 21h
+  AH=3F`). DOS file handles are byte-exact anyway, so binary is
+  the correct host mode everywhere.
+- Fix: `O_BINARY` shim + applied to all 3 opens. Commit `ea3417c`.
+- Windows verification: `tests/djgpp/run.sh` went from **0/14
+  (total hang, zero output)** to **11/14 PASS**
+  (DJ_PRINTF/WRITE/ARGV/ENV/MALLOC/STDIN/EXEC, BIGTEST,
+  VCPI/HMA probes). A trivial DJGPP hello runs clean.
+
+Still failing on Windows (newly *exposed* by the fix — could not
+run before; logged, not yet fixed):
+
+    EMS_PROBE   rc=1 marker missing
+    DJ_FILE     rc=1 marker missing  (file round-trip)
+    DJ_SIGNAL   rc=1 marker missing
+    st80_run    #GP very early: POP ES of a 0xffff selector at
+                CS:EIP 0037:000019f1, before main. Trivial COFF
+                is fine; a ~805 KB COFF that loads a 596 KB data
+                file is not -- size/layout dependent, likely
+                shares a cause with DJ_FILE. (External repro:
+                github avwohl/smalltalk80-2026 DOS port;
+                C:\s\st80t\ST80RUN.EXE -n 499 SNAPSHOT.IM.)
+
+These are narrow Windows feature/edge bugs, not the global-hang
+(which is fixed). Next Windows session: chase DJ_FILE (smallest
+repro) and the st80_run #GP together.
+
+---
+
 # What's left to do — status snapshot (2026-04-23)
 
 Structured backlog as of end-of-session today.  Suite is 37/37 green.
