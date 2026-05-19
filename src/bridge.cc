@@ -6464,7 +6464,7 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
         return false;
       };
       if (has("DOS/4G") || has("DOS/16M") || has("PMODE/W")) {
-        extender_detected = true;
+        if (!getenv("DOSIZ_BYPASS_EXTENDER")) extender_detected = true;
       }
     }
   }
@@ -6512,17 +6512,47 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
       // Extract entry/stack selectors from the populated LDT.
       const uint32_t entry_obj_1 = rdd(f, le_off + 0x18);
       const uint32_t entry_eip   = rdd(f, le_off + 0x1C);
-      const uint32_t stack_obj_1 = rdd(f, le_off + 0x20);
+      uint32_t stack_obj_1 = rdd(f, le_off + 0x20);  // dosiz: mutable for PMODE/W synth
       const uint32_t stack_esp   = rdd(f, le_off + 0x24);
       const uint32_t auto_obj_1  = rdd(f, le_off + 0x94);
-      if (entry_obj_1 == 0 || entry_obj_1 > objects.size()
-          || stack_obj_1 == 0 || stack_obj_1 > objects.size()) {
-        std::fprintf(stderr, "dosiz: LE entry_obj=%u stack_obj=%u out of range\n",
-                     entry_obj_1, stack_obj_1);
+      if (entry_obj_1 == 0 || entry_obj_1 > objects.size()) {
+        std::fprintf(stderr, "dosiz: LE entry_obj=%u out of range\n",
+                     entry_obj_1);
         return false;
+      }
+      // PMODE/W-wrapped LE binaries leave stack_obj=0 because PMODE/W
+      // sets up its own stack at runtime. dosiz can synthesize one
+      // by reusing the auto-data object (or the first data object)
+      // as the stack region — the bridge code runs on it briefly
+      // before installing its own SS:ESP if needed.
+      bool synth_stack = false;
+      if (stack_obj_1 == 0 || stack_obj_1 > objects.size()) {
+        std::fprintf(stderr, "dosiz: LE stack_obj=%u (PMODE/W-style), "
+                             "synthesizing stack from auto-data obj\n",
+                     stack_obj_1);
+        synth_stack = true;
+        if (auto_obj_1 != 0 && auto_obj_1 <= objects.size()) {
+          stack_obj_1 = auto_obj_1;
+        } else {
+          // Last data object — typically BSS, end of which is safe top-of-stack.
+          for (size_t i = objects.size(); i > 0; --i) {
+            if (!objects[i - 1].is_code) { stack_obj_1 = (uint32_t)i; break; }
+          }
+          if (stack_obj_1 == 0) {
+            std::fprintf(stderr, "dosiz: LE: no data object to host the synth stack\n");
+            return false;
+          }
+        }
       }
       const LeObject &eo = objects[entry_obj_1 - 1];
       const LeObject &so = objects[stack_obj_1 - 1];
+      // Synth stack ESP = top of the stack object (grow-down).
+      uint32_t effective_stack_esp = stack_esp;
+      if (synth_stack) {
+        effective_stack_esp = so.virt_size > 16 ? (so.virt_size - 16) : 0;
+        std::fprintf(stderr, "dosiz: synth stack: obj#%u esp=0x%x\n",
+                     stack_obj_1, effective_stack_esp);
+      }
 
       // Allocate flat (base=0, limit=4G) selectors for both CS and
       // DS/ES/SS.
@@ -6606,7 +6636,7 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
       const uint16_t ss_sel = flat_data_sel != 0
           ? flat_data_sel : so.ldt_sel;
       const uint32_t esp_lin = flat_data_sel != 0
-          ? (so.host_base + stack_esp) : stack_esp;
+          ? (so.host_base + effective_stack_esp) : effective_stack_esp;
       const uint32_t eip_lin = flat_code_sel != 0
           ? (eo.host_base + entry_eip) : entry_eip;
 
