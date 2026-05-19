@@ -13,7 +13,8 @@ PATCHES        := patches/sdlmain-expose-setup.patch \
                   patches/sdlmain-skip-gl-probe-headless.patch \
                   patches/enet-clock-gettime-mingw.patch \
                   patches/core-normal-cpu-trace.patch \
-                  patches/dosbox-cb-max-256.patch
+                  patches/dosbox-cb-max-256.patch \
+                  patches/dosbox-capture-trigger.patch
 PATCH_MARKER   := $(DB_SRC)/.dosiz-patched
 
 # MSYS2 MinGW-w64 quirk: meson's CMake dependency resolver calls

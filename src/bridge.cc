@@ -49,6 +49,9 @@ void messages_add_sdl();
 void messages_add_command_line();
 Section_prop *get_sdl_section();
 void DOS_Locale_AddMessages();
+// dosbox-staging capture module (dosiz patch adds this entry point):
+// programmatic raw-screenshot trigger, written on the next frame.
+void CAPTURE_RequestRawScreenshot();
 void RENDER_AddMessages();
 
 #include <algorithm>
@@ -4082,6 +4085,31 @@ static void dosiz_pktdrv_rx_drain() {
 // forever because BIOS_TIMER never advances.  18.2 BIOS ticks ≈ 1
 // second ≈ 1000 emulator ticks; advance one BIOS tick every 55 emu
 // ticks to match the 18.2Hz BIOS rate.
+// dosiz extension: optional periodic raw screenshot.  Set
+// DOSIZ_SCREENSHOT_SECS=N to have dosiz request a raw-image capture
+// every N emulated seconds; dosbox writes it to capture_dir as
+// imageNNNN.png on the next rendered frame.  Lets a GUI guest be
+// visually verified with no interactive display -- e.g. CI, or a
+// locked host session where a host screen-grab only sees the lock
+// screen.  void(*)(void), runs in TIMER tick context (~1 kHz).
+// (CAPTURE_RequestRawScreenshot is forward-declared at file top, in
+// the global namespace, alongside the other dosbox-internal externs.)
+
+extern "C" void dosiz_screenshot_tick(void) {
+  static int interval_ms = -1;  // <0 unread, 0 disabled
+  if (interval_ms < 0) {
+    const char *e = getenv("DOSIZ_SCREENSHOT_SECS");
+    const int s = e ? atoi(e) : 0;
+    interval_ms = (s > 0) ? s * 1000 : 0;
+  }
+  if (interval_ms == 0) return;
+  static int counter = 0;
+  if (++counter >= interval_ms) {
+    counter = 0;
+    CAPTURE_RequestRawScreenshot();
+  }
+}
+
 extern "C" void dosiz_pktdrv_tick(void) {
   dosiz_pktdrv_rx_drain();
   // Advance BIOS_TIMER every emulator tick (~1000Hz, vs the standard
@@ -7207,6 +7235,11 @@ void dosiz_startup() {
   int16_cb.Install(&dosiz_int16, CB_IRET, "dosiz Int 16 (BIOS kbd)");
   int16_cb.Set_RealVec(0x16);
 
+  // Active for the whole guest run (both the LE/PM and the RM/COM
+  // exec paths below).  No-op unless DOSIZ_SCREENSHOT_SECS is set.
+  extern void dosiz_screenshot_tick(void);
+  TIMER_AddTickHandler(&dosiz_screenshot_tick);
+
   build_psp(s_program, s_args);
 
   InitialRegs ir;
@@ -7340,6 +7373,18 @@ int run_program(const dosiz::Config &cfg) {
       // SDL's offscreen driver on macOS, and we render to nothing anyway.
       if (auto *s = control->GetSection("sdl"))     s->HandleInputline("output=texture");
     }
+    // Screenshot output dir.  DOSIZ_SCREENSHOT_DIR overrides dosbox's
+    // default ("capture" under the CWD).  Used with
+    // DOSIZ_SCREENSHOT_SECS (see dosiz_screenshot_tick) to verify a
+    // GUI guest with no interactive display.
+    if (const char *sd = getenv("DOSIZ_SCREENSHOT_DIR")) {
+      if (auto *s = control->GetSection("capture")) {
+        std::string line = "capture_dir=";
+        line += sd;
+        s->HandleInputline(line.c_str());
+      }
+    }
+
     // Keep the interpreter core for tracing.  dosbox auto-switches
     // to the dynamic JIT when a program enters PM; that's fine for
     // speed but bypasses core_normal where DOSIZ_CPU_TRACE is

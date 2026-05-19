@@ -1,0 +1,40 @@
+diff --git a/src/capture/capture.cpp b/src/capture/capture.cpp
+index 0af87140c..0bd9f67e7 100644
+--- a/src/capture/capture.cpp
++++ b/src/capture/capture.cpp
+@@ -397,6 +397,18 @@ void CAPTURE_StopVideoCapture()
+ 	}
+ }
+ 
++// dosiz extension: programmatic single-shot raw screenshot trigger.
++// Equivalent to the Ctrl+F5 "raw screenshot" mapper key, but callable
++// from host code (dosiz schedules it on a TIMER tick) so a guest can
++// be visually verified with no interactive display / mapper. The
++// actual PNG is written on the next CAPTURE_AddFrame, into capture_dir.
++void CAPTURE_RequestRawScreenshot()
++{
++	if (image_capturer) {
++		image_capturer->RequestRawCapture();
++	}
++}
++
+ void CAPTURE_AddFrame(const RenderedImage& image, const float frames_per_second)
+ {
+ 	if (image_capturer) {
+diff --git a/src/capture/capture.h b/src/capture/capture.h
+index 8aea94d3a..bd0d1a294 100644
+--- a/src/capture/capture.h
++++ b/src/capture/capture.h
+@@ -53,6 +53,12 @@ void CAPTURE_AddConfigSection(const ConfigPtr& conf);
+ FILE* CAPTURE_CreateFile(const CaptureType type,
+                          const std::optional<std_fs::path>& path = {});
+ 
++// dosiz extension: request a single raw-image screenshot programmatically
++// (host-code equivalent of the Ctrl+F5 mapper key). Written on the next
++// CAPTURE_AddFrame into capture_dir. Lets a guest be visually verified
++// with no interactive display.
++void CAPTURE_RequestRawScreenshot();
++
+ // Used to add the last rendered frame to be captured either as a screenshot
+ // or as a video recording (or both).
+ void CAPTURE_AddFrame(const RenderedImage& image, const float frames_per_second);
