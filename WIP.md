@@ -18,16 +18,26 @@ Three dosiz fixes this session, all committed + pushed origin/main:
   128. uint8_t caps it at 250 (static_assert <255); ~2x
   headroom. Added to Makefile PATCHES.
 
+- `b860fbc` programmatic screenshot: patches/dosbox-capture-
+  trigger.patch adds a public `CAPTURE_RequestRawScreenshot()`
+  to dosbox's capture module; bridge.cc `dosiz_screenshot_tick`
+  (TIMER_AddTickHandler) calls it every `DOSIZ_SCREENSHOT_SECS`
+  emulated seconds (no-op unless set; `DOSIZ_SCREENSHOT_DIR`
+  sets capture_dir). Lets a GUI guest be verified with no
+  interactive display (CI, or a locked host session where a
+  host screen-grab only sees the lock screen).
+
 Result: the Smalltalk headless tools run byte-for-byte correct
 under dosiz (499-bytecode trace == Xerox reference; 18391
-objects load bit-identical vs native). `dosiz --window
-st80.exe` now boots past the VESA/mouse probe and runs steadily
-(no mouse-driver error — dosbox's DOS mouse driver is live in
-windowed mode). Suite holds 35/37 (EMS_PROBE/DJ_SIGNAL
-pre-existing). NEXT for GUI verification: an in-emulator
-framebuffer dump (this dev box's session is locked, so a
-host-side screenshot only sees the lock screen) — also the
-st80 dos-plan D2/D3 screenshot exit-criterion.
+objects load bit-identical vs native). **`dosiz --window
+st80.exe SNAPSHOT.IM DOSIZ_SCREENSHOT_SECS=3` boots to the
+fully-rendered Xerox Smalltalk-80 v2 desktop** (System
+Workspace/Transcript/class list/stipple/cursor — DOS INT 33h
+mouse live in windowed mode), visually confirmed via the new
+screenshot feature. Suite holds 35/37 (EMS_PROBE/DJ_SIGNAL
+pre-existing). NEXT: keyboard-input injection with no
+interactive session (scripted-keystroke dosiz feature?) to
+exercise st80's INT 16h path end-to-end.
 
 # Windows DJGPP status (2026-05-18)
 
