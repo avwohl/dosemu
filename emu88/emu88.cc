@@ -5601,8 +5601,11 @@ void emu88::execute(void) {
     }
 
     default:
-      emu88_fatal("Unimplemented 0x0F opcode: 0x%02X at %04X:%04X", op2, sregs[seg_CS], ip - 2);
-      halted = true;
+      // Undefined 0F opcode (e.g. UD2 = 0F 0B, used intentionally to trap):
+      // raise #UD like real hardware rather than aborting the machine, so a
+      // guest's installed #UD/exception handler gets a chance to run.
+      ip = insn_ip;
+      do_interrupt(6);  // #UD - Invalid Opcode
       break;
     }
     break;
