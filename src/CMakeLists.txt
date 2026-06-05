@@ -1,7 +1,12 @@
 #
 # dosiz/src/CMakeLists.txt
 #
-cmake_minimum_required(VERSION 3.25)
+# dosiz now runs on the in-tree **emu88** backend (vendored under ../emu88):
+# a from-scratch 386 + FPU + DPMI host + PC hardware, booting a real DOS
+# (FreeDOS/MS-DOS) from a disk image. No DOSBox, no SDL2/glib — emu88 is
+# self-contained, so the build is just emu88's sources plus dosiz's CLI.
+#
+cmake_minimum_required(VERSION 3.16)
 project(dosiz CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -13,187 +18,21 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
-
-# Match dosbox-staging's meson build: 64-bit off_t on all platforms.
-# (cross.h static_asserts this, and MinGW defaults to 32-bit off_t.)
 add_compile_definitions(_FILE_OFFSET_BITS=64)
 
 # ---------------------------------------------------------------------------
-# dosbox-staging
-#
-# We link against the static libraries produced by dosbox-staging's upstream
-# meson build, which lives at ../dosbox-staging/build.  Meson is expected to
-# have been run already (see README for the one-time setup step).
-#
-# Strict cpmemu-style DOS replacement is the end goal: eventually we will
-# stop linking libdos.a and libshell.a.  For now every lib gets pulled in so
-# we can confirm the mechanical linking works.
+# emu88 backend (vendored CPU + BIOS + DPMI + dos_machine + PC hardware).
 # ---------------------------------------------------------------------------
-set(DB ${CMAKE_SOURCE_DIR}/../dosbox-staging)
-set(DB_BUILD ${DB}/build)
-
-if(NOT EXISTS ${DB_BUILD}/libdosbox.a)
-  message(FATAL_ERROR
-    "dosbox-staging has not been built.  Run:\n"
-    "    meson setup ${DB}/build --buildtype=release ${DB}\n"
-    "    ninja -C ${DB}/build")
-endif()
-
-find_package(SDL2 REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GLIB REQUIRED glib-2.0)
-# On Mac (Homebrew) glib lives in /opt/homebrew; pkg_check_modules's plain
-# ${GLIB_LIBRARIES} gives bare library names — we need ${GLIB_LDFLAGS} (which
-# includes -L paths) and the cflags for headers.
-link_directories(${GLIB_LIBRARY_DIRS})
-include_directories(${GLIB_INCLUDE_DIRS})
+set(EMU88_DIR ${CMAKE_SOURCE_DIR}/../emu88)
+file(GLOB EMU88_SRC ${EMU88_DIR}/*.cc)
 
 add_executable(dosiz
   dosiz.cc
   config.cc
-  bridge.cc
   debug_settings.cpp
+  emu_bridge.cc        # emu88-backed implementation of dosiz::bridge
+  ${EMU88_SRC}
 )
 
-# dosbox-staging searches $exe/../Resources (macOS) or $exe/resources
-# (other) for shaders, fonts, translation files, and Unicode
-# codepage-mapping tables.  Place the committed dosbox-staging/Resources/
-# into BOTH spots so the lookup succeeds on every platform without a full
-# install.  Symlink on POSIX; copy on Windows where unprivileged symlink
-# creation requires Developer Mode.
-# dosbox-staging's meson build stages the installable tree under
-# <build>/resources (freedos-cpi, glshaders, translations, mapping tables,
-# etc.).  Upstream commit 52ee4e6f4 (~2024) moved these out of the
-# top-level Resources/ folder so they're now only generated files; point
-# our symlink/copy at the meson output.
-set(_dosiz_resource_src ${DB_BUILD}/resources)
-if(WIN32)
-  set(_dosiz_resource_cmd copy_directory)
-else()
-  set(_dosiz_resource_cmd create_symlink)
-endif()
-add_custom_command(TARGET dosiz POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E ${_dosiz_resource_cmd}
-          ${_dosiz_resource_src}
-          $<TARGET_FILE_DIR:dosiz>/resources
-  COMMAND ${CMAKE_COMMAND} -E ${_dosiz_resource_cmd}
-          ${_dosiz_resource_src}
-          $<TARGET_FILE_DIR:dosiz>/../Resources
-  VERBATIM)
-
-target_include_directories(dosiz PRIVATE
-  ${DB}/include
-  ${DB_BUILD}                    # generated config.h
-  ${DB}/src/libs/loguru          # loguru.hpp for verbosity control
-  ${SDL2_INCLUDE_DIRS}
-)
-
-set(DB_ARCHIVES
-  ${DB_BUILD}/libdosbox.a
-  ${DB_BUILD}/src/capture/libcapture.a
-  ${DB_BUILD}/src/cpu/libcpu.a
-  ${DB_BUILD}/src/dos/libdos.a
-  ${DB_BUILD}/src/fpu/libfpu.a
-  ${DB_BUILD}/src/gui/libgui.a
-  ${DB_BUILD}/src/hardware/libhardware.a
-  ${DB_BUILD}/src/ints/libints.a
-  ${DB_BUILD}/src/midi/libmidi.a
-  ${DB_BUILD}/src/misc/libmisc.a
-  ${DB_BUILD}/src/shell/libshell.a
-  ${DB_BUILD}/src/libs/ESFMu/libesfmu.a
-  ${DB_BUILD}/src/libs/YM7128B_emu/libym7128bemu.a
-  ${DB_BUILD}/src/libs/decoders/libdecoders.a
-  ${DB_BUILD}/src/libs/loguru/libloguru.a
-  ${DB_BUILD}/src/libs/manymouse/libmanymouse.a
-  ${DB_BUILD}/src/libs/nuked/libnuked.a
-  ${DB_BUILD}/src/libs/residfp/libresidfp.a
-  ${DB_BUILD}/src/libs/tal-chorus/libtalchorus.a
-  ${DB_BUILD}/src/libs/whereami/libwhereami.a
-  ${DB_BUILD}/src/libs/zmbv/libzmbv.a
-)
-
-if(APPLE)
-  # Mac: ld64 resolves circular deps via multi-pass, no --start-group needed.
-  # Subprojects are system libs on Mac (except mt32emu, which meson built).
-  target_link_libraries(dosiz PRIVATE
-    ${DB_ARCHIVES}
-    ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.dylib
-    SDL2::SDL2
-    ${GLIB_LIBRARIES}
-    dl m
-  )
-
-  find_library(SPEEX speexdsp REQUIRED)
-  find_library(OPUSFILE opusfile REQUIRED)
-  find_library(IIR iir REQUIRED)
-  find_library(PNG png REQUIRED)
-  find_library(SDL2_NET SDL2_net REQUIRED
-    HINTS /opt/homebrew/opt/sdl2_net/lib /usr/local/opt/sdl2_net/lib)
-  find_library(FLUIDSYNTH fluidsynth REQUIRED
-    HINTS /opt/homebrew/opt/fluid-synth/lib /usr/local/opt/fluid-synth/lib)
-  find_library(SLIRP slirp REQUIRED
-    HINTS /opt/homebrew/opt/libslirp/lib /usr/local/opt/libslirp/lib)
-  target_link_libraries(dosiz PRIVATE
-    ${SPEEX} ${OPUSFILE} ${IIR} ${PNG} z
-    ${SDL2_NET} ${FLUIDSYNTH} ${SLIRP}
-    "-framework CoreFoundation"
-    "-framework CoreAudio"
-    "-framework AudioUnit"
-    "-framework AudioToolbox"
-    "-framework CoreMIDI"
-    "-framework IOKit"
-    "-framework OpenGL"
-  )
-  # rpath so the mt32emu dylib is found at runtime next to the executable.
-  set_target_properties(dosiz PROPERTIES
-    BUILD_RPATH "${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1"
-    INSTALL_RPATH "@loader_path/../dosbox-staging/build/subprojects/munt-libmt32emu_2_7_1"
-  )
-elseif(WIN32)
-  # Windows (MSYS2 MinGW-w64): all transitive deps come from pacman packages
-  # rather than the meson subprojects tree (zlib-ng, libpng, iir1, mt32emu
-  # are system packages).  SDL2's .pc file wires the app up as a GUI
-  # subsystem binary via -mwindows; we override with -mconsole so stdout
-  # is visible when invoked from a terminal.
-  pkg_check_modules(DB_DEPS REQUIRED
-    sdl2 SDL2_net fluidsynth slirp speexdsp opusfile
-    mt32emu libpng zlib iir glib-2.0
-  )
-  target_link_libraries(dosiz PRIVATE
-    -Wl,--start-group
-    ${DB_ARCHIVES}
-    -Wl,--end-group
-    ${DB_DEPS_LIBRARIES}
-    opengl32 winmm ws2_32 iphlpapi imm32 version setupapi
-    "-mconsole"
-  )
-  target_include_directories(dosiz PRIVATE ${DB_DEPS_INCLUDE_DIRS})
-  target_link_directories(dosiz PRIVATE ${DB_DEPS_LIBRARY_DIRS})
-else()
-  # Linux: GNU ld + --start-group for circular archive refs.
-  target_link_libraries(dosiz PRIVATE
-    -Wl,--start-group
-    ${DB_ARCHIVES}
-    ${DB_BUILD}/subprojects/libpng-1.6.40/libpng16.a
-    ${DB_BUILD}/subprojects/zlib-ng/libzlib.a
-    ${DB_BUILD}/subprojects/munt-libmt32emu_2_7_1/libmt32emu.so
-    ${DB_BUILD}/subprojects/iir1-1.9.3/iir/libiir.so
-    -Wl,--end-group
-    SDL2::SDL2
-    ${GLIB_LIBRARIES}
-    atomic stdc++fs dl m
-  )
-
-  find_library(SDL2_NET SDL2_net REQUIRED)
-  find_library(SLIRP slirp REQUIRED)
-  find_library(SPEEX speexdsp REQUIRED)
-  find_library(OPUSFILE opusfile REQUIRED)
-  find_library(FLUIDSYNTH fluidsynth REQUIRED)
-  find_library(ASOUND asound REQUIRED)
-  find_library(XI Xi REQUIRED)
-  find_library(GL GL REQUIRED)
-  target_link_libraries(dosiz PRIVATE
-    ${SDL2_NET} ${SLIRP} ${SPEEX} ${OPUSFILE}
-    ${FLUIDSYNTH} ${ASOUND} ${XI} ${GL}
-  )
-endif()
+target_include_directories(dosiz PRIVATE ${EMU88_DIR})
+target_link_libraries(dosiz PRIVATE m)

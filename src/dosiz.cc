@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     std::string a = argv[i];
     if (a == "--help" || a == "-h") { print_usage(argv[0]); return 0; }
     if (a == "--version") {
-      std::printf("dosiz 0.1.0-dev (linked against dosbox-staging %s)\n",
+      std::printf("dosiz 0.1.0-dev (backend: %s)\n",
                   dosiz::bridge::dosbox_version());
       return 0;
     }
