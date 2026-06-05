@@ -217,6 +217,14 @@ bool CPU_LTR(Bitu selector);
 void CPU_JMP(bool use32, Bitu selector, Bitu offset, Bitu oldeip);
 void CPU_IRET(bool use32, Bitu oldeip);
 
+// Load a CS descriptor into the engine's hidden cache (base/limit/D-B/access)
+// without performing a far transfer, for host-staged PM entry where bridge.cc
+// sets CS + EIP manually then re-enters the run loop. Unlike a raw Segs.phys[]
+// poke (which updates only the base), this populates the engine's code-size (D)
+// bit so 32-bit (D=1) callback code is decoded with 32-bit operand/RETF
+// semantics. Mirrors the resulting selector/base into the interface Segs[].
+void CPU_LoadCSCache(Bitu selector);
+
 // ---- Callbacks (DOSBox native-call mechanism over emu88) ------------------
 typedef Bitu (*CallBack_Handler)();
 

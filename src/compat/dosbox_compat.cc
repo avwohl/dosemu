@@ -241,6 +241,32 @@ void CPU_JMP(bool use32, Bitu selector, Bitu offset, Bitu /*oldeip*/) {
     (void)use32;
 }
 
+void CPU_LoadCSCache(Bitu selector) {
+    if (!g_cpu) return;
+    // Populate the engine's CS hidden cache (base/limit/access AND the code-size
+    // D bit) straight from the descriptor, the way a hardware CS load fills the
+    // cache — but WITHOUT the guest CS-load type/privilege checks. The DPMI host
+    // stages this PM entry itself, and clients may register a callback whose
+    // "CS" selector is actually a data alias of their segment (e.g. DS:SI passed
+    // to AX=0303); a strict load_segment(seg_CS,...) would #GP on that. The
+    // earlier raw Segs.phys[] poke set only the base and left the engine's stale
+    // D bit, so a 32-bit (D=1) callback decoded as 16-bit. Here we set the whole
+    // cache including the D bit, so 32-bit code gets 32-bit operand/RETF/address
+    // semantics while a 16-bit (data-alias) callback still works as before.
+    if ((selector & 0xFFFC) == 0) return;
+    const uint16_t index = (uint16_t)(selector >> 3);
+    const bool use_ldt = (selector & 4) != 0;
+    const emu88_uint32 table_base = use_ldt ? g_cpu->ldtr_cache.base : g_cpu->gdtr_base;
+    emu88_uint8 d[8];
+    g_cpu->read_descriptor(table_base, index, d);
+    emu88::SegDescCache cache;
+    emu88::parse_descriptor(d, cache);
+    g_cpu->sregs[emu88::seg_CS] = (uint16_t)selector;
+    g_cpu->seg_cache[emu88::seg_CS] = cache;
+    mirror_seg(emu88::seg_CS);
+    cpu.code.big = g_cpu->code_32();
+}
+
 void CPU_IRET(bool use32, Bitu /*oldeip*/) {
     if (!g_cpu) return;
     // Push the handler's interface writes (it set SS:ESP and laid down the IRET

@@ -2362,12 +2362,17 @@ Bitu do_rm_callback(int idx) {
 
   bool cb_big = false;
   {
+    // Load the callback's CS through the engine's descriptor-load path so the
+    // hidden cache (base/limit/access AND the code-size D bit) is populated as
+    // a hardware CS load would. A raw Segs.phys[] poke updated only the base
+    // and left the engine's stale D bit, so a 32-bit (D=1) callback was decoded
+    // as 16-bit: its mov used [BX] not [EDI] and its RETF popped a 4-byte
+    // (IP:CS) frame instead of 8-byte (EIP:CS), loading a null CS -> #GP.
+    CPU_LoadCSCache(cb.pm_cs);
     Descriptor desc;
     cpu.gdt.GetDescriptor(cb.pm_cs, desc);
-    Segs.val[cs]  = cb.pm_cs;
-    Segs.phys[cs] = desc.GetBase();
-    cb_big        = desc.Big() > 0;
-    cpu.code.big  = cb_big;
+    cb_big       = desc.Big() > 0;
+    cpu.code.big = cb_big;
   }
   CPU_SetSegGeneral(ds, cb.struct_sel);
   CPU_SetSegGeneral(es, cb.struct_sel);
@@ -2619,9 +2624,20 @@ Bitu dosiz_int31() {
       }
       // Access byte: 0x92 for ring-0 client, 0xF2 for ring-3.
       const uint8_t access = 0x92 | (s_client_cpl << 5);
+      // Initialize each new descriptor as a usable present read/write data
+      // segment with base 0 and a 64KB limit (0xFFFF), matching the AX=0002
+      // (segment->descriptor) and static LDT[1..5] template rather than a
+      // limit-0 segment. A limit-0 default is unusable: a client that allocs
+      // a descriptor, points it at a block via AX=0007 (set base) and then
+      // accesses it -- without an explicit AX=0008 Set-Limit -- would #GP on
+      // the very first byte under a CPU that enforces segment limits (emu88
+      // does; DOSBox's CPU silently ignored data-segment limits, so this
+      // latent gap only surfaced after the emu88 migration). Clients that
+      // need a different limit overwrite it via AX=0008 / AX=000C, so a
+      // permissive default never widens a segment a client constrained.
       for (uint16_t i = 0; i < count; ++i) {
         ldt_set(start + i, true);
-        write_ldt_descriptor(start + i, 0, 0, access);
+        write_ldt_descriptor(start + i, 0, 0xFFFF, access);
       }
       reg_ax = (start << 3) | 0x04 | s_client_cpl;   // TI=1, RPL=client
       set_cf(false);
