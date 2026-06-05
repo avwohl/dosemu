@@ -305,6 +305,8 @@ std::vector<TIMER_TickHandler> g_tick_handlers;
 uint32_t g_tick_ctr = 0;
 
 Bitu stop_handler() { return CBRET_STOP; }
+Bitu iret_handler() { return CBRET_NONE; }   // default IVT: just IRET
+uint8_t g_default_iret = 0;
 
 uint8_t peekb(uint32_t lin) {
     if (!g_cpu) return 0;
@@ -514,6 +516,16 @@ void CALLBACK_Init() {
     // CALLBACK_RunRealInt / CALLBACK_RunRealFar.
     g_call_stop = CALLBACK_Allocate();
     CALLBACK_Setup(g_call_stop, &stop_handler, CB_IRET, "stop");
+
+    // Default IVT: point every real-mode vector at an IRET stub so an INT to a
+    // service dosiz doesn't host (e.g. a stray INT to an unhooked vector) is a
+    // clean no-op instead of a jump through a null vector into garbage. The DOS
+    // host overrides the vectors it implements via CALLBACK_HandlerObject /
+    // Set_RealVec after this.
+    g_default_iret = CALLBACK_Allocate();
+    CALLBACK_Setup(g_default_iret, &iret_handler, CB_IRET, "default-iret");
+    for (int v = 0; v < 256; v++)
+        mem_writed(v * 4u, CALLBACK_RealPointer(g_default_iret));
 
     // Per-interrupt RunRealInt stubs: `INT n ; native-call(call_stop)`. Landing
     // here runs the real IVT handler; when it IRETs back the native call fires
