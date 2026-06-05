@@ -3,9 +3,12 @@
 #
 # dosiz runs on the in-tree **emu88** backend (vendored under ../emu88): a
 # from-scratch 386 + FPU + protected mode + PC hardware. dosiz emulates DOS
-# itself (the INT 21h/31h host in bridge.cc); emu88 is purely the CPU + memory
-# + hardware engine. A thin DOSBox->emu88 compatibility shim (src/compat) lets
-# the original bridge.cc DOS host drive emu88 unchanged. No DOSBox, no SDL2/glib.
+# itself (the INT 21h/31h/67h host in bridge.cc); emu88 is purely the CPU +
+# memory engine. A thin DOSBox->emu88 compatibility shim (src/compat) lets the
+# original bridge.cc DOS host drive emu88 unchanged. No DOSBox, no glib.
+#
+# SDL2 is an OPTIONAL dependency: when present, `dosiz --window` opens a VGA
+# window (src/display.cc). Without it the build is dependency-free and headless.
 #
 cmake_minimum_required(VERSION 3.16)
 project(dosiz CXX C)
@@ -38,8 +41,9 @@ add_executable(dosiz
   dosiz.cc
   config.cc
   debug_settings.cpp
-  bridge.cc                   # the DOS host (INT 21h/31h emulation, PSP, loader, DPMI)
+  bridge.cc                   # the DOS host (INT 21h/31h/67h, PSP, loader, DPMI)
   compat/dosbox_compat.cc     # DOSBox CPU/callback API re-implemented over emu88
+  video.cc                    # VGA video state + software renderer (text/mode 13h)
   ${EMU88_SRC}
 )
 
@@ -48,3 +52,24 @@ target_include_directories(dosiz PRIVATE
   ${EMU88_DIR}
 )
 target_link_libraries(dosiz PRIVATE m)
+
+# ---------------------------------------------------------------------------
+# Optional SDL2 window for `--window`. Headless builds need nothing.
+# ---------------------------------------------------------------------------
+find_package(SDL2 CONFIG QUIET)
+if(NOT SDL2_FOUND)
+  find_package(SDL2 QUIET)
+endif()
+if(SDL2_FOUND)
+  message(STATUS "dosiz: SDL2 found -- building --window support")
+  target_sources(dosiz PRIVATE display.cc)
+  target_compile_definitions(dosiz PRIVATE HAVE_SDL2)
+  if(TARGET SDL2::SDL2)
+    target_link_libraries(dosiz PRIVATE SDL2::SDL2)
+  else()
+    target_include_directories(dosiz PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(dosiz PRIVATE ${SDL2_LIBRARIES})
+  endif()
+else()
+  message(STATUS "dosiz: SDL2 not found -- --window will be unavailable")
+endif()

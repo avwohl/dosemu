@@ -22,9 +22,8 @@
 
 #include "bridge.h"
 #include "debug_settings.hpp"
-
-#define SDL_MAIN_HANDLED
-#include <SDL.h>
+#include "video.h"
+#include "display.h"
 
 #include "dosbox.h"
 #include "control.h"
@@ -56,7 +55,9 @@ void RENDER_AddMessages();
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
+#include <thread>
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
@@ -1782,7 +1783,38 @@ Bitu dosiz_int2f() {
 // gives AH=01 the "ready without consuming" semantic the BIOS ABI expects.
 int s_int16_peek = -1;
 
+// Windowed-mode state + helpers (the helpers are defined below near dosiz_int10).
+bool g_windowed = false;             // mirror console output to the 0xB8000 screen
+bool g_display_open = false;         // a real SDL window is open (keys + present)
+bool kbd_ring_pop(uint16_t *key);
+bool kbd_ring_peek(uint16_t *key);
+void dosiz_window_present();
+void screen_putchar(uint8_t c);      // mirror a char to the 0xB8000 text screen
+
 Bitu dosiz_int16() {
+  // With a real window, source keys from the BIOS ring (fed by host key events)
+  // and keep the window live while a program blocks on a key.
+  if (g_display_open) {
+    switch (reg_ah) {
+      case 0x00: case 0x10: {       // wait for a key
+        uint16_t key;
+        while (!kbd_ring_pop(&key)) {
+          dosiz_window_present();
+          if (shutdown_requested) { reg_ax = 0x011B; return CBRET_NONE; }
+          std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+        reg_ax = key;
+        return CBRET_NONE;
+      }
+      case 0x01: case 0x11: {       // check for a key
+        uint16_t key;
+        if (kbd_ring_peek(&key)) { reg_ax = key; CALLBACK_SZF(false); }
+        else { dosiz_window_present(); CALLBACK_SZF(true); }
+        return CBRET_NONE;
+      }
+      case 0x02: reg_al = 0; return CBRET_NONE;   // shift state: none
+    }
+  }
   switch (reg_ah) {
     case 0x00:
     case 0x10: {          // wait for key; AH=scancode, AL=ASCII
@@ -4298,6 +4330,7 @@ Bitu dosiz_int21() {
       if (::read(STDIN_FILENO, &c, 1) <= 0) { reg_al = 0; return CBRET_NONE; }
       std::fputc(c, stdout);
       std::fflush(stdout);
+      if (g_windowed) screen_putchar(c);
       // DOS reports newlines as CR; the host sends LF.
       reg_al = (c == '\n') ? '\r' : c;
       return CBRET_NONE;
@@ -4319,6 +4352,7 @@ Bitu dosiz_int21() {
     case 0x02: {  // Write character in DL to stdout
       std::fputc(reg_dl, stdout);
       std::fflush(stdout);
+      if (g_windowed) screen_putchar(reg_dl);
       return CBRET_NONE;
     }
 
@@ -4328,6 +4362,7 @@ Bitu dosiz_int21() {
       if (reg_dl != 0xFF) {
         std::fputc(reg_dl, stdout);
         std::fflush(stdout);
+        if (g_windowed) screen_putchar(reg_dl);
         reg_al = reg_dl;
         CALLBACK_SZF(false);
         return CBRET_NONE;
@@ -4360,6 +4395,7 @@ Bitu dosiz_int21() {
         const uint8_t stored = (c == '\n') ? '\r' : c;
         mem_writeb(buf + 2 + count, stored);
         std::fputc(c, stdout);
+        if (g_windowed) screen_putchar(stored);
         ++count;
         if (stored == '\r') break;
       }
@@ -4374,6 +4410,7 @@ Bitu dosiz_int21() {
         const uint8_t c = mem_readb(base + off);
         if (c == '$') break;
         std::fputc(c, stdout);
+        if (g_windowed) screen_putchar(c);
       }
       std::fflush(stdout);
       return CBRET_NONE;
@@ -4620,6 +4657,8 @@ Bitu dosiz_int21() {
       std::vector<uint8_t> buf(count);
       const PhysPt src = SegPhys(ds) + off32;
       for (uint32_t i = 0; i < count; ++i) buf[i] = mem_readb(src + i);
+      if (g_windowed && reg_bx == 1)        // mirror stdout to the text screen
+        for (uint32_t i = 0; i < count; ++i) screen_putchar(buf[i]);
       if (dosiz::g_debug.write_trace) {
         std::fprintf(stderr,
             "[write] fd=%d count=%u ds=%04x(b=%08x) off=%08x bytes:",
@@ -7502,6 +7541,180 @@ Bitu dosiz_int67() {
   }
 }
 
+// ===========================================================================
+// Windowed video output (--window): INT 10h video BIOS, the 0xB8000 text
+// mirror, the BIOS keyboard ring, and the SDL present/event tick. All headless
+// when g_windowed is false (no SDL dependency exercised).
+// (g_windowed itself is declared earlier, before dosiz_int16.)
+// ===========================================================================
+uint8_t g_text_attr  = 0x07;         // attribute used for console/teletype output
+std::vector<uint32_t> g_argb;        // scratch RGBA frame buffer
+
+// BIOS keyboard ring buffer: BDA 0x40:0x1A head, 0x1C tail, 0x1E..0x3D = 16
+// 2-byte entries (ASCII low, scancode high). head==tail means empty.
+void kbd_ring_init() { mem_writew(0x41Au, 0x1E); mem_writew(0x41Cu, 0x1E); }
+void kbd_ring_push(uint16_t key) {
+  uint16_t tail = mem_readw(0x41Cu);
+  uint16_t next = tail + 2; if (next >= 0x3E) next = 0x1E;
+  if (next == mem_readw(0x41Au)) return;            // full -> drop
+  mem_writew(0x400u + tail, key);
+  mem_writew(0x41Cu, next);
+}
+bool kbd_ring_peek(uint16_t *key) {
+  uint16_t head = mem_readw(0x41Au);
+  if (head == mem_readw(0x41Cu)) return false;
+  *key = mem_readw(0x400u + head);
+  return true;
+}
+bool kbd_ring_pop(uint16_t *key) {
+  uint16_t head = mem_readw(0x41Au);
+  if (head == mem_readw(0x41Cu)) return false;
+  *key = mem_readw(0x400u + head);
+  head += 2; if (head >= 0x3E) head = 0x1E;
+  mem_writew(0x41Au, head);
+  return true;
+}
+
+// SDL key-press callback: queue the key for INT 16h / INT 21h input.
+void dosiz_video_key(uint8_t ascii, uint8_t scancode) {
+  kbd_ring_push((uint16_t)((scancode << 8) | ascii));
+}
+
+// Write one character to the 0xB8000 text screen at the BDA cursor and advance
+// it (handling CR/LF/BS/TAB + scroll). dosiz IS the DOS, so it owns the cursor;
+// this runs for both windowed and headless so the text buffer stays valid.
+void screen_putchar(uint8_t c) {
+  uint16_t pos = mem_readw(0x450u);
+  int row = (pos >> 8) & 0xFF, col = pos & 0xFF;
+  if (col > 79) col = 79;
+  if (row > 24) row = 24;
+  if      (c == '\r') col = 0;
+  else if (c == '\n') row++;
+  else if (c == '\b') { if (col > 0) col--; }
+  else if (c == '\t') col = (col + 8) & ~7;
+  else if (c == 7)    { /* bell */ }
+  else {
+    const uint32_t cell = 0xB8000u + (uint32_t)(row * 80 + col) * 2u;
+    mem_writeb(cell, c);
+    mem_writeb(cell + 1, g_text_attr);
+    col++;
+  }
+  if (col >= 80) { col = 0; row++; }
+  if (row >= 25) {                                  // scroll up one line
+    for (int i = 0; i < 24 * 80; i++)
+      mem_writew(0xB8000u + (uint32_t)i * 2u, mem_readw(0xB8000u + (uint32_t)(i + 80) * 2u));
+    for (int i = 24 * 80; i < 25 * 80; i++) {
+      mem_writeb(0xB8000u + (uint32_t)i * 2u, ' ');
+      mem_writeb(0xB8000u + (uint32_t)i * 2u + 1, g_text_attr);
+    }
+    row = 24;
+  }
+  mem_writew(0x450u, (uint16_t)((row << 8) | col));
+}
+
+// Render the current frame and present it; pump host events. No-op unless a
+// window is open (and SDL2 was built in).
+void dosiz_window_present() {
+#ifdef HAVE_SDL2
+  if (!g_display_open) return;
+  int w = 0, h = 0;
+  dosiz::video::frame_dims(&w, &h);
+  if ((int)g_argb.size() < w * h) g_argb.assign((size_t)w * h, 0);
+  dosiz::video::render(g_argb.data(), &w, &h);
+  dosiz::display::present(g_argb.data(), w, h);
+  dosiz::display::pump_events();
+  if (dosiz::display::quit_requested()) { shutdown_requested = true; s_exit_code = 0; }
+#endif
+}
+
+// TIMER tick: present at ~60 Hz from the emulation thread.
+void dosiz_video_tick() {
+#ifdef HAVE_SDL2
+  if (!g_display_open) return;
+  static auto last = std::chrono::steady_clock::now();
+  auto now = std::chrono::steady_clock::now();
+  if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() < 16) return;
+  last = now;
+  dosiz_window_present();
+#endif
+}
+
+// INT 10h video BIOS (the subset needed for windowed text + mode 13h).
+Bitu dosiz_int10() {
+  switch (reg_ah) {
+    case 0x00:  // set video mode (AL)
+      dosiz::video::set_mode(reg_al & 0x7F);
+      mem_writeb(0x449u, reg_al & 0x7F);                           // BDA mode
+      mem_writew(0x44Au, dosiz::video::current_mode() == 0x13 ? 40 : 80);
+      mem_writew(0x450u, 0);                                       // cursor 0,0
+      g_text_attr = 0x07;
+      return CBRET_NONE;
+    case 0x01:  // set cursor shape (ignored)
+      return CBRET_NONE;
+    case 0x02:  // set cursor position (DH=row, DL=col)
+      mem_writew(0x450u, (uint16_t)((reg_dh << 8) | reg_dl));
+      return CBRET_NONE;
+    case 0x03:  // get cursor position/shape
+      reg_dx = mem_readw(0x450u);
+      reg_cx = 0x0607;
+      return CBRET_NONE;
+    case 0x05:  // set active display page (page 0 only)
+      return CBRET_NONE;
+    case 0x06:  // scroll up
+    case 0x07:  // scroll down
+      { uint8_t attr = reg_bh;
+        int top = reg_ch, left = reg_cl, bot = reg_dh, right = reg_dl;
+        for (int r = top; r <= bot && r < 25; r++)
+          for (int cc = left; cc <= right && cc < 80; cc++) {
+            const uint32_t cell = 0xB8000u + (uint32_t)(r * 80 + cc) * 2u;
+            mem_writeb(cell, ' '); mem_writeb(cell + 1, attr);
+          } }
+      return CBRET_NONE;
+    case 0x08:  // read char + attr at cursor
+      { uint16_t p = mem_readw(0x450u); int row = (p >> 8) & 0xFF, col = p & 0xFF;
+        const uint32_t cell = 0xB8000u + (uint32_t)(row * 80 + col) * 2u;
+        reg_al = mem_readb(cell); reg_ah = mem_readb(cell + 1); }
+      return CBRET_NONE;
+    case 0x09:  // write char + attr (no cursor advance)
+    case 0x0A:  // write char only (current attr)
+      { uint16_t p = mem_readw(0x450u); int row = (p >> 8) & 0xFF, col = p & 0xFF;
+        uint8_t attr = (reg_ah == 0x09) ? reg_bl : g_text_attr;
+        int count = reg_cx ? reg_cx : 1;
+        for (int i = 0; i < count && col + i < 80; i++) {
+          const uint32_t cell = 0xB8000u + (uint32_t)(row * 80 + col + i) * 2u;
+          mem_writeb(cell, reg_al); mem_writeb(cell + 1, attr);
+        } }
+      return CBRET_NONE;
+    case 0x0E:  // teletype output (AL=char)
+      if (g_windowed) screen_putchar(reg_al);
+      else { std::fputc(reg_al, stdout); std::fflush(stdout); }
+      return CBRET_NONE;
+    case 0x0F:  // get video mode
+      reg_al = (uint8_t)dosiz::video::current_mode();
+      reg_ah = dosiz::video::current_mode() == 0x13 ? 40 : 80;
+      reg_bh = 0;
+      return CBRET_NONE;
+    case 0x10:  // DAC palette
+      if (reg_al == 0x10)               // set single DAC register
+        dosiz::video::set_dac(reg_bx, reg_dh, reg_ch, reg_cl);
+      else if (reg_al == 0x12) {        // set a block: ES:DX = table of RGB triples
+        PhysPt t = SegPhys(es) + reg_dx;
+        for (int i = 0; i < (int)reg_cx; i++)
+          dosiz::video::set_dac(reg_bx + i, mem_readb(t + i * 3),
+                                mem_readb(t + i * 3 + 1), mem_readb(t + i * 3 + 2));
+      }
+      return CBRET_NONE;
+    case 0x1A:  // get/set display combination code
+      if (reg_al == 0x1A) { reg_al = 0x1A; reg_bx = 0x0008; }  // VGA colour
+      return CBRET_NONE;
+    case 0x4F:  // VESA VBE: report unsupported
+      reg_ax = 0x014F;
+      return CBRET_NONE;
+    default:
+      return CBRET_NONE;
+  }
+}
+
 void dosiz_startup() {
   // Override dosbox's INT 21h callback.  The CALLBACK_HandlerObject is a
   // local: its destructor runs when this function returns, which is still
@@ -7751,6 +7964,21 @@ void dosiz_startup() {
   int67_cb.Install(&dosiz_int67, CB_IRET, "dosiz Int 67 (EMS/VCPI)");
   int67_cb.Set_RealVec(0x67);
 
+  // INT 10h -- video BIOS. Initialise the video state + the BDA video fields,
+  // seed a blank mode-3 text screen, and (for --window) the keyboard ring.
+  dosiz::video::init();
+  mem_writeb(0x449u, 0x03);          // BDA: current video mode = 3
+  mem_writew(0x44Au, 80);            // BDA: text columns
+  mem_writew(0x44Cu, 0x1000);        // BDA: regen length
+  mem_writew(0x450u, 0);             // BDA: page-0 cursor at (0,0)
+  mem_writeb(0x484u, 24);            // BDA: rows - 1
+  mem_writew(0x485u, 16);            // BDA: char height
+  kbd_ring_init();
+  CALLBACK_HandlerObject int10_cb;
+  int10_cb.Install(&dosiz_int10, CB_IRET, "dosiz Int 10 (video BIOS)");
+  int10_cb.Set_RealVec(0x10);
+  TIMER_AddTickHandler(&dosiz_video_tick);
+
   // XMS driver entry point -- returned to clients via INT 2F/4310h.
   // Uses CB_RETF (far-call entry, ends with RETF) since XMS clients
   // far-call the driver, not INT it.
@@ -7869,11 +8097,33 @@ int run_program(const dosiz::Config &cfg) {
     CALLBACK_Init();
     shutdown_requested = false;
 
+    // --window: open a host window for VGA output + keyboard input. Requires the
+    // SDL2-backed display module (optional build dep); without it, report and
+    // continue headless. DOSIZ_FRAME_DUMP renders the final screen to a PPM
+    // without needing an actual window (for verification / screenshots).
+    const char *frame_dump = getenv("DOSIZ_FRAME_DUMP");
+    g_windowed = !cfg.headless || frame_dump != nullptr;  // maintain the text screen
+    if (!cfg.headless) {
+#ifdef HAVE_SDL2
+      if (dosiz::display::open("dosiz", &dosiz_video_key)) g_display_open = true;
+      else std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
+#else
+      std::fprintf(stderr, "dosiz: --window needs SDL2 (not built in); running headless.\n");
+#endif
+    }
+
     // dosiz_startup() installs the INT callbacks, builds the PSP, loads the
     // program and enters DOSBOX_RunMachine — the same entry DOSBox reached via
     // control->StartUp(), now called directly.
     dosiz_startup();
 
+    if (frame_dump) {
+      if (dosiz::video::dump_ppm(frame_dump))
+        std::fprintf(stderr, "dosiz: wrote final frame to %s\n", frame_dump);
+    }
+#ifdef HAVE_SDL2
+    if (g_display_open) dosiz::display::close();
+#endif
     dosiz_compat::shutdown_machine();
   } catch (const std::exception &e) {
     std::fprintf(stderr, "dosiz: bring-up threw: %s\n", e.what());

@@ -323,11 +323,15 @@ public:
 EthernetConnection *ETHERNET_OpenConnection(const char *backend);
 
 // ---- Backend bring-up + register sync ------------------------------------
+class emu88_mem;
+class emu88;
 namespace dosiz_compat {
 void init_machine(uint32_t ram_mb);   // create + bind the emu88 machine
 void shutdown_machine();
 void sync_to_emu();     // cpu_regs + Segs + cpu -> emu88
 void sync_from_emu();   // emu88 -> cpu_regs + Segs + cpu
+::emu88_mem *machine_mem();   // the bound emu88 memory (for video/VGA flags)
+::emu88     *machine_cpu();   // the bound emu88 CPU
 } // namespace dosiz_compat
 
 #endif // DOSIZ_DOSBOX_COMPAT_H

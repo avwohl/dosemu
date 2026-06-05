@@ -11,6 +11,7 @@
 #include "dosbox_compat.h"
 #include "../../emu88/emu88.h"
 #include "../../emu88/emu88_mem.h"
+#include "../video.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -51,6 +52,16 @@ struct EmuCpu : public emu88 {
                 sregs[seg_SS], get_reg32(reg_SP));
         }
         return false;
+    }
+
+    // Capture VGA DAC palette port writes (0x3C6-0x3C9) so the video renderer
+    // sees mode-13h programs that set the palette via I/O rather than INT 10h.
+    void port_out(emu88_uint16 port, emu88_uint8 value) override {
+        if (port >= 0x3C6 && port <= 0x3C9) dosiz::video::port_out(port, value);
+    }
+    emu88_uint8 port_in(emu88_uint16 port) override {
+        if (port >= 0x3C6 && port <= 0x3C9) return dosiz::video::port_in(port);
+        return 0xFF;
     }
 };
 emu88_mem *g_mem = nullptr;
