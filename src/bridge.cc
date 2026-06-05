@@ -8483,6 +8483,14 @@ int run_program(const dosiz::Config &cfg) {
       }
     }
 
+    // Close the host window/audio device first. This stops the SDL audio
+    // thread so the DOSIZ_AUDIO_DUMP render below runs the only audio_render()
+    // call in flight (the audio thread and this main-thread render would
+    // otherwise share audio_render's static mix buffer).
+#ifdef HAVE_SDL2
+    if (g_display_open) dosiz::display::close();
+#endif
+
     // DOSIZ_AUDIO_DUMP=path.pcm renders the sound hardware's current state to a
     // raw 16-bit stereo @ 44100 Hz PCM file (no host audio device needed). The
     // program is done, but the OPL/speaker keep whatever register state it left
@@ -8500,9 +8508,6 @@ int run_program(const dosiz::Config &cfg) {
         std::fprintf(stderr, "dosiz: wrote %d audio frames to %s\n", frames, audio_dump);
       }
     }
-#ifdef HAVE_SDL2
-    if (g_display_open) dosiz::display::close();
-#endif
     dosiz::hardware::shutdown();
     dosiz_compat::shutdown_machine();
   } catch (const std::exception &e) {

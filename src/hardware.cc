@@ -14,6 +14,7 @@
 #include "compat/dosbox_compat.h"   // dosiz_compat::machine_mem()
 
 #include <algorithm>
+#include <atomic>
 #include <vector>
 
 namespace dosiz {
@@ -37,9 +38,15 @@ uint8_t  port61      = 0;
 // IRQs — they default to all-masked and the guest unmasks what it services.
 uint8_t           pic_imr_master = 0xFF;   // port 0x21
 uint8_t           pic_imr_slave  = 0xFF;   // port 0xA1
-volatile unsigned hw_irq_pending = 0;      // bit i set => IRQ i awaiting delivery
+// Set from the SDL audio thread (SB raise_irq) and cleared from the CPU thread
+// (take_pending_irq_vector). Atomic so the set|clear read-modify-writes can't
+// race and drop an IRQ when a host audio device is driving the SB.
+std::atomic<unsigned> hw_irq_pending{0};   // bit i set => IRQ i awaiting delivery
 
-bool g_host_audio = false;       // a host audio device is pulling audio_render()
+// A host audio device is pulling audio_render(). Written once in run_program
+// before the run loop and read only from audio_tick() — both on the CPU/main
+// thread (audio_tick is a fire_ticks handler), so this needs no synchronisation.
+bool g_host_audio = false;
 
 // Joystick / game port. The emulated game port exists by default (centred,
 // no buttons) so INT 15h AH=84h succeeds; SDL overrides with a real stick.
@@ -78,12 +85,15 @@ void init() {
     emu88_mem *m = dosiz_compat::machine_mem();
     return m ? m->fetch_mem(a) : 0;
   };
-  g_sb->raise_irq = [](int irq) { hw_irq_pending |= (1u << (irq & 15)); };
+  g_sb->raise_irq = [](int irq) {
+    hw_irq_pending.fetch_or(1u << (irq & 15), std::memory_order_release);
+  };
   g_opl->reset();
   g_spk->reset();
   g_sb->reset();
   pit2_reload = 0; pit2_access = 3; pit2_phase = 0; port61 = 0;
-  pic_imr_master = 0xFF; pic_imr_slave = 0xFF; hw_irq_pending = 0;
+  pic_imr_master = 0xFF; pic_imr_slave = 0xFF;
+  hw_irq_pending.store(0, std::memory_order_relaxed);
 }
 
 void shutdown() {
@@ -176,10 +186,11 @@ unsigned joystick_buttons()         { return joy_btn; }
 int      joystick_axis_count(int a) { return (a >= 0 && a < 4) ? axis_count(a) : 0; }
 
 int take_pending_irq_vector() {
-  if (!hw_irq_pending) return -1;
+  unsigned pending = hw_irq_pending.load(std::memory_order_acquire);
+  if (!pending) return -1;
   for (int irq = 0; irq < 16; irq++) {
-    if ((hw_irq_pending & (1u << irq)) && !irq_masked(irq)) {
-      hw_irq_pending &= ~(1u << irq);
+    if ((pending & (1u << irq)) && !irq_masked(irq)) {
+      hw_irq_pending.fetch_and(~(1u << irq), std::memory_order_acq_rel);
       return irq_vector(irq);
     }
   }
