@@ -12,6 +12,7 @@
 #include "../../emu88/emu88.h"
 #include "../../emu88/emu88_mem.h"
 #include "../video.h"
+#include "../hardware.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -54,13 +55,18 @@ struct EmuCpu : public emu88 {
         return false;
     }
 
-    // Capture VGA DAC palette port writes (0x3C6-0x3C9) so the video renderer
-    // sees mode-13h programs that set the palette via I/O rather than INT 10h.
+    // Route guest I/O. The VGA DAC palette ports (0x3C6-0x3C9) feed the video
+    // renderer so mode-13h/VESA programs that set the palette via I/O (not INT
+    // 10h) are seen; everything else (AdLib 0x388/9, PIT ch2 0x42/3, speaker
+    // gate 0x61, Sound Blaster) goes to the PC sound hardware layer.
     void port_out(emu88_uint16 port, emu88_uint8 value) override {
-        if (port >= 0x3C6 && port <= 0x3C9) dosiz::video::port_out(port, value);
+        if (port >= 0x3C6 && port <= 0x3C9) { dosiz::video::port_out(port, value); return; }
+        dosiz::hardware::port_out(port, value);
     }
     emu88_uint8 port_in(emu88_uint16 port) override {
         if (port >= 0x3C6 && port <= 0x3C9) return dosiz::video::port_in(port);
+        uint8_t v;
+        if (dosiz::hardware::port_in(port, &v)) return v;
         return 0xFF;
     }
 };

@@ -24,6 +24,7 @@
 #include "debug_settings.hpp"
 #include "video.h"
 #include "display.h"
+#include "hardware.h"
 
 #include "dosbox.h"
 #include "control.h"
@@ -8392,6 +8393,11 @@ int run_program(const dosiz::Config &cfg) {
     CALLBACK_Init();
     shutdown_requested = false;
 
+    // PC sound hardware (AdLib/OPL + PC speaker; Sound Blaster later). Always
+    // created so guest port writes have somewhere to land; it only makes noise
+    // when a host audio device pulls from audio_render() below.
+    dosiz::hardware::init();
+
     // --window: open a host window for VGA output + keyboard input. Requires the
     // SDL2-backed display module (optional build dep); without it, report and
     // continue headless. DOSIZ_FRAME_DUMP renders the final screen to a PPM
@@ -8400,8 +8406,13 @@ int run_program(const dosiz::Config &cfg) {
     g_windowed = !cfg.headless || frame_dump != nullptr;  // maintain the text screen
     if (!cfg.headless) {
 #ifdef HAVE_SDL2
-      if (dosiz::display::open("dosiz", &dosiz_video_key, &dosiz_mouse_event)) g_display_open = true;
-      else std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
+      if (dosiz::display::open("dosiz", &dosiz_video_key, &dosiz_mouse_event)) {
+        g_display_open = true;
+        // Pull rendered PCM from the sound hardware on the SDL audio thread.
+        dosiz::display::open_audio(&dosiz::hardware::audio_render);
+      } else {
+        std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
+      }
 #else
       std::fprintf(stderr, "dosiz: --window needs SDL2 (not built in); running headless.\n");
 #endif
@@ -8430,9 +8441,28 @@ int run_program(const dosiz::Config &cfg) {
         std::fprintf(stderr, "dosiz: wrote final frame to %s\n", frame_dump);
       }
     }
+
+    // DOSIZ_AUDIO_DUMP=path.pcm renders the sound hardware's current state to a
+    // raw 16-bit stereo @ 44100 Hz PCM file (no host audio device needed). The
+    // program is done, but the OPL/speaker keep whatever register state it left
+    // — so an AdLib note keyed on (and not keyed off) before exit renders as a
+    // non-silent tone. Verification path for the audio wiring.
+    const char *audio_dump = getenv("DOSIZ_AUDIO_DUMP");
+    if (audio_dump) {
+      const int rate = 44100, frames = rate / 4;   // 0.25 s
+      std::vector<int16_t> pcm((size_t)frames * 2, 0);
+      dosiz::hardware::audio_render(pcm.data(), frames, rate);
+      FILE *f = std::fopen(audio_dump, "wb");
+      if (f) {
+        std::fwrite(pcm.data(), sizeof(int16_t), pcm.size(), f);
+        std::fclose(f);
+        std::fprintf(stderr, "dosiz: wrote %d audio frames to %s\n", frames, audio_dump);
+      }
+    }
 #ifdef HAVE_SDL2
     if (g_display_open) dosiz::display::close();
 #endif
+    dosiz::hardware::shutdown();
     dosiz_compat::shutdown_machine();
   } catch (const std::exception &e) {
     std::fprintf(stderr, "dosiz: bring-up threw: %s\n", e.what());

@@ -68,6 +68,33 @@ run_one EMS_PROBE  "ems-ok"     0 ""
 run_one VCPI_PROBE "vcpi-ok"    0 ""
 run_one HMA_PROBE  "hma-ok"     0 ""
 
+# PC sound hardware (AdLib/OPL + PC speaker).  Each fixture programs a device
+# via guest OUT, keys a tone on, prints a marker, and exits with the tone still
+# sounding.  DOSIZ_AUDIO_DUMP renders the device's state to a raw PCM file; we
+# verify the marker AND that the PCM is non-silent (has non-zero bytes).  Gate
+# for the guest-OUT -> EmuCpu::port_out -> hardware -> audio_render wiring.
+run_audio() {
+    local name="$1" marker="$2"
+    local exe=$(ls tests/${name}.* 2>/dev/null | grep -iv '\.asm$' | head -1)
+    local pcm; pcm=$(mktemp)
+    local out; out=$(DOSIZ_AUDIO_DUMP="$pcm" ./build/dosiz "$exe" 2>/dev/null | tr -d '\r')
+    # non-silent iff at least one non-zero byte survives stripping NULs. LC_ALL=C
+    # makes tr treat the PCM as raw bytes (macOS tr errors on non-UTF-8 input).
+    local nz=0
+    [[ -s "$pcm" ]] && nz=$(LC_ALL=C tr -d '\000' < "$pcm" | wc -c | tr -d ' ')
+    rm -f "$pcm"
+    if echo "$out" | grep -qF "$marker" && [[ "$nz" -gt 0 ]]; then
+        printf "  %-12s PASS\n" "$name"
+        pass=$((pass + 1))
+    else
+        printf "  %-12s FAIL (marker=%s non-zero-bytes=%s)\n" \
+            "$name" "$(echo "$out" | grep -F "$marker" || echo missing)" "$nz"
+        fail=$((fail + 1))
+    fi
+}
+run_audio ADLIB   "adlib-note-on"
+run_audio SPEAKER "speaker-on"
+
 run_one DJ_WRITE  "dj-write=ok"  0 ""
 run_one DJ_PRINTF "dj-printf=ok" 7 ""
 run_one DJ_ARGV   "dj-argv=ok"   0 ""   hello world

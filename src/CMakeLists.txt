@@ -35,6 +35,7 @@ set(EMU88_SRC
   ${EMU88_DIR}/emu88_pmode.cc
   ${EMU88_DIR}/emu88_fpu.cc
   ${EMU88_DIR}/emu88_mem.cc
+  ${EMU88_DIR}/opl.cc            # AdLib/OPL2/OPL3 FM synthesizer (PC sound)
 )
 
 add_executable(dosiz
@@ -44,6 +45,7 @@ add_executable(dosiz
   bridge.cc                   # the DOS host (INT 21h/31h/67h, PSP, loader, DPMI)
   compat/dosbox_compat.cc     # DOSBox CPU/callback API re-implemented over emu88
   video.cc                    # VGA video state + software renderer (text/mode 13h)
+  hardware.cc                 # PC sound hardware: AdLib/OPL + PC speaker (+ SB)
   ${EMU88_SRC}
 )
 
