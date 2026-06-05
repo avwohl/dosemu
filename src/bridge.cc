@@ -3933,6 +3933,16 @@ Bitu dosiz_int80() {
 // through with CF cleared and registers untouched, matching the
 // "function not supported but didn't fault" shape DOS clients tend
 // to expect from a missing BIOS extension.
+// Advance the BIOS tick counter (0x40:0x6C). Registered as a TIMER tick on the
+// emu88 backend, which has no PIT to do it. Rolls over at midnight (0x1800B0
+// ticks/day) and sets the 24-hour-rollover flag at 0x40:0x70, matching the
+// real BIOS so INT 1Ah AH=00 reports the flag once per wrap.
+void dosiz_bios_timer_tick(void) {
+  uint32_t t = mem_readd(0x46Cu) + 1;
+  if (t >= 0x1800B0u) { t = 0; mem_writeb(0x470u, 1); }
+  mem_writed(0x46Cu, t);
+}
+
 Bitu dosiz_int1a() {
   const uint8_t ah = (reg_eax >> 8) & 0xFF;
   if (ah == 0x00) {
@@ -7087,6 +7097,13 @@ void dosiz_startup() {
     const RealPt rp = int1a_cb32.Get_RealPointer();
     s_int1a_cb32_off = static_cast<uint16_t>(rp & 0xFFFF);
   }
+  // Real-mode INT 1Ah hook (16-bit IRET frame). dosbox-staging's BIOS owned
+  // this vector before; on the emu88 backend the IVT entry was the default
+  // IRET no-op, so a real-mode (or AX=0300-simulated) INT 1Ah AH=00 returned
+  // no tick count. Route it to the same dosiz_int1a implementation.
+  CALLBACK_HandlerObject int1a_cb;
+  int1a_cb.Install(&dosiz_int1a, CB_IRET, "dosiz Int 1A (RM BIOS time)");
+  int1a_cb.Set_RealVec(0x1A);
 
   // INT 0x60 — native virtual Crynwr packet driver. See dosiz_int60()
   // and the s_int60_* statics above for the design. The Crynwr spec
@@ -7259,6 +7276,13 @@ void dosiz_startup() {
   // exec paths below).  No-op unless DOSIZ_SCREENSHOT_SECS is set.
   extern void dosiz_screenshot_tick(void);
   TIMER_AddTickHandler(&dosiz_screenshot_tick);
+
+  // BIOS tick counter at 0x40:0x6C. dosbox-staging's PIT advanced it ~18.2x/s;
+  // the emu88 backend has no PIT, so seed it nonzero (mid-day, ~12:00:00 worth
+  // of ticks) and advance it from the periodic tick handler so INT 1Ah AH=00
+  // and any guest that polls the BIOS clock sees a moving, plausible count.
+  mem_writed(0x46Cu, 0x000F0000u);
+  TIMER_AddTickHandler(&dosiz_bios_timer_tick);
 
   build_psp(s_program, s_args);
 
