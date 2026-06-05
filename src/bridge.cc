@@ -7581,6 +7581,89 @@ void dosiz_video_key(uint8_t ascii, uint8_t scancode) {
   kbd_ring_push((uint16_t)((scancode << 8) | ascii));
 }
 
+// ---- Mouse (INT 33h), fed by host pointer events --------------------------
+struct MouseState {
+  int  host_x = 0, host_y = 0, host_buttons = 0;   // latest host event (guest pixels)
+  int  x = 0, y = 0, buttons = 0;                  // reported virtual position
+  bool visible = false;
+  int  min_x = 0, max_x = 639, min_y = 0, max_y = 199;
+  int  press_count[3] = {}, release_count[3] = {};
+  int  press_x[3] = {}, press_y[3] = {}, release_x[3] = {}, release_y[3] = {};
+} g_mouse;
+
+// Map a host pointer position (in the rendered frame's pixels) to the INT 33h
+// virtual coordinate range, the way emu88's mouse driver does.
+void mouse_to_virtual(int hx, int hy, int *vx, int *vy) {
+  int w, h;
+  dosiz::video::frame_dims(&w, &h);
+  int x = (w > 1) ? g_mouse.min_x + (int)((long long)hx * (g_mouse.max_x - g_mouse.min_x) / (w - 1)) : g_mouse.min_x;
+  int y = (h > 1) ? g_mouse.min_y + (int)((long long)hy * (g_mouse.max_y - g_mouse.min_y) / (h - 1)) : g_mouse.min_y;
+  if (x < g_mouse.min_x) x = g_mouse.min_x;  if (x > g_mouse.max_x) x = g_mouse.max_x;
+  if (y < g_mouse.min_y) y = g_mouse.min_y;  if (y > g_mouse.max_y) y = g_mouse.max_y;
+  *vx = x; *vy = y;
+}
+
+// Host pointer-event callback (from the display layer). Tracks button edges so
+// the INT 33h press/release counters are accurate between polls.
+void dosiz_mouse_event(int hx, int hy, int buttons) {
+  g_mouse.host_x = hx; g_mouse.host_y = hy;
+  int vx, vy; mouse_to_virtual(hx, hy, &vx, &vy);
+  for (int b = 0; b < 3; b++) {
+    int m = 1 << b;
+    if ((buttons & m) && !(g_mouse.host_buttons & m)) {
+      g_mouse.press_count[b]++;   g_mouse.press_x[b] = vx;   g_mouse.press_y[b] = vy;
+    }
+    if (!(buttons & m) && (g_mouse.host_buttons & m)) {
+      g_mouse.release_count[b]++; g_mouse.release_x[b] = vx; g_mouse.release_y[b] = vy;
+    }
+  }
+  g_mouse.host_buttons = buttons;
+}
+
+Bitu dosiz_int33() {
+  int vx, vy; mouse_to_virtual(g_mouse.host_x, g_mouse.host_y, &vx, &vy);
+  g_mouse.x = vx; g_mouse.y = vy; g_mouse.buttons = g_mouse.host_buttons;
+  switch (reg_ax) {
+    case 0x0000:  // reset / detect (present only with a window / frame-dump)
+      if (!g_windowed) { reg_ax = 0x0000; reg_bx = 0; return CBRET_NONE; }
+      reg_ax = 0xFFFF; reg_bx = 3;                 // installed, 3 buttons
+      g_mouse.visible = false;
+      g_mouse.min_x = 0; g_mouse.max_x = 639; g_mouse.min_y = 0; g_mouse.max_y = 199;
+      for (int b = 0; b < 3; b++) { g_mouse.press_count[b] = 0; g_mouse.release_count[b] = 0; }
+      return CBRET_NONE;
+    case 0x0001: g_mouse.visible = true;  return CBRET_NONE;   // show cursor
+    case 0x0002: g_mouse.visible = false; return CBRET_NONE;   // hide cursor
+    case 0x0003:  // get position + buttons
+      reg_bx = g_mouse.buttons; reg_cx = g_mouse.x; reg_dx = g_mouse.y;
+      return CBRET_NONE;
+    case 0x0004: {  // set position (CX,DX virtual) -> back-map to host pixels
+      int w, h; dosiz::video::frame_dims(&w, &h);
+      int rx = g_mouse.max_x - g_mouse.min_x, ry = g_mouse.max_y - g_mouse.min_y;
+      g_mouse.host_x = rx > 0 ? (int)((long long)((int)reg_cx - g_mouse.min_x) * (w - 1) / rx) : 0;
+      g_mouse.host_y = ry > 0 ? (int)((long long)((int)reg_dx - g_mouse.min_y) * (h - 1) / ry) : 0;
+      return CBRET_NONE;
+    }
+    case 0x0005: {  // button press info (BX=button)
+      int btn = reg_bx & 3; if (btn > 2) btn = 0;
+      reg_ax = g_mouse.buttons; reg_bx = g_mouse.press_count[btn];
+      reg_cx = g_mouse.press_x[btn]; reg_dx = g_mouse.press_y[btn];
+      g_mouse.press_count[btn] = 0;
+      return CBRET_NONE;
+    }
+    case 0x0006: {  // button release info (BX=button)
+      int btn = reg_bx & 3; if (btn > 2) btn = 0;
+      reg_ax = g_mouse.buttons; reg_bx = g_mouse.release_count[btn];
+      reg_cx = g_mouse.release_x[btn]; reg_dx = g_mouse.release_y[btn];
+      g_mouse.release_count[btn] = 0;
+      return CBRET_NONE;
+    }
+    case 0x0007: g_mouse.min_x = (int16_t)reg_cx; g_mouse.max_x = (int16_t)reg_dx; return CBRET_NONE;
+    case 0x0008: g_mouse.min_y = (int16_t)reg_cx; g_mouse.max_y = (int16_t)reg_dx; return CBRET_NONE;
+    case 0x000B: reg_cx = 0; reg_dx = 0; return CBRET_NONE;   // motion counters (mickeys)
+    default:     return CBRET_NONE;                            // 0C/0F/10/1A... -> accepted no-op
+  }
+}
+
 // Write one character to the 0xB8000 text screen at the BDA cursor and advance
 // it (handling CR/LF/BS/TAB + scroll). dosiz IS the DOS, so it owns the cursor;
 // this runs for both windowed and headless so the text buffer stays valid.
@@ -7625,6 +7708,29 @@ void dosiz_window_pump() {
 #endif
 }
 
+// A small arrow cursor: 'X' = black outline, 'o' = white fill, ' ' = transparent.
+static const char *kCursorArrow[16] = {
+  "X          ", "XX         ", "XoX        ", "XooX       ",
+  "XoooX      ", "XooooX     ", "XoooooX    ", "XooooooX   ",
+  "XoooooooX  ", "XoooooXXXXX", "XooXooX    ", "XoX XooX   ",
+  "XX  XooX   ", "X    XooX  ", "     XooX  ", "      XX   ",
+};
+
+void dosiz_draw_cursor(uint32_t *buf, int w, int h) {
+  if (!g_mouse.visible) return;
+  const int cx = g_mouse.host_x, cy = g_mouse.host_y;
+  for (int r = 0; r < 16; r++) {
+    const char *row = kCursorArrow[r];
+    const int py = cy + r;
+    if (py < 0 || py >= h) continue;
+    for (int c = 0; row[c]; c++) {
+      const int px = cx + c;
+      if (px < 0 || px >= w || row[c] == ' ') continue;
+      buf[py * w + px] = (row[c] == 'X') ? 0xFF000000u : 0xFFFFFFFFu;
+    }
+  }
+}
+
 void dosiz_window_present() {
 #ifdef HAVE_SDL2
   if (!g_display_open) return;
@@ -7632,6 +7738,7 @@ void dosiz_window_present() {
   dosiz::video::frame_dims(&w, &h);
   if ((int)g_argb.size() < w * h) g_argb.assign((size_t)w * h, 0);
   dosiz::video::render(g_argb.data(), &w, &h);
+  dosiz_draw_cursor(g_argb.data(), w, h);
   dosiz::display::present(g_argb.data(), w, h);
   dosiz::display::pump_events();
   if (dosiz::display::quit_requested()) { shutdown_requested = true; s_exit_code = 0; }
@@ -8162,6 +8269,11 @@ void dosiz_startup() {
   int10_cb.Set_RealVec(0x10);
   TIMER_AddTickHandler(&dosiz_video_tick);
 
+  // INT 33h -- mouse driver (fed by host pointer events in windowed mode).
+  CALLBACK_HandlerObject int33_cb;
+  int33_cb.Install(&dosiz_int33, CB_IRET, "dosiz Int 33 (mouse)");
+  int33_cb.Set_RealVec(0x33);
+
   // XMS driver entry point -- returned to clients via INT 2F/4310h.
   // Uses CB_RETF (far-call entry, ends with RETF) since XMS clients
   // far-call the driver, not INT it.
@@ -8288,7 +8400,7 @@ int run_program(const dosiz::Config &cfg) {
     g_windowed = !cfg.headless || frame_dump != nullptr;  // maintain the text screen
     if (!cfg.headless) {
 #ifdef HAVE_SDL2
-      if (dosiz::display::open("dosiz", &dosiz_video_key)) g_display_open = true;
+      if (dosiz::display::open("dosiz", &dosiz_video_key, &dosiz_mouse_event)) g_display_open = true;
       else std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
 #else
       std::fprintf(stderr, "dosiz: --window needs SDL2 (not built in); running headless.\n");
@@ -8301,8 +8413,22 @@ int run_program(const dosiz::Config &cfg) {
     dosiz_startup();
 
     if (frame_dump) {
-      if (dosiz::video::dump_ppm(frame_dump))
+      int w = 0, h = 0;
+      dosiz::video::frame_dims(&w, &h);
+      g_argb.assign((size_t)w * h, 0);
+      dosiz::video::render(g_argb.data(), &w, &h);
+      dosiz_draw_cursor(g_argb.data(), w, h);
+      FILE *f = std::fopen(frame_dump, "wb");
+      if (f) {
+        std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+        for (int i = 0; i < w * h; i++) {
+          uint32_t px = g_argb[i];
+          uint8_t rgb[3] = { (uint8_t)(px >> 16), (uint8_t)(px >> 8), (uint8_t)px };
+          std::fwrite(rgb, 1, 3, f);
+        }
+        std::fclose(f);
         std::fprintf(stderr, "dosiz: wrote final frame to %s\n", frame_dump);
+      }
     }
 #ifdef HAVE_SDL2
     if (g_display_open) dosiz::display::close();

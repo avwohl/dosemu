@@ -8,6 +8,7 @@
 
 #include <SDL.h>
 #include <cstdio>
+#include <cstring>
 
 namespace dosiz {
 namespace display {
@@ -18,6 +19,9 @@ SDL_Renderer *g_renderer = nullptr;
 SDL_Texture  *g_texture  = nullptr;
 int           g_tex_w = 0, g_tex_h = 0;
 KeyCallback   g_on_key = nullptr;
+MouseCallback g_on_mouse = nullptr;
+AudioCallback g_on_audio = nullptr;
+SDL_AudioDeviceID g_audio = 0;
 bool          g_quit = false;
 
 // SDL scancode -> IBM PC set-1 scancode (the value INT 16h reports in AH).
@@ -113,7 +117,7 @@ void ensure_texture(int w, int h) {
 
 } // namespace
 
-bool open(const char *title, KeyCallback on_key) {
+bool open(const char *title, KeyCallback on_key, MouseCallback on_mouse) {
   if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::fprintf(stderr, "dosiz: SDL_Init failed: %s\n", SDL_GetError());
     return false;
@@ -136,11 +140,44 @@ bool open(const char *title, KeyCallback on_key) {
     return false;
   }
   g_on_key = on_key;
+  g_on_mouse = on_mouse;
   g_quit = false;
   return true;
 }
 
+namespace {
+void audio_trampoline(void *, Uint8 *stream, int len) {
+  int16_t *out = reinterpret_cast<int16_t *>(stream);
+  const int frames = len / (int)(2 * sizeof(int16_t));   // stereo int16
+  if (g_on_audio) g_on_audio(out, frames, 44100);
+  else std::memset(stream, 0, len);
+}
+} // namespace
+
+bool open_audio(AudioCallback cb) {
+  if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) {
+    std::fprintf(stderr, "dosiz: audio init failed: %s\n", SDL_GetError());
+    return false;
+  }
+  SDL_AudioSpec want = {}, have = {};
+  want.freq = 44100;
+  want.format = AUDIO_S16SYS;
+  want.channels = 2;
+  want.samples = 1024;
+  want.callback = &audio_trampoline;
+  g_on_audio = cb;
+  g_audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+  if (!g_audio) {
+    std::fprintf(stderr, "dosiz: audio unavailable: %s\n", SDL_GetError());
+    g_on_audio = nullptr;
+    return false;
+  }
+  SDL_PauseAudioDevice(g_audio, 0);   // start playback
+  return true;
+}
+
 void close() {
+  if (g_audio)    { SDL_CloseAudioDevice(g_audio); g_audio = 0; g_on_audio = nullptr; }
   if (g_texture)  { SDL_DestroyTexture(g_texture);   g_texture = nullptr; }
   if (g_renderer) { SDL_DestroyRenderer(g_renderer); g_renderer = nullptr; }
   if (g_window)   { SDL_DestroyWindow(g_window);     g_window = nullptr; }
@@ -172,6 +209,17 @@ void pump_events() {
       if (ctrl && e.key.keysym.sym >= SDLK_a && e.key.keysym.sym <= SDLK_z)
         ch = (uint8_t)(e.key.keysym.sym - SDLK_a + 1);  // Ctrl-A..Z = 0x01..0x1A
       if (sc || ch) g_on_key(ch, sc);
+    }
+    else if ((e.type == SDL_MOUSEMOTION || e.type == SDL_MOUSEBUTTONDOWN ||
+              e.type == SDL_MOUSEBUTTONUP) && g_on_mouse) {
+      int mx, my;
+      const uint32_t st = SDL_GetMouseState(&mx, &my);
+      const int buttons = ((st & SDL_BUTTON_LMASK) ? 1 : 0)
+                        | ((st & SDL_BUTTON_RMASK) ? 2 : 0)
+                        | ((st & SDL_BUTTON_MMASK) ? 4 : 0);
+      float lx = (float)mx, ly = (float)my;
+      SDL_RenderWindowToLogical(g_renderer, mx, my, &lx, &ly);  // window -> guest pixels
+      g_on_mouse((int)lx, (int)ly, buttons);
     }
   }
 }
