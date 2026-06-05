@@ -561,6 +561,15 @@ void DOSBOX_RunMachine() {
         if (g_cpu->halted)      break;
         cpu_step();
         if (g_cb_stop) { g_cb_stop = false; break; }
+        // Hardware IRQ delivery (Sound Blaster block-end, etc.). The PIC model
+        // in the hardware layer holds raised-but-undelivered IRQs (set from the
+        // audio thread); drain the highest-priority unmasked one when IF=1.
+        // No-op until a device raises an IRQ — request_int is otherwise unused
+        // here, so int_pending stays clear and existing programs are unaffected.
+        if (g_run_depth == 1 && (g_cpu->get_eflags() & MASK_IF)) {
+            int vec = dosiz::hardware::take_pending_irq_vector();
+            if (vec >= 0) { g_cpu->request_int((emu88_uint8)vec); g_cpu->check_interrupts(); }
+        }
         if (g_run_depth == 1 && ((++g_tick_ctr) & 0x3FFF) == 0) fire_ticks();
     }
     g_run_depth--;

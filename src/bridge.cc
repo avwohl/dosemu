@@ -8393,10 +8393,12 @@ int run_program(const dosiz::Config &cfg) {
     CALLBACK_Init();
     shutdown_requested = false;
 
-    // PC sound hardware (AdLib/OPL + PC speaker; Sound Blaster later). Always
-    // created so guest port writes have somewhere to land; it only makes noise
-    // when a host audio device pulls from audio_render() below.
+    // PC sound hardware (AdLib/OPL + PC speaker + Sound Blaster). Always created
+    // so guest port writes have somewhere to land; it only makes noise when a
+    // host audio device pulls from audio_render() below. The ~60 Hz tick
+    // advances an active SB DMA transfer when running headless (no audio pull).
     dosiz::hardware::init();
+    TIMER_AddTickHandler(&dosiz::hardware::audio_tick);
 
     // --window: open a host window for VGA output + keyboard input. Requires the
     // SDL2-backed display module (optional build dep); without it, report and
@@ -8408,8 +8410,11 @@ int run_program(const dosiz::Config &cfg) {
 #ifdef HAVE_SDL2
       if (dosiz::display::open("dosiz", &dosiz_video_key, &dosiz_mouse_event)) {
         g_display_open = true;
-        // Pull rendered PCM from the sound hardware on the SDL audio thread.
-        dosiz::display::open_audio(&dosiz::hardware::audio_render);
+        // Pull rendered PCM from the sound hardware on the SDL audio thread. When
+        // this device drives audio, the run-loop tick must NOT also advance the
+        // SB (that would double-consume the DMA), so flag the host audio pull.
+        if (dosiz::display::open_audio(&dosiz::hardware::audio_render))
+          dosiz::hardware::set_host_audio(true);
       } else {
         std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
       }

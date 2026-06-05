@@ -36,6 +36,7 @@ set(EMU88_SRC
   ${EMU88_DIR}/emu88_fpu.cc
   ${EMU88_DIR}/emu88_mem.cc
   ${EMU88_DIR}/opl.cc            # AdLib/OPL2/OPL3 FM synthesizer (PC sound)
+  ${EMU88_DIR}/sound_blaster.cc  # Sound Blaster DSP + 8237 DMA digital audio
 )
 
 add_executable(dosiz

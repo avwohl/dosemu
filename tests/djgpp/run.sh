@@ -94,6 +94,7 @@ run_audio() {
 }
 run_audio ADLIB   "adlib-note-on"
 run_audio SPEAKER "speaker-on"
+run_audio SBDMA   "sb-irq=ok"      # SB DSP+DMA playback, block-end IRQ via PIC
 
 run_one DJ_WRITE  "dj-write=ok"  0 ""
 run_one DJ_PRINTF "dj-printf=ok" 7 ""
