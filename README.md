@@ -104,14 +104,16 @@ files beyond the optional `.cfg`.
 
 ## Building
 
-dosiz has **no external dependencies** beyond a C++20 compiler, CMake, and
-libm — no SDL2, glib, meson, or DOSBox. The emu88 backend is vendored in-tree.
+dosiz has **no required dependencies** beyond a C++20 compiler, CMake, and
+libm — no glib, meson, or DOSBox. The emu88 backend is vendored in-tree. SDL2
+is the one **optional** dependency: when present at build time it enables the
+`--window` VGA display; without it the build is dependency-free and headless.
 
-	# Debian/Ubuntu
-	sudo apt install build-essential cmake
+	# Debian/Ubuntu  (libsdl2-dev is optional, for --window)
+	sudo apt install build-essential cmake libsdl2-dev
 
-	# macOS
-	brew install cmake
+	# macOS  (sdl2 is optional, for --window)
+	brew install cmake sdl2
 
 	# build + smoke-test (all platforms)
 	make                         # wrapper: cmake -S src -B build && cmake --build build
@@ -129,6 +131,7 @@ build. dosiz makes the DOS program see host files directly, so you can:
 - Run a DOS C compiler as if it were a native CLI tool
 - Use long filenames on the host while presenting 8.3 names to DOS
 - Run text-only programs with no window at all (the default)
+- Or open a VGA window with `--window` (text + 320x200 graphics)
 - Redirect DOS printer / AUX I/O to host files
 
 Because the syscall layer is native C++ and emu88 is self-contained, dosiz is
@@ -165,13 +168,17 @@ Options:
 
 	--help              Show usage
 	--version           Print version
+	--window            Open a VGA window (needs SDL2 at build time)
 	--memsize=N         DOS memory in MB (default: 16)
 	--verbose, -v       Trace DOS syscalls
 
-`--window`, `--machine=NAME`, and `--cpu=NAME` are accepted for
-compatibility but are currently inert: dosiz runs headless/text-only on the
-emu88 backend. The optional PC hardware (SVGA window, Sound Blaster/AdLib,
-mouse, joystick) lives in the shared emu88 tree but is not yet attached here.
+`--window` opens a window and renders VGA text mode + 320x200x256 graphics
+(mode 13h) via an INT 10h video BIOS, with keyboard input; it needs SDL2 at
+build time (otherwise it prints a notice and runs headless). `DOSIZ_FRAME_DUMP=
+out.ppm` renders the final screen to a PPM without needing a window.
+`--machine=NAME` and `--cpu=NAME` are accepted but currently inert. Audio
+(Sound Blaster/AdLib), mouse, joystick, and SVGA/VESA modes are not yet wired
+on the emu88 backend.
 
 ## Example .cfg
 
