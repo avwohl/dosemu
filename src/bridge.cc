@@ -2517,6 +2517,22 @@ void write_ldt_descriptor(int idx, uint32_t base, uint32_t limit,
   mem_writeb(p + 7, (base >> 24) & 0xFF);
 }
 
+// DPMI spec: modifying a descriptor (Set Base/Limit/Access/Descriptor) that is
+// currently loaded in a segment register takes effect on that register
+// immediately. Real hosts (CWSDPMI) achieve this by reloading the register, and
+// DJGPP relies on it (it expands its data selector's limit, then keeps using the
+// already-loaded DS without an explicit reload). dosbox's CPU didn't enforce
+// data-segment limits, so this was a silent no-op there; emu88 does enforce
+// them, so reload every segment register holding `sel` to refresh its cached
+// descriptor from the just-written table entry.
+void reload_loaded_selector(uint16_t sel) {
+  const uint16_t key = sel & 0xFFFC;
+  if (key == 0) return;
+  const SegNames segs[] = {ds, es, fs, gs, ss};
+  for (SegNames s : segs)
+    if ((SegValue(s) & 0xFFFC) == key) CPU_SetSegGeneral(s, SegValue(s));
+}
+
 // LDT allocation bitmap helpers.
 inline bool ldt_bit(uint16_t idx) {
   return (s_ldt_in_use[idx >> 3] >> (idx & 7)) & 1;
@@ -2700,6 +2716,7 @@ Bitu dosiz_int31() {
       flags |= (limit >> 16) & 0x0F;
       if (need_g) flags |= 0x80;                     // G=1
       mem_writeb(p + 6, flags);
+      reload_loaded_selector(reg_bx);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -2718,6 +2735,7 @@ Bitu dosiz_int31() {
       uint8_t flags = mem_readb(p + 6);
       flags = (flags & 0x0F) | (reg_ch & 0xF0);
       mem_writeb(p + 6, flags);
+      reload_loaded_selector(reg_bx);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -2777,6 +2795,7 @@ Bitu dosiz_int31() {
       const PhysPt dst = selector_table_base(reg_bx) + idx * 8u;
       const PhysPt src = SegPhys(es) + reg_edi;
       for (int i = 0; i < 8; ++i) mem_writeb(dst + i, mem_readb(src + i));
+      reload_loaded_selector(reg_bx);
       set_cf(false);
       return CBRET_NONE;
     }
@@ -3215,6 +3234,7 @@ Bitu dosiz_int31() {
       mem_writeb(p + 3, (base >> 8) & 0xFF);
       mem_writeb(p + 4, (base >> 16) & 0xFF);
       mem_writeb(p + 7, (base >> 24) & 0xFF);
+      reload_loaded_selector(reg_bx);
       set_cf(false);
       return CBRET_NONE;
     }

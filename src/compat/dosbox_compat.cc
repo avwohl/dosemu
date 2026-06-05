@@ -14,6 +14,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -29,18 +30,31 @@ namespace {
 // FreeDOS-boot machine (dos_machine/dos_bios/dos_dpmi) is used here.
 struct EmuCpu : public emu88 {
     using emu88::emu88;
+
+    // Log PM interrupts/exceptions (vector + error code) when tracing, then let
+    // emu88's normal IDT dispatch proceed.
+    bool intercept_pm_int(emu88_uint8 vector, bool is_software_int,
+                          bool has_error_code, emu88_uint32 error_code) override {
+        static int t = -1;
+        if (t < 0) t = getenv("DOSIZ_VEC_TRACE") ? 1 : 0;
+        if (t && (!is_software_int || vector < 0x20)) {
+            const uint32_t lin = seg_cache[seg_CS].base + ip;
+            uint8_t b[4];
+            for (int i = 0; i < 4; i++)
+                b[i] = paging_enabled() ? read_linear8(lin + i) : mem->fetch_mem(lin + i);
+            std::fprintf(stderr,
+                "[vec] %02x sw=%d err=%04x CS:EIP=%04x:%08x cpl=%d bytes=%02x %02x %02x %02x "
+                "DS=%04x(lim=%05x) SS=%04x:%08x\n",
+                vector, is_software_int, error_code, sregs[seg_CS], ip, cpl,
+                b[0], b[1], b[2], b[3],
+                sregs[seg_DS], seg_cache[seg_DS].limit,
+                sregs[seg_SS], get_reg32(reg_SP));
+        }
+        return false;
+    }
 };
 emu88_mem *g_mem = nullptr;
 EmuCpu    *g_cpu = nullptr;
-
-// CS D/B (default operand size) lives in seg_cache flags bit 2.
-constexpr uint8_t SEG_FLAG_DB = 0x04;
-
-inline void set_seg_db(int seg_idx, bool big) {
-    if (!g_cpu) return;
-    if (big) g_cpu->seg_cache[seg_idx].flags |= SEG_FLAG_DB;
-    else     g_cpu->seg_cache[seg_idx].flags &= ~SEG_FLAG_DB;
-}
 
 } // namespace
 
@@ -113,9 +127,10 @@ void sync_to_emu() {
         // base under a fixed selector value for its PM trampolines).
         g_cpu->seg_cache[i].base = Segs.phys[i];
     }
-    g_cpu->cpl = (emu88_uint8)cpu.cpl;
-    set_seg_db(emu88::seg_CS, cpu.code.big);
-    set_seg_db(emu88::seg_SS, cpu.stack.big);
+    // NOTE: cpl / CS.D/B / SS.D/B are owned by the engine — the CPU_* mutators
+    // (CPU_IRET, CPU_SET_CRX, CPU_SetSegGeneral via the descriptors) set them
+    // directly. Pushing the interface's cpu.* snapshot here would clobber them
+    // with stale values, since bridge.cc handlers don't refresh cpu.* mid-call.
 }
 
 void sync_from_emu() {
@@ -228,8 +243,13 @@ void CPU_JMP(bool use32, Bitu selector, Bitu offset, Bitu /*oldeip*/) {
 
 void CPU_IRET(bool use32, Bitu /*oldeip*/) {
     if (!g_cpu) return;
+    // Push the handler's interface writes (it set SS:ESP and laid down the IRET
+    // frame via reg_esp) into the engine, then operate on the engine and refresh
+    // the interface at the end.
+    dosiz_compat::sync_to_emu();
     const uint32_t ssb = g_cpu->seg_cache[emu88::seg_SS].base;
-    uint32_t esp = cpu.stack.big ? reg_esp : reg_sp;
+    uint32_t esp = g_cpu->get_reg32(emu88::reg_SP);
+    if (!g_cpu->stack_32()) esp &= 0xFFFF;
     uint32_t neip, ncs, nfl;
     if (use32) {
         neip = mem_readd(ssb + esp);
@@ -242,26 +262,30 @@ void CPU_IRET(bool use32, Bitu /*oldeip*/) {
         nfl  = mem_readw(ssb + esp + 4);
         esp += 6;
     }
-    const unsigned newcpl = ncs & 3;
-    if (g_cpu->protected_mode() && newcpl > g_cpu->cpl) {
-        // Inter-privilege return: pop the outer SS:ESP too.
+    const unsigned curcpl = g_cpu->cpl;
+    const unsigned newcpl = g_cpu->protected_mode() ? (ncs & 3) : curcpl;
+    if (g_cpu->protected_mode() && newcpl > curcpl) {
+        // Inter-privilege return: pop the outer SS:ESP too, then load CS/SS at
+        // the NEW (less-privileged) CPL — emu88's load_segment rejects a DPL=3
+        // code/stack load while CPL is still 0 unless told the effective CPL.
         uint32_t nesp, nss;
         if (use32) { nesp = mem_readd(ssb + esp); nss = mem_readd(ssb + esp + 4) & 0xFFFF; }
         else       { nesp = mem_readw(ssb + esp); nss = mem_readw(ssb + esp + 2); }
-        CPU_SetSegGeneral(cs, ncs);
-        cpu_regs.ip.dword[0] = neip;
-        cpu_regs.flags = nfl;
-        CPU_SetSegGeneral(ss, nss);
-        reg_esp = nesp;
-        cpu.cpl = newcpl;
         g_cpu->cpl = (emu88_uint8)newcpl;
+        g_cpu->exception_pending = false;
+        g_cpu->load_segment(emu88::seg_CS, (uint16_t)ncs, (int)newcpl);
+        g_cpu->load_segment(emu88::seg_SS, (uint16_t)nss, (int)newcpl);
+        g_cpu->ip = neip;
+        g_cpu->set_eflags(nfl);
+        g_cpu->set_reg32(emu88::reg_SP, nesp);
     } else {
-        CPU_SetSegGeneral(cs, ncs);
-        cpu_regs.ip.dword[0] = neip;
-        cpu_regs.flags = nfl;
-        if (cpu.stack.big) reg_esp = esp; else reg_sp = (uint16_t)esp;
+        g_cpu->load_segment(emu88::seg_CS, (uint16_t)ncs, (int)newcpl);
+        g_cpu->ip = neip;
+        g_cpu->set_eflags(nfl);
+        g_cpu->set_reg32(emu88::reg_SP, esp);
     }
-    cpu.code.big = g_cpu->code_32();
+    dosiz_compat::sync_from_emu();
+    (void)use32;
 }
 
 // ===========================================================================
@@ -317,6 +341,8 @@ void fire_ticks() {
     dosiz_compat::sync_to_emu();
 }
 
+int g_cb_trace = -1;  // -1 = unread, 0/1 = DOSIZ_CB_TRACE
+
 // Execute one step: dispatch a native callback if CS:IP sits on one, else run
 // a single emu88 instruction.
 void cpu_step() {
@@ -325,6 +351,15 @@ void cpu_step() {
         const uint16_t n = (uint16_t)(peekb(lin + 2) | (peekb(lin + 3) << 8));
         dosiz_compat::sync_from_emu();
         reg_eip += 4;  // advance past FE 38 lo hi
+        if (g_cb_trace < 0) g_cb_trace = getenv("DOSIZ_CB_TRACE") ? 1 : 0;
+        if (g_cb_trace) {
+            std::fprintf(stderr,
+                "[cb %3u %-22s] AX=%04x BX=%04x CX=%04x DX=%04x "
+                "CS:EIP=%04x:%08x pmode=%d\n",
+                n, (n < CB_MAX && g_cb_descr[n]) ? g_cb_descr[n] : "?",
+                reg_ax, reg_bx, reg_cx, reg_dx, SegValue(cs), reg_eip,
+                g_cpu->protected_mode());
+        }
         Bitu r = CBRET_NONE;
         if (n < CB_MAX && g_cb_handlers[n]) r = g_cb_handlers[n]();
         dosiz_compat::sync_to_emu();

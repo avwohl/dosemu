@@ -330,17 +330,21 @@ bool emu88::check_segment_read(emu88_uint16 seg, emu88_uint32 off, emu88_uint8 w
     }
     return true;
   }
-  for (int i = 0; i < 6; i++) {
-    if (sregs[i] != seg) continue;
-    if (!seg_cache[i].valid) {
-      raise_exception(i == seg_SS ? 12 : 13, 0);
-      return false;
-    }
-    if (!check_segment_limit(i, off, width)) {
-      raise_exception(i == seg_SS ? 12 : 13, 0);
-      return false;
-    }
-    return true;
+  // Prefer the segment actually used (pending_seg_idx); see check_segment_write
+  // for why scanning by selector value is wrong when registers share a value.
+  int idx = pending_seg_idx;
+  if (idx < 0 || sregs[idx] != seg) {
+    idx = -1;
+    for (int i = 0; i < 6; i++) if (sregs[i] == seg) { idx = i; break; }
+  }
+  if (idx < 0) return true;
+  if (!seg_cache[idx].valid) {
+    raise_exception(idx == seg_SS ? 12 : 13, 0);
+    return false;
+  }
+  if (!check_segment_limit(idx, off, width)) {
+    raise_exception(idx == seg_SS ? 12 : 13, 0);
+    return false;
   }
   return true;
 }
@@ -362,23 +366,30 @@ bool emu88::check_segment_write(emu88_uint16 seg, emu88_uint32 off, emu88_uint8 
     }
     return true;
   }
-  for (int i = 0; i < 6; i++) {
-    if (sregs[i] != seg) continue;
-    if (!seg_cache[i].valid) {
-      raise_exception(i == seg_SS ? 12 : 13, 0);
-      return false;
-    }
-    emu88_uint8 type = seg_cache[i].access & 0x0F;
-    // Code segment or read-only data segment → not writable
-    if ((type & 0x08) || !(type & 0x02)) {
-      raise_exception(i == seg_SS ? 12 : 13, 0);
-      return false;
-    }
-    if (!check_segment_limit(i, off, width)) {
-      raise_exception(i == seg_SS ? 12 : 13, 0);
-      return false;
-    }
-    return true;
+  // Prefer the segment actually used by this access (pending_seg_idx). Scanning
+  // sregs[] by value picks the WRONG cache when SS/DS/ES share a selector value
+  // (e.g. a DPMI client whose DS=ES=SS all alias one data selector): each has
+  // its own hidden descriptor cache, and a stack PUSH must validate SS's, not
+  // an earlier register's that happens to hold the same selector.
+  int idx = pending_seg_idx;
+  if (idx < 0 || sregs[idx] != seg) {
+    idx = -1;
+    for (int i = 0; i < 6; i++) if (sregs[i] == seg) { idx = i; break; }
+  }
+  if (idx < 0) return true;
+  if (!seg_cache[idx].valid) {
+    raise_exception(idx == seg_SS ? 12 : 13, 0);
+    return false;
+  }
+  emu88_uint8 type = seg_cache[idx].access & 0x0F;
+  // Code segment or read-only data segment → not writable
+  if ((type & 0x08) || !(type & 0x02)) {
+    raise_exception(idx == seg_SS ? 12 : 13, 0);
+    return false;
+  }
+  if (!check_segment_limit(idx, off, width)) {
+    raise_exception(idx == seg_SS ? 12 : 13, 0);
+    return false;
   }
   return true;
 }
