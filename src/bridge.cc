@@ -968,6 +968,16 @@ constexpr uint32_t LDT_BASE        = 0x104000u;
 constexpr uint32_t PM_SHIM_BASE    = 0x106000u;
 constexpr uint32_t PM_CB_STACK_BASE= 0x108000u;
 constexpr uint32_t TSS_BASE        = 0x109000u;
+// Dedicated linear region for the CWSDPMI exception handler-entry frame
+// and the ring-3 handler's own stack.  MUST be distinct from
+// PM_CB_STACK_BASE: that 4KB region doubles as the ring-0 SS0 dispatch
+// stack (TSS ESP0), so the CPU's ring-change exception frame is pushed
+// at its top.  If the handler-entry frame shared that region, the
+// trampoline's ring-0 IRETD-frame writeback would clobber the CWSDPMI
+// frame (eip/outer-esp/outer-ss), causing a #GP cascade when the
+// handler IRETs/LRETs back.  Lives in free kernel-reserved space
+// (0x10A000..0x10AFFF, below pm_arena at 0x120000).
+constexpr uint32_t PM_EXC_STACK_BASE = 0x10A000u;
 // GDT layout: 16 entries.  First 9 are the historical ring-0 DPMI
 // selectors.  Remaining 7 are additions for CWSDPMI-style ring-3
 // operation (DOSIZ_DPMI_RING3=1): TSS for inter-ring transitions,
@@ -1231,10 +1241,12 @@ void pm_setup_gdt_and_idt(bool bits32, uint16_t client_cs,
   // to lower-DPL CS, so user_ret_CS must be DPL=3.  Access 0xFA =
   // P=1, DPL=3, S=1, type=1010 (code, readable, non-conforming).
   write_gdt_descriptor(14, 0xF0000, 0xFFFF, 0xFA);
-  // GDT[15] = ring-3 data alias of the PM callback stack.  Used by
-  // the PM-exception trampoline as a known-good stack regardless of
-  // how mangled the client's SS:ESP is at fault time.
-  write_gdt_descriptor(15, PM_CB_STACK_BASE, PM_CB_STACK_SIZE - 1, 0xF2);
+  // GDT[15] = ring-3 data segment for the PM-exception handler stack.
+  // Used by the PM-exception trampoline as a known-good stack regardless
+  // of how mangled the client's SS:ESP is at fault time.  This MUST be a
+  // separate linear region from the ring-0 SS0 dispatch stack
+  // (PM_CB_STACK_BASE) -- see PM_EXC_STACK_BASE.
+  write_gdt_descriptor(15, PM_EXC_STACK_BASE, PM_CB_STACK_SIZE - 1, 0xF2);
 
   // TSS body: zero-fill, then set SS0 / ESP0 so the CPU can switch
   // stacks when transitioning ring 3 -> ring 0 on an interrupt.
@@ -2029,13 +2041,34 @@ bool pm_exc_has_err_code(int vec) {
 Bitu dosiz_pm_exc_dispatch(int vec) {
   // Ring-0 clients (LE-loaded MicroPython etc.) reach this same per-
   // vector trampoline because pm_setup_gdt_and_idt wires it for both
-  // ring-3 (CWSDPMI/DJGPP) and ring-0 (LE direct-entry) callers.  At
-  // ring-0 the CPU pushed a 3-dword frame on the *client's* stack (no
-  // ring change, no TSS stack switch, no outer SS/ESP), so the ring-3
-  // CWSDPMI frame layout below would read garbage.  Detect ring-0 by
-  // cpu.cpl and route to the LE handler with the vector now known.
-  if (cpu.cpl == 0) {
-    return dosiz_le_exc_handle32(vec);
+  // ring-3 (CWSDPMI/DJGPP) and ring-0 (LE direct-entry) callers.  When
+  // the interrupted code was already at ring 0 the CPU performed an
+  // intra-privilege dispatch: it pushed only [err?] EIP CS EFLAGS (no
+  // outer SS/ESP), so the ring-3 CWSDPMI frame layout below would read
+  // garbage past EFLAGS.  When the interrupted code was at ring 3 the
+  // CPU did a ring-change dispatch and additionally pushed outer ESP/SS.
+  //
+  // cpu.cpl here is ALWAYS 0 -- the gate (PM_CB_SEL) has DPL=0, so by
+  // the time this C++ callback runs the CPU is executing the trampoline
+  // at ring 0 regardless of where the fault came from.  So cpu.cpl
+  // cannot tell a ring-3 DPMI client (DJGPP, which installs AX=0203
+  // handlers) from a ring-0 LE direct-entry client.  The reliable
+  // discriminator is the privilege level of the *interrupted* code,
+  // which the CPU recorded as the RPL of the pushed CS selector.  The
+  // pushed CS sits at a fixed offset (right after [err?] EIP) that does
+  // NOT depend on whether a ring change happened, so we can read it
+  // before committing to a frame layout.  RPL!=0 => ring-3 client =>
+  // build the CWSDPMI frame and dispatch to its AX=0203 handler; RPL==0
+  // => ring-0 LE direct-entry fault => log + terminate (no DPMI handler,
+  // and the outer ESP/SS frame fields the ring-3 path reads don't exist).
+  {
+    const uint32_t cs_off = pm_exc_has_err_code(vec) ? 8u : 4u;
+    const uint16_t pushed_cs =
+        static_cast<uint16_t>(mem_readd(SegPhys(ss) + reg_esp + cs_off) & 0xFFFF);
+    const bool from_ring3 = (pushed_cs & 3) != 0;
+    if (!from_ring3) {
+      return dosiz_le_exc_handle32(vec);
+    }
   }
   // Runs at ring-0 via the IDT gate (PM_CB_SEL has DPL=0).  The
   // ring-3 client was at cpl=3 when the exception fired, so CPU did a
@@ -2142,19 +2175,22 @@ Bitu dosiz_pm_exc_dispatch(int vec) {
   }
 
   // Build the CWSDPMI exception frame on our private exception stack
-  // (PM_EXC_STACK_SEL, ring-3 alias of PM_CB_STACK_BASE), NOT on the
-  // client's outer stack: the client's SS:ESP may be corrupt at fault
-  // time (e.g. an IRET that popped garbage SS=0 is exactly the failure
-  // mode that triggers this path in the first place).  The frame goes
-  // at the top of our private stack so the handler's own pushes grow
-  // downward without clobbering the frame.
+  // (PM_EXC_STACK_SEL, a dedicated linear region at PM_EXC_STACK_BASE),
+  // NOT on the client's outer stack: the client's SS:ESP may be corrupt
+  // at fault time (e.g. an IRET that popped garbage SS=0 is exactly the
+  // failure mode that triggers this path in the first place).  The frame
+  // goes at the top of our private stack so the handler's own pushes
+  // grow downward without clobbering the frame.  This region MUST be
+  // distinct from PM_CB_STACK_BASE (the ring-0 SS0 dispatch stack):
+  // otherwise the ring-0 IRETD-frame writeback below overlaps and
+  // clobbers this frame's eip/outer-esp/outer-ss fields.
   const uint16_t handler_ss = PM_EXC_STACK_SEL;
   const uint32_t handler_esp_base = PM_CB_STACK_SIZE - 32u;   // top-of-stack
   const uint32_t client_new_esp   = handler_esp_base;
   {
-    // PM_CB_STACK_BASE is the linear base; write frame directly at the
+    // PM_EXC_STACK_BASE is the linear base; write frame directly at the
     // linear address (saves a descriptor lookup).
-    const PhysPt sbase = PM_CB_STACK_BASE;
+    const PhysPt sbase = PM_EXC_STACK_BASE;
     mem_writed(sbase + client_new_esp + 0,  s_pm_exc_ret_off);
     mem_writed(sbase + client_new_esp + 4,  PM_CB3_SEL);    // DPL=3 CS
     mem_writed(sbase + client_new_esp + 8,  err);

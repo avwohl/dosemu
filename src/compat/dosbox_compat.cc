@@ -169,6 +169,22 @@ void     mem_writed(PhysPt pt, uint32_t v) { if (g_mem) g_mem->store_mem32(pt, v
 static inline void mirror_seg(int seg_idx) {
     Segs.val[seg_idx]  = g_cpu->sregs[seg_idx];
     Segs.phys[seg_idx] = g_cpu->seg_cache[seg_idx].base;
+    // Loading SS changes the stack address size (B bit of the new SS
+    // descriptor); loading CS changes the code default operand size (D
+    // bit).  The interface mirror (cpu.stack.big / cpu.code.big) is only
+    // otherwise refreshed at callback entry by sync_from_emu, so a
+    // bridge.cc handler that loads SS via CPU_SetSegGeneral/SegSet16 and
+    // then consults cpu.stack.big (e.g. dosiz_pm_exc_ret deciding whether
+    // to write reg_esp or just reg_sp) would read a stale value and
+    // truncate a 32-bit ESP to 16 bits.  Refresh from the engine here so
+    // the mirror tracks the just-loaded descriptor, matching x86.
+    if (seg_idx == emu88::seg_SS) {
+        cpu.stack.big     = g_cpu->stack_32();
+        cpu.stack.mask    = cpu.stack.big ? 0xFFFFFFFFu : 0xFFFFu;
+        cpu.stack.notmask = cpu.stack.big ? 0x00000000u : 0xFFFF0000u;
+    } else if (seg_idx == emu88::seg_CS) {
+        cpu.code.big = g_cpu->code_32();
+    }
 }
 
 void SegSet16(Bitu seg, uint16_t val) {
