@@ -7142,7 +7142,16 @@ uint16_t ems_alloc_pool_page() {
 
 // Copy-flush: write the slot's current pool page back, then load `pool_page`
 // (0xFFFF = just flush + leave unmapped) into the frame slot.
+//
+// LIMITATION: because logical pages are mirrored into the frame (not truly
+// windowed), mapping the SAME logical page into two physical slots at once does
+// NOT alias them — each slot holds an independent copy and the last one flushed
+// wins. Real hardware aliases via paging. Programs that deliberately alias one
+// logical page into multiple slots are rare; true windowing would require
+// redirecting guest accesses to 0xE0000 inside emu88_mem, which we avoid.
 void ems_load_slot(int slot, uint16_t pool_page) {
+  if (slot < 0 || slot > 3) return;
+  if (pool_page != 0xFFFF && pool_page >= EMS_TOTAL_PAGES) pool_page = 0xFFFF;
   const PhysPt fa = EMS_FRAME_BASE + static_cast<uint32_t>(slot) * EMS_PAGE_SIZE;
   if (s_ems_slot_pool[slot] != 0xFFFF) {
     const uint32_t off = static_cast<uint32_t>(s_ems_slot_pool[slot]) * EMS_PAGE_SIZE;
@@ -7153,6 +7162,34 @@ void ems_load_slot(int slot, uint16_t pool_page) {
     for (uint32_t i = 0; i < EMS_PAGE_SIZE; ++i) mem_writeb(fa + i, s_ems_pool[off + i]);
   }
   s_ems_slot_pool[slot] = pool_page;
+}
+
+// Flush every mapped frame slot back to its pool page (make the pool the
+// authoritative copy), and the reverse. Used to bracket AH=57 region moves so
+// they see/leave coherent data even when pages are currently mapped.
+void ems_flush_all() {
+  for (int s = 0; s < 4; ++s) {
+    if (s_ems_slot_pool[s] == 0xFFFF) continue;
+    const uint32_t off = static_cast<uint32_t>(s_ems_slot_pool[s]) * EMS_PAGE_SIZE;
+    const PhysPt fa = EMS_FRAME_BASE + static_cast<uint32_t>(s) * EMS_PAGE_SIZE;
+    for (uint32_t i = 0; i < EMS_PAGE_SIZE; ++i) s_ems_pool[off + i] = mem_readb(fa + i);
+  }
+}
+void ems_reload_all() {
+  for (int s = 0; s < 4; ++s) {
+    if (s_ems_slot_pool[s] == 0xFFFF) continue;
+    const uint32_t off = static_cast<uint32_t>(s_ems_slot_pool[s]) * EMS_PAGE_SIZE;
+    const PhysPt fa = EMS_FRAME_BASE + static_cast<uint32_t>(s) * EMS_PAGE_SIZE;
+    for (uint32_t i = 0; i < EMS_PAGE_SIZE; ++i) mem_writeb(fa + i, s_ems_pool[off + i]);
+  }
+}
+
+// Translate a byte offset within handle `h` to a pool byte index (logical page
+// -> pool page). Returns SIZE_MAX if the offset is past the handle's pages.
+size_t ems_pool_byte(const EmsHandle &h, uint32_t off) {
+  const uint32_t logical = off / EMS_PAGE_SIZE;
+  if (logical >= h.pages.size()) return SIZE_MAX;
+  return static_cast<size_t>(h.pages[logical]) * EMS_PAGE_SIZE + (off % EMS_PAGE_SIZE);
 }
 
 // Map handle:logical_page into physical slot (lp==0xFFFF unmaps). Returns the
@@ -7319,9 +7356,15 @@ Bitu dosiz_int67() {
       for (uint16_t i = 0; i < reg_cx; ++i) {
         uint16_t lp  = mem_readw(arr + i * 4 + 0);
         uint16_t sec = mem_readw(arr + i * 4 + 2);
-        uint16_t slot = (reg_al == 1)
-                          ? static_cast<uint16_t>((sec - EMS_FRAME_SEG) / 0x400)
-                          : sec;
+        uint16_t slot;
+        if (reg_al == 1) {
+          // Segment form: validate the segment is inside the 64KB page frame
+          // BEFORE the subtraction (sec < EMS_FRAME_SEG would underflow).
+          if (sec < EMS_FRAME_SEG || sec >= EMS_FRAME_SEG + 0x1000) { reg_ah = 0x8B; return CBRET_NONE; }
+          slot = (sec - EMS_FRAME_SEG) / 0x400;
+        } else {
+          slot = sec;  // physical-page-number form
+        }
         uint8_t st = ems_map(static_cast<uint8_t>(slot), reg_dx, lp);
         if (st) { reg_ah = st; return CBRET_NONE; }
       }
@@ -7345,19 +7388,77 @@ Bitu dosiz_int67() {
       reg_ah = 0;
       return CBRET_NONE;
     }
-    case 0x53: { // get (AL=0, ES:DI) / set (AL=1, DS:SI) handle name
+    case 0x53: { // get (AL=0) / set (AL=1) handle name; buffer at ES:DI for both
       auto it = s_ems_handles.find(reg_dx);
       if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      PhysPt b = SegPhys(es) + reg_di;
       if (reg_al == 0) {
-        PhysPt b = SegPhys(es) + reg_di;
         for (int i = 0; i < 8; ++i) mem_writeb(b + i, static_cast<uint8_t>(it->second.name[i]));
       } else if (reg_al == 1) {
-        PhysPt b = SegPhys(ds) + reg_si;
         for (int i = 0; i < 8; ++i) it->second.name[i] = static_cast<char>(mem_readb(b + i));
       } else {
         reg_ah = 0x8F;
         return CBRET_NONE;
       }
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x57: { // move (AL=0) / exchange (AL=1) a memory region
+      if (reg_al > 1) { reg_ah = 0x84; return CBRET_NONE; }
+      // MoveRegion struct at DS:SI (LIM layout).
+      const PhysPt d = SegPhys(ds) + reg_si;
+      const uint32_t bytes    = mem_readd(d + 0x00);
+      const uint8_t  s_type   = mem_readb(d + 0x04);
+      const uint16_t s_handle = mem_readw(d + 0x05);
+      const uint16_t s_off    = mem_readw(d + 0x07);
+      const uint16_t s_pg     = mem_readw(d + 0x09);
+      const uint8_t  d_type   = mem_readb(d + 0x0B);
+      const uint16_t d_handle = mem_readw(d + 0x0C);
+      const uint16_t d_off    = mem_readw(d + 0x0E);
+      const uint16_t d_pg     = mem_readw(d + 0x10);
+      if (bytes == 0) { reg_ah = 0; return CBRET_NONE; }
+      // Resolve src/dest. EMS (type=1) addresses are byte offsets into the
+      // handle; conventional (type=0) are linear (seg*16 + offset).
+      const EmsHandle *sH = nullptr, *dH = nullptr;
+      uint32_t s_base = 0, d_base = 0;
+      if (s_type) {
+        auto it = s_ems_handles.find(s_handle);
+        if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+        s_base = static_cast<uint32_t>(s_pg) * EMS_PAGE_SIZE + s_off;
+        if (s_base + bytes > static_cast<uint32_t>(it->second.pages.size()) * EMS_PAGE_SIZE) { reg_ah = 0x8A; return CBRET_NONE; }
+        sH = &it->second;
+      } else {
+        s_base = static_cast<uint32_t>(s_pg) * 16u + s_off;
+      }
+      if (d_type) {
+        auto it = s_ems_handles.find(d_handle);
+        if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+        d_base = static_cast<uint32_t>(d_pg) * EMS_PAGE_SIZE + d_off;
+        if (d_base + bytes > static_cast<uint32_t>(it->second.pages.size()) * EMS_PAGE_SIZE) { reg_ah = 0x8A; return CBRET_NONE; }
+        dH = &it->second;
+      } else {
+        d_base = static_cast<uint32_t>(d_pg) * 16u + d_off;
+      }
+      // Flush mapped slots so the pool is authoritative, copy through host
+      // buffers (handles any overlap correctly), then reload the frame.
+      ems_flush_all();
+      std::vector<uint8_t> bufS(bytes);
+      for (uint32_t i = 0; i < bytes; ++i)
+        bufS[i] = sH ? s_ems_pool[ems_pool_byte(*sH, s_base + i)] : mem_readb(s_base + i);
+      if (reg_al == 1) {  // exchange: read dest too, write it back to source
+        std::vector<uint8_t> bufD(bytes);
+        for (uint32_t i = 0; i < bytes; ++i)
+          bufD[i] = dH ? s_ems_pool[ems_pool_byte(*dH, d_base + i)] : mem_readb(d_base + i);
+        for (uint32_t i = 0; i < bytes; ++i) {
+          if (sH) s_ems_pool[ems_pool_byte(*sH, s_base + i)] = bufD[i];
+          else    mem_writeb(s_base + i, bufD[i]);
+        }
+      }
+      for (uint32_t i = 0; i < bytes; ++i) {
+        if (dH) s_ems_pool[ems_pool_byte(*dH, d_base + i)] = bufS[i];
+        else    mem_writeb(d_base + i, bufS[i]);
+      }
+      ems_reload_all();
       reg_ah = 0;
       return CBRET_NONE;
     }
@@ -7373,9 +7474,19 @@ Bitu dosiz_int67() {
       reg_ah = 0;
       return CBRET_NONE;
     case 0x59:  // get hardware config (AL=0) / get raw page counts (AL=1)
-      if (reg_al == 1) {
+      if (reg_al == 0) {
+        PhysPt d = SegPhys(es) + reg_di;
+        mem_writew(d + 0, 0x0400);  // 16KB page = 0x400 paragraphs
+        mem_writew(d + 2, 0x0000);  // no alternate register sets
+        mem_writew(d + 4, 0x0010);  // context save-area size (4 x {handle,page})
+        mem_writew(d + 6, 0x0000);  // no DMA register sets
+        mem_writew(d + 8, 0x0000);  // LIM standard: always 0
+      } else if (reg_al == 1) {
         reg_bx = EMS_TOTAL_PAGES - ems_pages_allocated();
         reg_dx = EMS_TOTAL_PAGES;
+      } else {
+        reg_ah = 0x8F;
+        return CBRET_NONE;
       }
       reg_ah = 0;
       return CBRET_NONE;
