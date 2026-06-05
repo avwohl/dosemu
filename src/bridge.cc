@@ -7314,99 +7314,26 @@ int run_program(const dosiz::Config &cfg) {
   // unconditional.
   s_default_mode = cfg.default_mode;
 
-  // Default to FATAL so dosbox's ERR-level chatter (UNICODE mapping
-  // lookups, PIC ICW quirks, etc.) doesn't pollute normal runs.
-  // dosiz's own user-facing diagnostics go through std::fprintf, so
-  // legitimate error reporting is unaffected.  Passing -v once bumps
-  // to ERROR (still filters warnings), -vv bumps to WARNING, etc.
-  loguru::g_stderr_verbosity = (cfg.verbose >= 3) ? loguru::Verbosity_INFO
-                              : (cfg.verbose >= 2) ? loguru::Verbosity_WARNING
-                              : (cfg.verbose >= 1) ? loguru::Verbosity_ERROR
-                                                   : loguru::Verbosity_FATAL;
-
-  static const char *dummy_argv[] = {"dosiz", nullptr};
-  auto cmdline = std::make_unique<CommandLine>(1, dummy_argv);
-  // ::Config is dosbox's Config (in the global namespace); without the
-  // leading :: the nested dosiz::Config shadows it.
-  control      = std::make_unique<::Config>(cmdline.get());
-
-  if (cfg.headless) {
-    // On macOS and Windows, SDL's "offscreen" driver is EGL-based and
-    // cannot init without a real GL loader -- it fails to create any
-    // window even in texture mode.  "dummy" creates no window at all,
-    // which is what we want anyway.
-#if defined(__APPLE__) || defined(_WIN32)
-    setenv("SDL_VIDEODRIVER", "dummy", 1);
-#else
-    setenv("SDL_VIDEODRIVER", "offscreen", 1);
-#endif
-    setenv("SDL_AUDIODRIVER", "dummy", 1);
-  }
-
+  // emu88 backend bring-up. dosiz emulates DOS itself (the INT 21h/31h host
+  // below), so the backend is purely a CPU + memory + PC-hardware engine: no
+  // DOSBox config/SDL/locale machinery. Create the machine, lay down the F000
+  // callback area, then run the DOS host directly.
+  //
+  // The optional PC hardware (SVGA window, Sound Blaster/AdLib, mouse, joystick)
+  // is attached separately when a guest needs it; a headless compiler run never
+  // touches it. cfg.headless is honoured by simply not attaching that layer.
   try {
-    InitConfigDir();
+    const uint32_t ram_mb = cfg.memsize_mb > 0 ? (uint32_t)cfg.memsize_mb : 16u;
+    dosiz_compat::init_machine(ram_mb);
+    CALLBACK_Init();
+    shutdown_requested = false;
 
-    // Replicate upstream sdl_main's pre-DOSBOX_Init setup so that the [sdl]
-    // section is registered.  Without this, dosbox's GFX code crashes in
-    // initialize_vsync_settings when the video timer fires.
-    messages_add_command_line();
-    DOS_Locale_AddMessages();
-    RENDER_AddMessages();
-    messages_add_sdl();
-    config_add_sdl();
+    // dosiz_startup() installs the INT callbacks, builds the PSP, loads the
+    // program and enters DOSBOX_RunMachine — the same entry DOSBox reached via
+    // control->StartUp(), now called directly.
+    dosiz_startup();
 
-    DOSBOX_Init();
-    control->ParseConfigFiles(GetConfigDir());
-
-    // Headless-friendly overrides.  SDL's offscreen driver cannot grab the
-    // mouse, and nothing displays anyway; disable mouse capture and the
-    // DOS mouse driver, mute the mixer, and set sbtype=none so init
-    // doesn't trip on audio devices that don't exist in this sandbox.
-    if (cfg.headless) {
-      if (auto *s = control->GetSection("mouse")) {
-        s->HandleInputline("mouse_capture=nomouse");
-        s->HandleInputline("dos_mouse_driver=false");
-      }
-      if (auto *s = control->GetSection("mixer"))   s->HandleInputline("nosound=true");
-      if (auto *s = control->GetSection("sblaster")) s->HandleInputline("sbtype=none");
-      // Avoid the OpenGL probe in sdlmain.cpp:set_output -- it fails under
-      // SDL's offscreen driver on macOS, and we render to nothing anyway.
-      if (auto *s = control->GetSection("sdl"))     s->HandleInputline("output=texture");
-    }
-    // Screenshot output dir.  DOSIZ_SCREENSHOT_DIR overrides dosbox's
-    // default ("capture" under the CWD).  Used with
-    // DOSIZ_SCREENSHOT_SECS (see dosiz_screenshot_tick) to verify a
-    // GUI guest with no interactive display.
-    if (const char *sd = getenv("DOSIZ_SCREENSHOT_DIR")) {
-      if (auto *s = control->GetSection("capture")) {
-        std::string line = "capture_dir=";
-        line += sd;
-        s->HandleInputline(line.c_str());
-      }
-    }
-
-    // Keep the interpreter core for tracing.  dosbox auto-switches
-    // to the dynamic JIT when a program enters PM; that's fine for
-    // speed but bypasses core_normal where DOSIZ_CPU_TRACE is
-    // instrumented.  Force core=normal when the trace flag is set
-    // and warn so the user knows their cycle budget just shrank.
-    if (dosiz::g_debug.cpu_trace) {
-      if (auto *s = control->GetSection("cpu")) s->HandleInputline("core=normal");
-      std::fprintf(stderr,
-          "dosiz: DOSIZ_CPU_TRACE is set -- forcing core=normal "
-          "(the dynamic JIT cores bypass the trace hooks); "
-          "execution will be measurably slower than normal.\n");
-    }
-
-    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO | SDL_INIT_TIMER) < 0) {
-      std::fprintf(stderr, "dosiz: SDL_Init failed: %s\n", SDL_GetError());
-      return -1;
-    }
-
-    control->ParseEnv();
-    control->Init();
-    control->SetStartUp(&dosiz_startup);
-    control->StartUp();
+    dosiz_compat::shutdown_machine();
   } catch (const std::exception &e) {
     std::fprintf(stderr, "dosiz: bring-up threw: %s\n", e.what());
     return -1;

@@ -1,23 +1,24 @@
 //
-// dosbox_compat.h — DOSBox CPU/memory API re-implemented over the emu88 backend.
+// dosbox_compat.h — DOSBox CPU/memory/callback API re-implemented over emu88.
 //
 // dosiz emulates DOS itself (INT 21h/31h in bridge.cc); it only needs a CPU +
 // memory + PC hardware from the backend. This shim provides the slice of the
 // DOSBox CPU API that bridge.cc uses (registers, memory, segments, descriptors,
 // callbacks, the run loop) so bridge.cc drives emu88 instead of DOSBox.
 //
-// Strategy: cpu_regs is the register *interface* bridge.cc reads/writes via the
-// reg_* references (exactly as in DOSBox). The real engine is a global emu88
-// machine; cpu_regs is synced to/from emu88 at run / interrupt-trap boundaries
-// (sync_to_emu / sync_from_emu), so emu88 itself is unmodified.
-//
-// This header is the register + memory + segment foundation. The descriptor
-// tables, CALLBACK_* and DOSBOX_RunMachine layer build on it (next phase).
+// Strategy: cpu_regs / Segs / cpu are the register *interface* bridge.cc reads
+// and writes (exactly as in DOSBox). The real engine is a global emu88 machine.
+// The interface is synced to/from emu88 at run / interrupt-trap boundaries
+// (sync_to_emu / sync_from_emu), so emu88 itself is unmodified. Callbacks are
+// dispatched by recognising DOSBox's native-call opcode (FE 38 lo hi) at the
+// instruction stream, then letting emu88 execute the trailing IRET/RETF bytes.
 //
 #ifndef DOSIZ_DOSBOX_COMPAT_H
 #define DOSIZ_DOSBOX_COMPAT_H
 
 #include <cstdint>
+#include <ctime>
+#include <functional>
 
 // ---- DOSBox integer typedefs bridge.cc relies on -------------------------
 typedef uintptr_t Bitu;
@@ -101,15 +102,224 @@ inline RealPt RealMake(uint16_t seg, uint16_t off) { return ((RealPt)seg << 16) 
 inline uint16_t RealSeg(RealPt p) { return (uint16_t)(p >> 16); }
 inline uint16_t RealOff(RealPt p) { return (uint16_t)(p & 0xFFFF); }
 
+// real_*: real-mode seg:off access (always seg<<4 + off, like DOSBox).
+inline uint16_t real_readw(uint16_t seg, uint16_t off)  { return mem_readw(PhysMake(seg, off)); }
+inline void     real_writew(uint16_t seg, uint16_t off, uint16_t val) { mem_writew(PhysMake(seg, off), val); }
+
+// ---- Descriptors (lifted from DOSBox; backed by mem_readd/mem_writed) -----
+class Descriptor {
+public:
+    Descriptor() : saved{{0, 0}} {}
+
+    void Load(PhysPt address) {
+        saved.fill[0] = mem_readd(address);
+        saved.fill[1] = mem_readd(address + 4);
+    }
+    void Save(PhysPt address) {
+        mem_writed(address,     saved.fill[0]);
+        mem_writed(address + 4, saved.fill[1]);
+    }
+
+    PhysPt GetBase() const {
+        return (PhysPt)((saved.seg.base_24_31 << 24) |
+                        (saved.seg.base_16_23 << 16) |
+                        saved.seg.base_0_15);
+    }
+    uint32_t GetLimit() const {
+        uint32_t limit = (saved.seg.limit_16_19 << 16) | saved.seg.limit_0_15;
+        if (saved.seg.g) return (limit << 12) | 0xFFF;
+        return limit;
+    }
+    uint32_t GetOffset() const {
+        return (saved.gate.offset_16_31 << 16) | saved.gate.offset_0_15;
+    }
+    uint16_t GetSelector() const { return (uint16_t)saved.gate.selector; }
+    uint8_t  Type() const        { return (uint8_t)saved.seg.type; }
+    uint8_t  Conforming() const  { return (uint8_t)(saved.seg.type & 8); }
+    uint8_t  DPL() const         { return (uint8_t)saved.seg.dpl; }
+    uint8_t  Big() const         { return (uint8_t)saved.seg.big; }
+
+    struct S_Descriptor {
+        uint32_t limit_0_15  : 16;
+        uint32_t base_0_15   : 16;
+        uint32_t base_16_23  : 8;
+        uint32_t type        : 5;
+        uint32_t dpl         : 2;
+        uint32_t p           : 1;
+        uint32_t limit_16_19 : 4;
+        uint32_t avl         : 1;
+        uint32_t r           : 1;
+        uint32_t big         : 1;
+        uint32_t g           : 1;
+        uint32_t base_24_31  : 8;
+    };
+    struct G_Descriptor {
+        uint32_t offset_0_15  : 16;
+        uint32_t selector     : 16;
+        uint32_t paramcount   : 5;
+        uint32_t reserved     : 3;
+        uint32_t type         : 5;
+        uint32_t dpl          : 2;
+        uint32_t p            : 1;
+        uint32_t offset_16_31 : 16;
+    };
+    union {
+        uint32_t     fill[2];
+        S_Descriptor seg;
+        G_Descriptor gate;
+    } saved;
+};
+
+// Descriptor-table proxies over emu88's GDTR / IDTR / LDTR. Reads/writes go
+// straight through to the engine, so the cpu.gdt / cpu.idt the DPMI host pokes
+// stay coherent with the running CPU without an extra copy step.
+class ShimDescTable {        // proxies emu88 IDTR
+public:
+    PhysPt GetBase() const;
+    Bitu   GetLimit() const;
+    void   SetBase(PhysPt b);
+    void   SetLimit(Bitu l);
+    bool   GetDescriptor(Bitu selector, Descriptor &desc) const;
+};
+class ShimGdtTable {         // proxies emu88 GDTR + LDTR (TI bit selects LDT)
+public:
+    PhysPt GetBase() const;
+    Bitu   GetLimit() const;
+    void   SetBase(PhysPt b);
+    void   SetLimit(Bitu l);
+    bool   GetDescriptor(Bitu selector, Descriptor &desc) const;
+    bool   SetDescriptor(Bitu selector, Descriptor &desc) const;
+};
+
+// ---- CPU state block (subset of DOSBox CPUBlock used by bridge.cc) --------
+struct CPUBlock {
+    Bitu cpl   = 0;
+    Bitu mpl   = 0;
+    Bitu cr0   = 0;
+    bool pmode = false;
+    ShimGdtTable gdt;
+    ShimDescTable idt;
+    struct { Bitu mask = 0xFFFF, notmask = 0xFFFF0000u; bool big = false; } stack;
+    struct { bool big = false; } code;
+};
+extern CPUBlock cpu;
+
+// ---- CPU control surface bridge.cc drives ---------------------------------
+void SegSet16(Bitu seg, uint16_t val);                 // real-mode segment load
+bool CPU_SetSegGeneral(SegNames seg, Bitu value);      // mode-aware segment load
+void CPU_SET_CRX(Bitu cr, Bitu value);
+void CPU_LGDT(Bitu limit, Bitu base);
+void CPU_LIDT(Bitu limit, Bitu base);
+Bitu CPU_SIDT_base();
+Bitu CPU_SIDT_limit();
+bool CPU_LLDT(Bitu selector);
+bool CPU_LTR(Bitu selector);
+void CPU_JMP(bool use32, Bitu selector, Bitu offset, Bitu oldeip);
+void CPU_IRET(bool use32, Bitu oldeip);
+
+// ---- Callbacks (DOSBox native-call mechanism over emu88) ------------------
+typedef Bitu (*CallBack_Handler)();
+
+enum {
+    CB_RETN, CB_RETF, CB_RETF8, CB_RETF_STI, CB_RETF_CLI,
+    CB_IRET, CB_IRETD, CB_IRET_STI, CB_IRET_EOI_PIC1,
+    CB_IRQ0, CB_IRQ1, CB_IRQ9, CB_IRQ12, CB_IRQ12_RET, CB_IRQ6_PCJR,
+    CB_MOUSE, CB_INT29, CB_INT16, CB_HOOKABLE, CB_TDE_IRET,
+    CB_IPXESR, CB_IPXESR_RET, CB_INT21, CB_INT13, CB_VESA_WAIT, CB_VESA_PM
+};
+enum { CBRET_NONE = 0, CBRET_STOP = 1 };
+
+#define CB_MAX     250
+#define CB_SIZE    32
+#define CB_SEG     0xF000
+#define CB_SOFFSET 0x1000
+
+inline RealPt CALLBACK_RealPointer(uint8_t cb) {
+    return RealMake(CB_SEG, (uint16_t)(CB_SOFFSET + cb * CB_SIZE));
+}
+inline PhysPt CALLBACK_PhysPointer(uint8_t cb) {
+    return PhysMake(CB_SEG, (uint16_t)(CB_SOFFSET + cb * CB_SIZE));
+}
+inline PhysPt CALLBACK_GetBase() { return (CB_SEG << 4) + CB_SOFFSET; }
+
+uint8_t CALLBACK_Allocate();
+void    CALLBACK_DeAllocate(uint8_t cb);
+bool    CALLBACK_Setup(uint8_t cb, CallBack_Handler handler, Bitu type, const char *descr);
+void    CALLBACK_Idle();
+void    CALLBACK_RunRealInt(uint8_t intnum);
+void    CALLBACK_RunRealFar(uint16_t seg, uint16_t off);
+void    CALLBACK_SZF(bool val);
+void    CALLBACK_SCF(bool val);
+void    CALLBACK_SIF(bool val);
+
+class CALLBACK_HandlerObject {
+public:
+    CALLBACK_HandlerObject() = default;
+    ~CALLBACK_HandlerObject();
+    CALLBACK_HandlerObject(const CALLBACK_HandlerObject &) = delete;
+    CALLBACK_HandlerObject &operator=(const CALLBACK_HandlerObject &) = delete;
+
+    void Install(CallBack_Handler handler, Bitu type, const char *description);
+    void Install(CallBack_Handler handler, Bitu type, PhysPt addr, const char *description);
+    void Uninstall();
+    void Allocate(CallBack_Handler handler, const char *description = nullptr);
+    uint16_t Get_callback()    { return m_cb_number; }
+    RealPt   Get_RealPointer() { return CALLBACK_RealPointer((uint8_t)m_cb_number); }
+    void     Set_RealVec(uint8_t vec);
+
+private:
+    bool     installed   = false;
+    uint16_t m_cb_number = 0;
+    bool     vec_installed = false;
+    uint8_t  vec_interrupt = 0;
+    RealPt   vec_old       = 0;
+};
+
+// The CPU run loop. Executes emu88 until a callback returns CBRET_STOP or a
+// shutdown is requested. Nested calls (from CALLBACK_RunReal*) unwind one level
+// per CBRET_STOP, matching DOSBox's DOSBOX_RunMachine semantics.
+void DOSBOX_RunMachine();
+extern bool shutdown_requested;
+
+// One-time setup of the F000 callback area: the call_stop callback and the
+// per-interrupt CALLBACK_RunRealInt stubs.
+void CALLBACK_Init();
+
+// ---- Misc DOSBox utility surface ------------------------------------------
+void     MEM_A20_Enable(bool enable);
+bool     MEM_A20_Enabled();
+Bitu     MEM_TotalPages();
+void     IO_WriteB(Bitu port, uint8_t val);
+const char *DOSBOX_GetVersion() noexcept;
+bool     DOS_AllocateMemory(uint16_t *segment, uint16_t *blocks);
+
+typedef void (*TIMER_TickHandler)();
+void TIMER_AddTickHandler(TIMER_TickHandler handler);
+
+#define LOG_MSG(...) dosiz_compat_log(__VA_ARGS__)
+void dosiz_compat_log(const char *fmt, ...);
+
+namespace cross {
+inline void localtime_r(const time_t *t, struct tm *out) { ::localtime_r(t, out); }
+}
+
+// Networking (Crynwr packet driver backend) — no host backend in the shim, so
+// ETHERNET_OpenConnection always returns null and bridge.cc's pktdrv stays
+// inert. The interface mirrors DOSBox's so the call sites type-check.
+class EthernetConnection {
+public:
+    virtual ~EthernetConnection() = default;
+    virtual void SendPacket(const uint8_t *packet, int size) = 0;
+    virtual void GetPackets(std::function<int(const uint8_t *, int)> callback) = 0;
+};
+EthernetConnection *ETHERNET_OpenConnection(const char *backend);
+
 // ---- Backend bring-up + register sync ------------------------------------
 namespace dosiz_compat {
-// Create the emu88 machine (RAM size in MB) and bind the shim to it.
-void init_machine(uint32_t ram_mb);
+void init_machine(uint32_t ram_mb);   // create + bind the emu88 machine
 void shutdown_machine();
-// Sync the cpu_regs / Segs interface to/from the emu88 engine. Called at run
-// and interrupt-trap boundaries so bridge.cc always sees a consistent cpu_regs.
-void sync_to_emu();     // cpu_regs + Segs -> emu88
-void sync_from_emu();   // emu88 -> cpu_regs + Segs
+void sync_to_emu();     // cpu_regs + Segs + cpu -> emu88
+void sync_from_emu();   // emu88 -> cpu_regs + Segs + cpu
 } // namespace dosiz_compat
 
 #endif // DOSIZ_DOSBOX_COMPAT_H
