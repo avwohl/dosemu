@@ -22,9 +22,12 @@ exception (#GP) interception**. emu88 is now validated exactly where that matter
 - **SingleStepTests/80386 (1.76M per-instruction cases): 99.983%** — every
   architecturally *defined* behavior is correct.
 
-emu88 is original code (not derived from dosbox-staging), so adopting it for the
-CPU lets dosiz drop the dosbox-staging **GPLv2** dependency for the processor
-core. Confirm licensing terms with the qxDOS repo before relying on this.
+emu88 is original code (not derived from dosbox-staging), licensed **GPL v3** in
+qxDOS (it ships under `qxDOS/emu88/`). Adopting it removes the *dosbox-staging
+codebase* dependency for the processor core, but emu88 is itself copyleft
+(GPL v3) — so this is a dependency change, **not** a way out of GPL. emu88 is the
+same author's code, so its license for dosiz is the author's to set; confirm the
+intended terms before relying on it.
 
 ## CPU behaviors dosiz depends on — all fixed/validated (2026-06-04)
 
