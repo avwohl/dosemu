@@ -32,6 +32,33 @@ struct VgaState {
 };
 VgaState g;
 
+// ---- VESA / VBE state ------------------------------------------------------
+constexpr uint32_t SVGA_LFB_PHYS    = 0xE0000000u;   // LFB aperture (PhysBasePtr)
+constexpr uint32_t SVGA_VRAM_TOTAL  = 8u * 1024 * 1024;  // advertised VRAM
+
+const VesaMode kVesaModes[] = {
+  {0x100, 640, 400, 8}, {0x101, 640, 480, 8}, {0x103, 800, 600, 8},
+  {0x105,1024, 768, 8}, {0x107,1280,1024, 8},
+  {0x10D, 320, 200,15}, {0x110, 640, 480,15}, {0x113, 800, 600,15},
+  {0x116,1024, 768,15}, {0x119,1280,1024,15},
+  {0x10E, 320, 200,16}, {0x111, 640, 480,16}, {0x114, 800, 600,16},
+  {0x117,1024, 768,16}, {0x11A,1280,1024,16},
+  {0x10F, 320, 200,24}, {0x112, 640, 480,24}, {0x115, 800, 600,24},
+  {0x118,1024, 768,24}, {0x11B,1280,1024,24},
+  {0x140, 320, 200,32}, {0x141, 640, 480,32}, {0x142, 800, 600,32},
+  {0x143,1024, 768,32}, {0x144,1280,1024,32},
+};
+constexpr int kNumVesaModes = (int)(sizeof(kVesaModes) / sizeof(kVesaModes[0]));
+
+struct VesaState {
+  bool     active = false;
+  uint16_t mode = 0;
+  int      xres = 0, yres = 0, bpp = 0;
+  int      stride = 0;            // bytes per scan line
+  uint32_t display_start = 0;     // byte offset (4F07 pan)
+};
+VesaState vs;
+
 void init_default_palette(uint8_t dac[][3]) {
   static const uint8_t cga16[16][3] = {
     { 0, 0, 0}, { 0, 0,42}, { 0,42, 0}, { 0,42,42},
@@ -69,6 +96,49 @@ inline uint32_t dac_to_argb(const uint8_t c[3]) {
 
 bool is_text_mode() { return g.mode != 0x13; }
 
+// Composite the SVGA framebuffer (emu88_mem::svga_vram) at the active VESA
+// depth into the ARGB output buffer.
+void render_vesa(uint32_t *out, int w, int h) {
+  emu88_mem *mem = dosiz_compat::machine_mem();
+  const uint8_t *fb = mem ? mem->svga_base() : nullptr;
+  if (!fb) { std::memset(out, 0, (size_t)w * h * 4); return; }
+  const int bypp = vesa_bpp_bytes(vs.bpp);
+  const uint32_t vram = mem->svga_vram_size;
+  for (int y = 0; y < h; y++) {
+    const uint32_t base = vs.display_start + (uint32_t)y * (uint32_t)vs.stride;
+    uint32_t *line = out + (size_t)y * w;
+    for (int x = 0; x < w; x++) {
+      const uint32_t o = base + (uint32_t)x * bypp;
+      if (o + bypp > vram) { line[x] = 0xFF000000u; continue; }
+      const uint8_t *px = fb + o;
+      uint32_t argb;
+      switch (vs.bpp) {
+      case 8:
+        argb = dac_to_argb(g.dac[px[0]]);
+        break;
+      case 15: {  // RGB555
+        uint16_t v = (uint16_t)(px[0] | (px[1] << 8));
+        uint8_t r = (v >> 10) & 0x1F, gg = (v >> 5) & 0x1F, b = v & 0x1F;
+        argb = 0xFF000000u | ((uint32_t)((r << 3) | (r >> 2)) << 16)
+             | ((uint32_t)((gg << 3) | (gg >> 2)) << 8) | ((b << 3) | (b >> 2));
+        break;
+      }
+      case 16: {  // RGB565
+        uint16_t v = (uint16_t)(px[0] | (px[1] << 8));
+        uint8_t r = (v >> 11) & 0x1F, gg = (v >> 5) & 0x3F, b = v & 0x1F;
+        argb = 0xFF000000u | ((uint32_t)((r << 3) | (r >> 2)) << 16)
+             | ((uint32_t)((gg << 2) | (gg >> 4)) << 8) | ((b << 3) | (b >> 2));
+        break;
+      }
+      default:    // 24bpp / 32bpp: little-endian B,G,R[,X]
+        argb = 0xFF000000u | ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | px[0];
+        break;
+      }
+      line[x] = argb;
+    }
+  }
+}
+
 } // namespace
 
 void init() {
@@ -83,6 +153,7 @@ int current_mode() { return g.mode; }
 
 void set_mode(int mode) {
   g.mode = mode;
+  vs.active = false;             // a legacy mode set leaves VESA
   emu88_mem *mem = dosiz_compat::machine_mem();
   if (!mem) return;
   // dosiz only drives legacy VGA: turn off any VESA/SVGA window and Mode-X
@@ -107,8 +178,55 @@ void set_mode(int mode) {
 }
 
 void frame_dims(int *w, int *h) {
-  if (is_text_mode()) { *w = 80 * 8; *h = 25 * 16; }   // 640x400
-  else                { *w = 320;    *h = 200; }
+  if (vs.active)           { *w = vs.xres;  *h = vs.yres; }
+  else if (is_text_mode()) { *w = 80 * 8;   *h = 25 * 16; }   // 640x400
+  else                     { *w = 320;      *h = 200; }
+}
+
+int             vesa_bpp_bytes(int bpp) { return bpp <= 8 ? 1 : bpp <= 16 ? 2 : bpp <= 24 ? 3 : 4; }
+int             vesa_mode_count()       { return kNumVesaModes; }
+const VesaMode *vesa_mode_at(int i)     { return (i >= 0 && i < kNumVesaModes) ? &kVesaModes[i] : nullptr; }
+bool            vesa_active()           { return vs.active; }
+uint16_t        vesa_mode_number()      { return vs.active ? vs.mode : 0; }
+uint32_t        vesa_vram_total()       { return SVGA_VRAM_TOTAL; }
+uint32_t        vesa_lfb_phys()         { return SVGA_LFB_PHYS; }
+void            vesa_set_scanline_bytes(int bytes) { if (bytes > 0) vs.stride = bytes; }
+void            vesa_set_display_start(uint32_t off) { vs.display_start = off; }
+void            vesa_set_window(uint32_t off) { emu88_mem *m = dosiz_compat::machine_mem(); if (m) m->svga_window_off = off; }
+uint32_t        vesa_get_window() { emu88_mem *m = dosiz_compat::machine_mem(); return m ? m->svga_window_off : 0; }
+
+const VesaMode *vesa_find(uint16_t num) {
+  num &= 0x3FFF;
+  for (int i = 0; i < kNumVesaModes; i++)
+    if (kVesaModes[i].num == num) return &kVesaModes[i];
+  return nullptr;
+}
+
+void vesa_get(int *w, int *h, int *bpp, int *stride, uint32_t *ds) {
+  if (w) *w = vs.xres; if (h) *h = vs.yres; if (bpp) *bpp = vs.bpp;
+  if (stride) *stride = vs.stride; if (ds) *ds = vs.display_start;
+}
+
+bool vesa_set_mode(uint16_t modenum) {
+  const bool no_clear = (modenum & 0x8000) != 0;   // bit15: preserve framebuffer
+  const VesaMode *m = vesa_find(modenum);
+  if (!m) return false;
+  emu88_mem *mem = dosiz_compat::machine_mem();
+  if (!mem) return false;
+  mem->svga_ensure(SVGA_VRAM_TOTAL);               // allocate the full advertised VRAM
+  if (!no_clear && mem->svga_base()) std::memset(mem->svga_base(), 0, mem->svga_vram_size);
+  vs.active = true;
+  vs.mode = m->num;
+  vs.xres = m->w; vs.yres = m->h; vs.bpp = m->bpp;
+  vs.stride = (int)((uint32_t)m->w * vesa_bpp_bytes(m->bpp));
+  vs.display_start = 0;
+  mem->svga_active = true;
+  mem->svga_window_off = 0;
+  mem->svga_lfb_phys = SVGA_LFB_PHYS;
+  mem->vga_planar = false;
+  g.mode = m->num;
+  if (m->bpp == 8) init_default_palette(g.dac);
+  return true;
 }
 
 void set_dac(int index, uint8_t r, uint8_t gg, uint8_t b) {
@@ -148,6 +266,8 @@ void render(uint32_t *out, int *w, int *h) {
   int fw, fh;
   frame_dims(&fw, &fh);
   *w = fw; *h = fh;
+
+  if (vs.active) { render_vesa(out, fw, fh); return; }
 
   if (is_text_mode()) {
     // Cursor position for the active page lives in BDA 0x40:0x50 (row<<8|col).

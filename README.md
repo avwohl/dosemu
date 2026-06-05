@@ -131,7 +131,7 @@ build. dosiz makes the DOS program see host files directly, so you can:
 - Run a DOS C compiler as if it were a native CLI tool
 - Use long filenames on the host while presenting 8.3 names to DOS
 - Run text-only programs with no window at all (the default)
-- Or open a VGA window with `--window` (text + 320x200 graphics)
+- Or open a VGA window with `--window` (text + VGA/SVGA graphics)
 - Redirect DOS printer / AUX I/O to host files
 
 Because the syscall layer is native C++ and emu88 is self-contained, dosiz is
@@ -172,13 +172,13 @@ Options:
 	--memsize=N         DOS memory in MB (default: 16)
 	--verbose, -v       Trace DOS syscalls
 
-`--window` opens a window and renders VGA text mode + 320x200x256 graphics
-(mode 13h) via an INT 10h video BIOS, with keyboard input; it needs SDL2 at
-build time (otherwise it prints a notice and runs headless). `DOSIZ_FRAME_DUMP=
-out.ppm` renders the final screen to a PPM without needing a window.
-`--machine=NAME` and `--cpu=NAME` are accepted but currently inert. Audio
-(Sound Blaster/AdLib), mouse, joystick, and SVGA/VESA modes are not yet wired
-on the emu88 backend.
+`--window` opens a window and renders VGA text, 320x200x256 graphics (mode 13h),
+and SVGA/VESA VBE 2.0 modes (8/15/16/24/32-bpp up to 1280x1024) via an INT 10h
+video BIOS, with keyboard input; it needs SDL2 at build time (otherwise it
+prints a notice and runs headless). `DOSIZ_FRAME_DUMP=out.ppm` renders the final
+screen to a PPM without needing a window. `--machine=NAME` and `--cpu=NAME` are
+accepted but currently inert. Audio (Sound Blaster/AdLib), the mouse, and the
+joystick are not yet wired on the emu88 backend.
 
 ## Example .cfg
 

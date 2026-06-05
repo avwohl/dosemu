@@ -7639,7 +7639,156 @@ void dosiz_video_tick() {
 #endif
 }
 
-// INT 10h video BIOS (the subset needed for windowed text + mode 13h).
+// VESA VBE structures live in the video-BIOS ROM region at segment 0xC000.
+constexpr uint16_t VBE_ROM_SEG     = 0xC000;
+constexpr uint32_t VBE_ROM_LIN     = 0xC0000u;
+constexpr uint16_t VBE_OFF_OEM     = 0x0010;
+constexpr uint16_t VBE_OFF_VENDOR  = 0x0050;
+constexpr uint16_t VBE_OFF_PRODUCT = 0x0080;
+constexpr uint16_t VBE_OFF_REV     = 0x00C0;
+constexpr uint16_t VBE_OFF_MODES   = 0x0100;
+
+// Lay down the VBE ROM (signature + OEM strings + the 0xFFFF-terminated mode
+// list) that the VbeInfoBlock points at. Done once in dosiz_startup.
+void dosiz_vesa_init_rom() {
+  mem_writeb(VBE_ROM_LIN + 0, 0x55);
+  mem_writeb(VBE_ROM_LIN + 1, 0xAA);
+  mem_writeb(VBE_ROM_LIN + 2, 0x40);   // ROM size in 512-byte blocks
+  auto put = [&](uint16_t off, const char *s) {
+    for (uint32_t i = 0;; i++) { mem_writeb(VBE_ROM_LIN + off + i, (uint8_t)s[i]); if (!s[i]) break; }
+  };
+  put(VBE_OFF_OEM,     "S3 Incorporated. Trio64 (emu88)");
+  put(VBE_OFF_VENDOR,  "S3 Incorporated.");
+  put(VBE_OFF_PRODUCT, "Trio64 (emu88 VESA)");
+  put(VBE_OFF_REV,     "Rev 1.0");
+  uint32_t mp = VBE_ROM_LIN + VBE_OFF_MODES;
+  for (int i = 0; i < dosiz::video::vesa_mode_count(); i++) {
+    mem_writew(mp, dosiz::video::vesa_mode_at(i)->num); mp += 2;
+  }
+  mem_writew(mp, 0xFFFF);
+}
+
+// INT 10h AH=4F: VESA VBE 2.0. Returns the AX value to report.
+uint16_t dosiz_int10_vesa() {
+  // ES:DI buffer linear (real-mode or PM).
+  const PhysPt p = SegPhys(es) + (cpu.pmode ? reg_edi : reg_di);
+  switch (reg_al) {
+    case 0x00: {  // VbeInfoBlock (512 bytes)
+      for (int i = 0; i < 512; i++) mem_writeb(p + i, 0);
+      mem_writeb(p + 0, 'V'); mem_writeb(p + 1, 'E'); mem_writeb(p + 2, 'S'); mem_writeb(p + 3, 'A');
+      mem_writew(p + 0x04, 0x0200);                                  // VBE 2.0
+      mem_writed(p + 0x06, ((uint32_t)VBE_ROM_SEG << 16) | VBE_OFF_OEM);
+      mem_writed(p + 0x0A, 0);                                       // Capabilities
+      mem_writed(p + 0x0E, ((uint32_t)VBE_ROM_SEG << 16) | VBE_OFF_MODES);
+      mem_writew(p + 0x12, (uint16_t)(dosiz::video::vesa_vram_total() / 65536));
+      mem_writew(p + 0x14, 0x0100);
+      mem_writed(p + 0x16, ((uint32_t)VBE_ROM_SEG << 16) | VBE_OFF_VENDOR);
+      mem_writed(p + 0x1A, ((uint32_t)VBE_ROM_SEG << 16) | VBE_OFF_PRODUCT);
+      mem_writed(p + 0x1E, ((uint32_t)VBE_ROM_SEG << 16) | VBE_OFF_REV);
+      return 0x004F;
+    }
+    case 0x01: {  // ModeInfoBlock (256 bytes) for CX
+      const auto *m = dosiz::video::vesa_find(reg_cx);
+      for (int i = 0; i < 256; i++) mem_writeb(p + i, 0);
+      if (!m) return 0x014F;
+      const int bypp = dosiz::video::vesa_bpp_bytes(m->bpp);
+      const uint32_t stride = (uint32_t)m->w * bypp;
+      const uint32_t fbsize = stride * m->h;
+      const uint32_t vram = dosiz::video::vesa_vram_total();
+      mem_writew(p + 0x00, 0x009B);   // attrs: supported|color|graphics|LFB
+      mem_writeb(p + 0x02, 0x07);     // WinA: relocatable|read|write
+      mem_writew(p + 0x04, 64); mem_writew(p + 0x06, 64);   // Win granularity / size (KB)
+      mem_writew(p + 0x08, 0xA000);   // WinASegment
+      mem_writew(p + 0x10, (uint16_t)stride);   // BytesPerScanLine
+      mem_writew(p + 0x12, m->w); mem_writew(p + 0x14, m->h);
+      mem_writeb(p + 0x16, 8); mem_writeb(p + 0x17, 16);    // char cell
+      mem_writeb(p + 0x18, 1);        // planes
+      mem_writeb(p + 0x19, (uint8_t)m->bpp);
+      mem_writeb(p + 0x1A, 1);        // banks
+      mem_writeb(p + 0x1B, m->bpp <= 8 ? 4 : 6);   // model: packed / direct color
+      uint8_t pages = (fbsize && vram >= fbsize) ? (uint8_t)((vram / fbsize) - 1) : 0;
+      mem_writeb(p + 0x1D, pages);
+      mem_writeb(p + 0x1E, 1);
+      auto mask = [&](uint8_t rs, uint8_t rp, uint8_t gs, uint8_t gp,
+                      uint8_t bs, uint8_t bp, uint8_t xs, uint8_t xp) {
+        mem_writeb(p + 0x1F, rs); mem_writeb(p + 0x20, rp);
+        mem_writeb(p + 0x21, gs); mem_writeb(p + 0x22, gp);
+        mem_writeb(p + 0x23, bs); mem_writeb(p + 0x24, bp);
+        mem_writeb(p + 0x25, xs); mem_writeb(p + 0x26, xp);
+      };
+      switch (m->bpp) {
+        case 15: mask(5, 10, 5, 5, 5, 0, 1, 15); break;
+        case 16: mask(5, 11, 6, 5, 5, 0, 0, 0);  break;
+        case 24: mask(8, 16, 8, 8, 8, 0, 0, 0);  break;
+        case 32: mask(8, 16, 8, 8, 8, 0, 8, 24); break;
+        default: break;
+      }
+      mem_writed(p + 0x28, dosiz::video::vesa_lfb_phys());   // PhysBasePtr
+      mem_writew(p + 0x32, (uint16_t)stride);                // LinBytesPerScanLine
+      return 0x004F;
+    }
+    case 0x02:  // set mode (BX)
+      return dosiz::video::vesa_set_mode(reg_bx) ? 0x004F : 0x014F;
+    case 0x03:  // get current mode
+      reg_bx = dosiz::video::vesa_active()
+                 ? (uint16_t)(dosiz::video::vesa_mode_number() | 0x4000)
+                 : (uint16_t)(dosiz::video::current_mode() & 0xFF);
+      return 0x004F;
+    case 0x05:  // bank switch (window A)
+      if (reg_bl != 0) return 0x014F;
+      if (reg_bh == 0)      dosiz::video::vesa_set_window((uint32_t)reg_dx * 65536u);
+      else if (reg_bh == 1) reg_dx = (uint16_t)(dosiz::video::vesa_get_window() / 65536u);
+      else return 0x014F;
+      return 0x004F;
+    case 0x06: {  // get/set scan-line length
+      int w, h, bpp, stride; uint32_t ds;
+      dosiz::video::vesa_get(&w, &h, &bpp, &stride, &ds);
+      const int bypp = dosiz::video::vesa_bpp_bytes(bpp ? bpp : 8);
+      if (dosiz::video::vesa_active() && (reg_bl == 0 || reg_bl == 2)) {
+        uint32_t want = (reg_bl == 0) ? (uint32_t)reg_cx * bypp : (uint32_t)reg_cx;
+        uint32_t minb = (uint32_t)w * bypp;
+        if (want < minb) want = minb;
+        if (h > 0 && want * (uint32_t)h <= dosiz::video::vesa_vram_total())
+          dosiz::video::vesa_set_scanline_bytes((int)want);
+      }
+      dosiz::video::vesa_get(&w, &h, &bpp, &stride, &ds);
+      uint32_t s = stride ? (uint32_t)stride : 1;
+      reg_bx = (uint16_t)s;
+      reg_cx = (uint16_t)(s / (bypp ? bypp : 1));
+      reg_dx = (uint16_t)(dosiz::video::vesa_vram_total() / s);
+      return 0x004F;
+    }
+    case 0x07: {  // get/set display start (pan)
+      int w, h, bpp, stride; uint32_t ds;
+      dosiz::video::vesa_get(&w, &h, &bpp, &stride, &ds);
+      const int bypp = dosiz::video::vesa_bpp_bytes(bpp ? bpp : 8);
+      uint32_t s = stride ? (uint32_t)stride : 1;
+      if (reg_bl == 0x00 || reg_bl == 0x80)
+        dosiz::video::vesa_set_display_start((uint32_t)reg_dx * s + (uint32_t)reg_cx * bypp);
+      else if (reg_bl == 0x01) {
+        reg_dx = (uint16_t)(ds / s);
+        reg_cx = (uint16_t)((ds % s) / (bypp ? bypp : 1));
+      } else return 0x014F;
+      return 0x004F;
+    }
+    case 0x08:  // DAC palette width: keep 6-bit
+      reg_bh = 6;
+      return 0x004F;
+    case 0x09: {  // set/get palette data (ES:DI table, CX entries from DX, B,G,R,x)
+      if (reg_bl == 0x00 || reg_bl == 0x80) {
+        for (int i = 0; i < (int)reg_cx; i++) {
+          uint8_t b = mem_readb(p + i * 4 + 0), gg = mem_readb(p + i * 4 + 1), r = mem_readb(p + i * 4 + 2);
+          dosiz::video::set_dac(reg_dx + i, r, gg, b);
+        }
+      }
+      return 0x004F;
+    }
+    default:    // 4F04 (state), 4F0A (PM iface), etc. -- unsupported
+      return 0x014F;
+  }
+}
+
+// INT 10h video BIOS (text, mode 13h, and VESA VBE).
 Bitu dosiz_int10() {
   switch (reg_ah) {
     case 0x00:  // set video mode (AL)
@@ -7707,8 +7856,8 @@ Bitu dosiz_int10() {
     case 0x1A:  // get/set display combination code
       if (reg_al == 0x1A) { reg_al = 0x1A; reg_bx = 0x0008; }  // VGA colour
       return CBRET_NONE;
-    case 0x4F:  // VESA VBE: report unsupported
-      reg_ax = 0x014F;
+    case 0x4F:  // VESA VBE 2.0
+      reg_ax = dosiz_int10_vesa();
       return CBRET_NONE;
     default:
       return CBRET_NONE;
@@ -7974,6 +8123,7 @@ void dosiz_startup() {
   mem_writeb(0x484u, 24);            // BDA: rows - 1
   mem_writew(0x485u, 16);            // BDA: char height
   kbd_ring_init();
+  dosiz_vesa_init_rom();
   CALLBACK_HandlerObject int10_cb;
   int10_cb.Install(&dosiz_int10, CB_IRET, "dosiz Int 10 (video BIOS)");
   int10_cb.Set_RealVec(0x10);

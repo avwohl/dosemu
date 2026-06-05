@@ -41,6 +41,26 @@ void render(uint32_t *out, int *w, int *h);
 // verifying output without a window. Returns false on file error.
 bool dump_ppm(const char *path);
 
+// ---- VESA / VBE (SVGA) -----------------------------------------------------
+// The INT 10h AH=4F handler (bridge.cc) drives these; the renderer composites
+// the SVGA framebuffer (emu88_mem::svga_vram) at the active mode's depth.
+struct VesaMode { uint16_t num; uint16_t w; uint16_t h; uint8_t bpp; };
+
+int              vesa_mode_count();
+const VesaMode  *vesa_mode_at(int i);
+const VesaMode  *vesa_find(uint16_t num);          // strips the LFB/no-clear bits
+bool             vesa_active();
+uint16_t         vesa_mode_number();               // active mode (0 if none)
+void             vesa_get(int *w, int *h, int *bpp, int *stride, uint32_t *display_start);
+void             vesa_set_scanline_bytes(int bytes);
+void             vesa_set_display_start(uint32_t byte_off);
+void             vesa_set_window(uint32_t byte_off);   // 4F05 bank window
+uint32_t         vesa_get_window();
+uint32_t         vesa_vram_total();                // advertised VRAM (bytes)
+uint32_t         vesa_lfb_phys();                  // LFB aperture physical base
+int              vesa_bpp_bytes(int bpp);
+bool             vesa_set_mode(uint16_t modenum);  // activate: VRAM + emu88 flags + state
+
 } // namespace video
 } // namespace dosiz
 
