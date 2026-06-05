@@ -1,3 +1,11 @@
+STATUS (achieved): dosiz runs DOS programs by emulating the DOS API itself
+(INT 21h/31h/67h) on top of the in-tree emu88 386 CPU core. Real-mode DOS,
+the full DPMI 0.9 host, 32-bit DJGPP programs, EMS 4.0 + VCPI, and the .cfg
+file-mapping layer all work. The original goals below are met; emu88 replaced
+dosbox as the CPU/hardware backend (see docs/emu88-cpu-backend.md).
+
+--- original brief ---
+
 create public repo avwohl/dosiz
 create an msdos emulator
 for a template of how it should work see ../cpmemu

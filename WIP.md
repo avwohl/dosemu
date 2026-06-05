@@ -1,3 +1,9 @@
+> **Note:** this is a historical session journal. Entries below the DOSBox→emu88
+> migration describe the old DOSBox-backed build (SDL2/glib/meson deps, the
+> `patches/` set, the submodule). For the current architecture see `README.md`,
+> `CLAUDE.md`, and `docs/emu88-cpu-backend.md`: dosiz now runs on the in-tree
+> emu88 386 core with no DOSBox/SDL2 dependency.
+
 # Windows status (2026-05-19) — Smalltalk-80 bring-up
 
 Drove a real DJGPP-cross app (st80-2026 Smalltalk-80) end-to-end.

@@ -1,14 +1,15 @@
-# emu88 as an alternative CPU backend
+# emu88: the dosiz CPU backend
 
-dosiz currently links **dosbox-staging** for its CPU + PC hardware. The sibling
-project **[qxDOS](https://github.com/avwohl/qxDOS)** contains **emu88**, a
-from-scratch C++20 386 interpreter that can serve as an alternative CPU backend
-(qxDOS itself ships both and lets the user pick at runtime). This note is for
-when dosiz wants to use emu88 instead of dosbox's CPU.
+dosiz runs on **emu88**, a from-scratch C++20 386 interpreter, for its CPU +
+memory + PC hardware. (Historically dosiz linked **dosbox-staging**; the
+migration to emu88 is complete and DOSBox is no longer a build dependency.
+dosiz drives emu88 through a thin DOSBox→emu88 compatibility shim in
+`src/compat/`, so the DOS host in `src/bridge.cc` runs unchanged.) emu88 is
+vendored in-tree under `emu88/` and shared with the sibling
+**[qxDOS](https://github.com/avwohl/qxDOS)** project, which originated it.
 
-Local path: `../qxDOS/emu88/`. Authoritative status lives in
-`../qxDOS/tests/README.md`. Validated as of **2026-06-04** (qxDOS commit
-`f2392f0`).
+This note records why emu88 is a good fit for dosiz and the CPU behaviors dosiz
+depends on. emu88 validation (qxDOS commit `f2392f0`, 2026-06-04):
 
 ## Why this is worth it for dosiz specifically
 

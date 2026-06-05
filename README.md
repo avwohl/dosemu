@@ -1,20 +1,22 @@
 # dosiz
 
-An MS-DOS emulator that runs DOS programs by linking the
-[dosbox-staging](https://github.com/dosbox-staging/dosbox-staging) CPU and
-PC-hardware emulator in-process and trapping DOS INT 21h calls to C++
-implementations running on the host. Same design as
+An MS-DOS emulator that runs DOS programs by emulating the DOS API itself —
+trapping INT 21h / INT 31h (DPMI) / INT 67h (EMS) and translating them to C++
+implementations on the host — on top of the in-tree
+[emu88](https://github.com/avwohl/qxDOS) 386 CPU core. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
 **Status:** real DOS programs run.  DOS-hosted toolchain binaries run.
 Cross-compiler-produced binaries run.  DPMI 0.9 host complete (every
-INT 31h sub-function implemented or stubbed, 23 DPMI fixtures green).
-LE (Linear Executable) loader loads, applies fixups, installs LDT
-descriptors, and enters 32-bit protected mode end-to-end on
-hand-crafted fixtures; real DOS4G-hosted Watcom binaries load their
-full image + apply all fixups but stall on the runtime's DOS4G
-pre-entry environment convention (a DPMI-host-compatibility gap).
+INT 31h sub-function implemented or stubbed, 25 DPMI fixtures green) — real
+32-bit DJGPP programs run end-to-end (printf, argv, env, malloc, file I/O,
+spawn, POSIX signals, C++ ctors/dtors).  LIM EMS 4.0 plus a VCPI detection
+subset are provided on INT 67h.  LE (Linear Executable) loader loads, applies
+fixups, installs LDT descriptors, and enters 32-bit protected mode end-to-end
+on hand-crafted fixtures; real DOS4G-hosted Watcom binaries load their full
+image + apply all fixups but stall on the runtime's DOS4G pre-entry
+environment convention (a DPMI-host-compatibility gap).
 
 	dosiz tests/EXE2BIN.EXE              → Open Watcom banner   (real DOS-hosted)
 	dosiz tests/HELLO_W.EXE              → hello from watcom    (Watcom cross-compiled)
@@ -27,8 +29,9 @@ pre-entry environment convention (a DPMI-host-compatibility gap).
 	                                        GP-faults on DOS4G pre-entry selector
 	                                        setup we don't emulate
 
-dosbox-staging is linked in-process for CPU + PC hardware. DOS INT 21h is
-handled entirely by C++ host code. Currently implemented:
+The emu88 386 core provides the CPU + memory + PC hardware, driven through a
+thin DOSBox→emu88 compatibility shim (`src/compat/`). DOS INT 21h is handled
+entirely by C++ host code. Currently implemented:
 
 	01  stdin char+echo    0E  set drive          3E  close handle
 	02  putchar            0B  stdin ready?       3F  read handle
@@ -41,7 +44,7 @@ handled entirely by C++ host code. Currently implemented:
 	35  get int vector     37  switchar           48  alloc (MCB)
 	38  country info       39  mkdir              49  free + coalesce
 	3A  rmdir              3B  chdir              4A  resize (MCB)
-	3C  create handle      3D  open handle        4B  exec (stub err)
+	3C  create handle      3D  open handle        4B  exec
 	4C  exit               4E  findfirst          4F  findnext
 	50  set PSP            51  get PSP            56  rename
 	5D  network (stub)     62  get PSP            63  lead-byte (stub)
@@ -58,6 +61,12 @@ alloc/free/resize (0501..0503) with a two-tier MCB-under-1MB /
 pm_arena-above-1MB backing store, lock/unlock and paging stubs
 (0600..0604, 0702..0703), physical mapping pass-through (0800..0801),
 virtual IF state (0900..0902), and debug watchpoint stubs (0B00..0B03).
+
+INT 67h provides a functional LIM EMS 4.0 manager (a host-side page pool
+reached through a 16KB×4 page frame at 0xE000, allocate/map/realloc/move/
+save-restore) plus a VCPI detection + page-count subset (DE00/DE02/DE03/DE0A);
+the VCPI PM-transition functions return "unsupported" so extenders fall back
+to dosiz's DPMI.
 
 RM<->PM mode switching is full-fidelity: 16-bit and 32-bit client
 entry both work, INT 21h from PM reflects to our host handler via
@@ -90,61 +99,26 @@ per-file / per-pattern mappings come from a `.cfg` file:
 	*.BAS          = text           # mode-only wildcard override
 
 Text mode strips CR on write and expands LF to CRLF on read so files
-live on the host in Unix format. No subprocess, no dosbox shell, no
-generated dosbox.conf.
+live on the host in Unix format. No subprocess, no DOS shell, no config
+files beyond the optional `.cfg`.
 
 ## Building
 
-### Linux (Debian/Ubuntu)
+dosiz has **no external dependencies** beyond a C++20 compiler, CMake, and
+libm — no SDL2, glib, meson, or DOSBox. The emu88 backend is vendored in-tree.
 
-	sudo apt install build-essential cmake ninja-build meson pkg-config \
-	  libsdl2-dev libsdl2-net-dev libpng-dev libopusfile-dev \
-	  libspeexdsp-dev libfluidsynth-dev libslirp-dev libasound2-dev \
-	  libxi-dev libglib2.0-dev patch
+	# Debian/Ubuntu
+	sudo apt install build-essential cmake
 
-### Windows 11 (MSYS2 / MinGW-w64)
+	# macOS
+	brew install cmake
 
-Install MSYS2 (`winget install MSYS2.MSYS2 --location C:\s\msys64`
-recommended; any install location works as long as you use its
-`MSYS2 MINGW x64` shell).  Then from the MinGW x64 shell:
+	# build + smoke-test (all platforms)
+	make                         # wrapper: cmake -S src -B build && cmake --build build
+	build/dosiz --version        # → dosiz 0.1.0-dev (backend: emu88)
+	build/dosiz tests/HELLO.COM  # → dosiz-hello-ok
 
-	pacman -Sy --noconfirm --needed \
-	  mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake \
-	  mingw-w64-x86_64-meson    mingw-w64-x86_64-ninja \
-	  mingw-w64-x86_64-pkgconf  mingw-w64-x86_64-glib2 \
-	  mingw-w64-x86_64-iir      mingw-w64-x86_64-fluidsynth \
-	  mingw-w64-x86_64-munt-mt32emu mingw-w64-x86_64-libpng \
-	  mingw-w64-x86_64-libslirp mingw-w64-x86_64-opusfile \
-	  mingw-w64-x86_64-SDL2     mingw-w64-x86_64-SDL2_net \
-	  mingw-w64-x86_64-zlib     mingw-w64-x86_64-speexdsp \
-	  base-devel patch git
-
-All three patches in `patches/` (including the two Windows-only build
-fixups — a MinGW winpthreads `clock_gettime` collision in dosbox-staging's
-bundled enet, and a GL-probe guard in sdlmain so the headless "dummy"
-SDL driver doesn't abort at startup) are applied automatically by
-`make patch`.
-
-### macOS (Homebrew)
-
-	brew install cmake ninja meson pkg-config sdl2 sdl2_net glib \
-	  libpng opusfile speexdsp fluidsynth iir1
-
-### Build and smoke-test (all platforms)
-
-	make               # applies the dosbox-staging patches, builds dosbox
-	                   # libs, builds dosiz
-
-	build/dosiz --version        # should report the linked dosbox-staging version
-	build/dosiz tests/HELLO.COM  # prints dosiz-hello-ok
-
-`make distclean` resets the dosbox-staging submodule to its upstream state
-and clears all build artifacts.
-
-On Windows the produced `build/dosiz.exe` links dynamically against the
-MinGW-w64 runtime plus SDL2, glib, fluidsynth, etc.  Run it from the same
-`MSYS2 MINGW x64` shell you built it in, or copy the required DLLs next
-to the executable (e.g. `ntldd -R build/dosiz.exe | grep mingw64`).
+`make clean` removes the build directory.
 
 ## Why
 
@@ -154,23 +128,23 @@ build. dosiz makes the DOS program see host files directly, so you can:
 
 - Run a DOS C compiler as if it were a native CLI tool
 - Use long filenames on the host while presenting 8.3 names to DOS
-- Skip the SDL window entirely for text-only programs
+- Run text-only programs with no window at all (the default)
 - Redirect DOS printer / AUX I/O to host files
-- Drive graphical DOS programs with `--window`
 
-Because the syscall layer is native C++, dosiz is intended to run on
-Linux, macOS, Windows, iOS, iPadOS, and Android — the same platform set
-cpmemu already covers.
+Because the syscall layer is native C++ and emu88 is self-contained, dosiz is
+intended to run on Linux, macOS, Windows, iOS, iPadOS, and Android — the same
+platform set cpmemu already covers.
 
 ## Architecture
 
 	dosiz binary
-		dosbox-staging CPU + PC hardware (linked as library)
-		host-side DOS: INT 21h handler → C++ file / memory / process calls
+		emu88 386 CPU + memory + PC hardware (vendored, in-tree)
+		DOSBox→emu88 compatibility shim (src/compat/)
+		host-side DOS: INT 21h/31h/67h handlers → C++ file / memory / process calls
 		.cfg parser (cpmemu-style)
 
-No subprocess, no generated dosbox.conf. The guest sees a DOS; the host
-implements what that DOS does.
+No subprocess, no config files beyond the optional `.cfg`. The guest sees a
+DOS; the host implements what that DOS does.
 
 ## Usage
 
@@ -191,11 +165,13 @@ Options:
 
 	--help              Show usage
 	--version           Print version
-	--window            Open an SDL window (default: headless)
-	--machine=NAME      PC machine type (default: svga_s3)
-	--cpu=NAME          CPU type (default: auto)
 	--memsize=N         DOS memory in MB (default: 16)
 	--verbose, -v       Trace DOS syscalls
+
+`--window`, `--machine=NAME`, and `--cpu=NAME` are accepted for
+compatibility but are currently inert: dosiz runs headless/text-only on the
+emu88 backend. The optional PC hardware (SVGA window, Sound Blaster/AdLib,
+mouse, joystick) lives in the shared emu88 tree but is not yet attached here.
 
 ## Example .cfg
 
@@ -206,16 +182,16 @@ See `examples/example.cfg` for a documented sample. Minimal:
 	drive_C  = ${HOME}/dos
 	drive_D  = /mnt/sources
 	memsize  = 16
-	cputype  = 486
 
 ## License
 
-GPLv3. dosbox-staging is GPLv2-or-later (compatible). Third-party
-attributions in `docs/CREDITS.md`.
+GPLv3. Parts of the CPU compatibility shim (`src/compat/`) and the INT 67h
+EMS/VCPI provider are derived from dosbox-staging (GPLv2-or-later, compatible).
+Third-party attributions in `docs/CREDITS.md`.
 
 ## Related Projects
 
 - [cpmemu](https://github.com/avwohl/cpmemu) — CP/M 2.2 emulator; the
   translation-layer template and the origin of the `.cfg` format
-- [qxDOS](https://github.com/avwohl/qxDOS) — iOS/Mac DOS emulator, also
-  built on dosbox-staging; source of the `dosbox_bridge` pattern
+- [qxDOS](https://github.com/avwohl/qxDOS) — iOS/Mac DOS emulator; source of
+  the vendored emu88 CPU core
