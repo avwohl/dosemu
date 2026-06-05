@@ -41,6 +41,21 @@ volatile unsigned hw_irq_pending = 0;      // bit i set => IRQ i awaiting delive
 
 bool g_host_audio = false;       // a host audio device is pulling audio_render()
 
+// Joystick / game port. The emulated game port exists by default (centred,
+// no buttons) so INT 15h AH=84h succeeds; SDL overrides with a real stick.
+int      joy_axis[4]    = {0, 0, 0, 0};  // pot positions, -32768..32767 (0 = centre)
+unsigned joy_btn        = 0;             // bit j set => button j pressed
+bool     joy_present    = true;
+int      joy_oneshot[4] = {0, 0, 0, 0};  // game-port monostable countdowns
+
+// Map a pot position to a resistive "count": the value INT 15h AH=84h returns
+// and the number of high reads the game-port monostable yields. Centre ~ 506.
+int axis_count(int a) {
+  double norm = (joy_axis[a] + 32768) / 65535.0;   // 0..1
+  if (norm < 0) norm = 0; if (norm > 1) norm = 1;
+  return 6 + (int)(norm * 1000.0);
+}
+
 int  spk_freq() { return pit2_reload ? (int)(1193182u / pit2_reload) : 0; }
 bool spk_gate() { return (port61 & 0x03) == 0x03; }  // gate + data-enable
 
@@ -91,6 +106,13 @@ void port_out(uint16_t port, uint8_t val) {
     }
   }
 
+  // Game port: a write fires the four axis monostables. Each axis then reads
+  // back high for axis_count(a) reads (proportional to the pot position).
+  if (port == 0x201) {
+    for (int a = 0; a < 4; a++) joy_oneshot[a] = axis_count(a);
+    return;
+  }
+
   switch (port) {
   case 0x20:  // PIC master command (EOI etc.) — accepted; priorities unmodeled.
   case 0xA0:  // PIC slave command
@@ -122,6 +144,19 @@ bool port_in(uint16_t port, uint8_t *out) {
       *out = g_sb->dma_read(port); return true;
     }
   }
+  // Game port: bits 0-3 = axis monostables (high while counting, then drop),
+  // bits 4-7 = buttons (0 = pressed, 1 = released). 0xFF when no game port.
+  if (port == 0x201) {
+    if (!joy_present) { *out = 0xFF; return true; }
+    uint8_t b = 0;
+    for (int a = 0; a < 4; a++)
+      if (joy_oneshot[a] > 0) { b |= (uint8_t)(1 << a); joy_oneshot[a]--; }
+    for (int j = 0; j < 4; j++)
+      if (!(joy_btn & (1u << j))) b |= (uint8_t)(1 << (4 + j));  // released => high
+    *out = b;
+    return true;
+  }
+
   switch (port) {
   case 0x21:  *out = pic_imr_master; return true;
   case 0xA1:  *out = pic_imr_slave;  return true;
@@ -129,6 +164,16 @@ bool port_in(uint16_t port, uint8_t *out) {
   default:    return false;
   }
 }
+
+void set_joystick(const int *axes, unsigned buttons, bool present) {
+  for (int a = 0; a < 4; a++) joy_axis[a] = axes[a];
+  joy_btn     = buttons;
+  joy_present = present;
+}
+
+bool     joystick_present()         { return joy_present; }
+unsigned joystick_buttons()         { return joy_btn; }
+int      joystick_axis_count(int a) { return (a >= 0 && a < 4) ? axis_count(a) : 0; }
 
 int take_pending_irq_vector() {
   if (!hw_irq_pending) return -1;

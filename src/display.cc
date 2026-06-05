@@ -22,6 +22,8 @@ KeyCallback   g_on_key = nullptr;
 MouseCallback g_on_mouse = nullptr;
 AudioCallback g_on_audio = nullptr;
 SDL_AudioDeviceID g_audio = 0;
+JoystickCallback g_on_joystick = nullptr;
+SDL_Joystick *g_joystick = nullptr;
 bool          g_quit = false;
 
 // SDL scancode -> IBM PC set-1 scancode (the value INT 16h reports in AH).
@@ -176,7 +178,34 @@ bool open_audio(AudioCallback cb) {
   return true;
 }
 
+bool open_joystick(JoystickCallback cb) {
+  if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) != 0) return false;
+  g_on_joystick = cb;
+  if (SDL_NumJoysticks() > 0) {
+    g_joystick = SDL_JoystickOpen(0);
+    SDL_JoystickEventState(SDL_ENABLE);
+  }
+  return g_joystick != nullptr;
+}
+
+namespace {
+// Read the open stick and push its state to the guest game port / BIOS.
+void poll_joystick() {
+  if (!g_on_joystick) return;
+  if (!g_joystick) { return; }   // no host stick: leave the emulated default
+  int axes[4] = {0, 0, 0, 0};
+  const int naxes = SDL_JoystickNumAxes(g_joystick);
+  for (int a = 0; a < 4 && a < naxes; a++) axes[a] = SDL_JoystickGetAxis(g_joystick, a);
+  unsigned buttons = 0;
+  const int nbtn = SDL_JoystickNumButtons(g_joystick);
+  for (int b = 0; b < 4 && b < nbtn; b++)
+    if (SDL_JoystickGetButton(g_joystick, b)) buttons |= (1u << b);
+  g_on_joystick(axes, buttons, true);
+}
+} // namespace
+
 void close() {
+  if (g_joystick) { SDL_JoystickClose(g_joystick); g_joystick = nullptr; g_on_joystick = nullptr; }
   if (g_audio)    { SDL_CloseAudioDevice(g_audio); g_audio = 0; g_on_audio = nullptr; }
   if (g_texture)  { SDL_DestroyTexture(g_texture);   g_texture = nullptr; }
   if (g_renderer) { SDL_DestroyRenderer(g_renderer); g_renderer = nullptr; }
@@ -222,6 +251,7 @@ void pump_events() {
       g_on_mouse((int)lx, (int)ly, buttons);
     }
   }
+  poll_joystick();   // push current stick state to the guest game port
 }
 
 bool quit_requested() { return g_quit; }

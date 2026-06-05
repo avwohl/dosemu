@@ -46,6 +46,16 @@ void set_host_audio(bool on);
 // transfer (and raise its IRQ at block end). No-op otherwise.
 void audio_tick();
 
+// Joystick / analog game port (0x201) + INT 15h AH=84h. The host (SDL) pushes
+// the current stick state via set_joystick(); the game port and the BIOS read
+// it back. axes[4] are the four pot positions (-32768..32767, 0 = centred);
+// buttons has bit j set when button j is pressed. The compat shim's EmuCpu
+// routes port 0x201 here; bridge.cc's INT 15h AH=84h uses the accessors.
+void     set_joystick(const int *axes, unsigned buttons, bool present);
+bool     joystick_present();
+unsigned joystick_buttons();          // bit j set => button j pressed
+int      joystick_axis_count(int a);  // resistive "count" for axis a (0..3)
+
 } // namespace hardware
 } // namespace dosiz
 

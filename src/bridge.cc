@@ -8005,6 +8005,35 @@ Bitu dosiz_int10() {
   }
 }
 
+// INT 15h — BIOS misc services. dosiz implements only AH=84h (joystick); every
+// other function is left exactly as before (a plain IRET that returns the
+// caller's flags/registers untouched), so this adds the game-port BIOS without
+// disturbing any other INT 15h behaviour programs may rely on.
+Bitu dosiz_int15() {
+  if (reg_ah != 0x84) return CBRET_NONE;
+  if (!dosiz::hardware::joystick_present()) {  // no game port -> CF set, AH=86h
+    reg_ah = 0x86;
+    CALLBACK_SCF(true);
+    return CBRET_NONE;
+  }
+  if (reg_dx == 0x0000) {            // read button digital inputs
+    unsigned b = dosiz::hardware::joystick_buttons();
+    uint8_t al = 0;                  // bits 4-7: 0 = pressed, 1 = released
+    for (int j = 0; j < 4; j++) if (!(b & (1u << j))) al |= (uint8_t)(1 << (4 + j));
+    reg_al = al;
+    CALLBACK_SCF(false);
+  } else if (reg_dx == 0x0001) {     // read resistive (axis) inputs
+    reg_ax = (uint16_t)dosiz::hardware::joystick_axis_count(0);  // A x
+    reg_bx = (uint16_t)dosiz::hardware::joystick_axis_count(1);  // A y
+    reg_cx = (uint16_t)dosiz::hardware::joystick_axis_count(2);  // B x
+    reg_dx = (uint16_t)dosiz::hardware::joystick_axis_count(3);  // B y
+    CALLBACK_SCF(false);
+  } else {
+    CALLBACK_SCF(true);              // invalid subfunction
+  }
+  return CBRET_NONE;
+}
+
 void dosiz_startup() {
   // Override dosbox's INT 21h callback.  The CALLBACK_HandlerObject is a
   // local: its destructor runs when this function returns, which is still
@@ -8293,6 +8322,11 @@ void dosiz_startup() {
   int16_cb.Install(&dosiz_int16, CB_IRET, "dosiz Int 16 (BIOS kbd)");
   int16_cb.Set_RealVec(0x16);
 
+  // INT 15h -- BIOS misc (only AH=84h joystick is implemented; the rest IRETs).
+  CALLBACK_HandlerObject int15_cb;
+  int15_cb.Install(&dosiz_int15, CB_IRET, "dosiz Int 15 (BIOS misc/joystick)");
+  int15_cb.Set_RealVec(0x15);
+
   // Active for the whole guest run (both the LE/PM and the RM/COM
   // exec paths below).  No-op unless DOSIZ_SCREENSHOT_SECS is set.
   extern void dosiz_screenshot_tick(void);
@@ -8415,6 +8449,8 @@ int run_program(const dosiz::Config &cfg) {
         // SB (that would double-consume the DMA), so flag the host audio pull.
         if (dosiz::display::open_audio(&dosiz::hardware::audio_render))
           dosiz::hardware::set_host_audio(true);
+        // Push host gamepad state to the emulated game port (INT 15h AH=84h).
+        dosiz::display::open_joystick(&dosiz::hardware::set_joystick);
       } else {
         std::fprintf(stderr, "dosiz: could not open a window; running headless.\n");
       }

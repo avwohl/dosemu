@@ -29,6 +29,13 @@ void close();
 using AudioCallback = void (*)(int16_t *out, int frames, int rate);
 bool open_audio(AudioCallback cb);
 
+// Host joystick: open the first connected stick (if any) and push its state to
+// `cb` from pump_events(). axes[4] are pot positions (-32768..32767), buttons
+// has bit j set when button j is down, present is false when no stick exists.
+// Returns true if a stick was opened. Closed by close().
+using JoystickCallback = void (*)(const int *axes, unsigned buttons, bool present);
+bool open_joystick(JoystickCallback cb);
+
 // Blit an ARGB8888 frame (0xAARRGGBB per pixel, row-major, w*h pixels). The
 // window scales the logical wxh to its current size.
 void present(const uint32_t *argb, int w, int h);

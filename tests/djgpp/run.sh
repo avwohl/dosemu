@@ -96,6 +96,9 @@ run_audio ADLIB   "adlib-note-on"
 run_audio SPEAKER "speaker-on"
 run_audio SBDMA   "sb-irq=ok"      # SB DSP+DMA playback, block-end IRQ via PIC
 
+# Joystick: game port (0x201) + INT 15h AH=84h with the default emulated stick.
+run_one JOYTEST "joy-ok" 0 ""
+
 run_one DJ_WRITE  "dj-write=ok"  0 ""
 run_one DJ_PRINTF "dj-printf=ok" 7 ""
 run_one DJ_ARGV   "dj-argv=ok"   0 ""   hello world
