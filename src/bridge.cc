@@ -3805,11 +3805,39 @@ Bitu dosiz_int31() {
       // Reload PM selectors so their descriptor caches come from the
       // GDT/LDT again (CALLBACK_RunRealInt left each cached base set
       // as selector*16 -- its RM interpretation).
-      CPU_SetSegGeneral(ds, saved_ds);
+      //
+      // A segment register may hold a selector whose descriptor the
+      // client freed (DPMI AX=0001 / Free-DOS-Mem AX=0101 zeroes the
+      // LDT slot) *while the selector is still loaded*.  On real x86
+      // the loaded segment keeps working off its cached descriptor
+      // until the program explicitly reloads it -- reloading the same
+      // selector value does NOT re-read a now-not-present descriptor.
+      // DJGPP relies on this (it parks a freed selector in FS/GS).
+      // Re-issuing CPU_SetSegGeneral here forces a fresh descriptor
+      // read; for a freed (zeroed, P=0) slot that raises #NP and
+      // silently kills the client.  Restore the cached descriptor
+      // directly for any saved selector whose descriptor is no longer
+      // present, matching hardware.
+      auto restore_seg = [&](SegNames sn, uint16_t sel) {
+        Descriptor d;
+        if (sel && cpu.gdt.GetDescriptor(sel, d) && !d.saved.seg.p) {
+          // Descriptor was freed/zeroed while still loaded in this
+          // segment register.  CPU_SetSegGeneral would re-read it and
+          // raise #NP, silently killing the client.  Real x86 keeps the
+          // cached descriptor until an explicit reload, and DJGPP never
+          // dereferences a selector it has freed -- so just set the
+          // selector value with a null (base 0) cache and move on.
+          Segs.val[sn]  = sel;
+          Segs.phys[sn] = 0;
+        } else {
+          CPU_SetSegGeneral(sn, sel);
+        }
+      };
       CPU_SetSegGeneral(ss, saved_ss);
-      CPU_SetSegGeneral(es, saved_es);
-      CPU_SetSegGeneral(fs, saved_fs);
-      CPU_SetSegGeneral(gs, saved_gs);
+      restore_seg(ds, saved_ds);
+      restore_seg(es, saved_es);
+      restore_seg(fs, saved_fs);
+      restore_seg(gs, saved_gs);
       // CS can't be loaded with a plain MOV; manually refresh its
       // cached base from the saved selector's GDT descriptor so the
       // next instruction fetch (of the shim's CF / IRETD) uses the
@@ -5240,7 +5268,15 @@ Bitu dosiz_int21() {
         // `(attr & 0xc0) == 0x80` -- char device at EOF -> exit.
         // We leave bit 6 set so interactive shells don't early-bail.
         if (reg_bx == 0 || reg_bx == 1 || reg_bx == 2) {
-          reg_dx = 0xC0 | (reg_bx & 0x07); // char device, not at EOF
+          // Report what the host fd actually is. When the shell redirects a
+          // standard stream to a file/pipe (e.g. `prog > out`), real DOS clears
+          // bit 7 so the guest sees a disk file -- GNU tools (cat/grep/ls/find/
+          // gawk) fstat/isatty their stdio and silently mis-handle a console
+          // that is really a file. Only a genuine TTY gets the char-device bits
+          // (0xC0: char device, not-at-EOF -- keeps interactive shells alive).
+          reg_dx = isatty(static_cast<int>(reg_bx))
+                       ? (uint16_t)(0xC0 | (reg_bx & 0x07))
+                       : (uint16_t)0x0000;
         } else {
           auto it = s_handles.find(reg_bx);
           if (it == s_handles.end()) {
