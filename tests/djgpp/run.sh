@@ -99,6 +99,11 @@ run_audio SBDMA   "sb-irq=ok"      # SB DSP+DMA playback, block-end IRQ via PIC
 # Joystick: game port (0x201) + INT 15h AH=84h with the default emulated stick.
 run_one JOYTEST "joy-ok" 0 ""
 
+# VESA LFB from a DPMI protected-mode client: map phys 0xE0000000 via INT 31h
+# AX=0800, write through a selector, and cross-check the write reached svga_vram
+# through the 0xA0000 window view.
+run_one LFBTEST "lfb-ok" 0 ""
+
 run_one DJ_WRITE  "dj-write=ok"  0 ""
 run_one DJ_PRINTF "dj-printf=ok" 7 ""
 run_one DJ_ARGV   "dj-argv=ok"   0 ""   hello world

@@ -394,45 +394,52 @@ bool emu88::check_segment_write(emu88_uint16 seg, emu88_uint32 off, emu88_uint8 
   return true;
 }
 
+// Data/stack accessors. With paging off the linear address IS the physical
+// address: pass it to mem->fetch_mem/store_mem RAW. Those entry points check
+// the high SVGA linear-framebuffer aperture (e.g. 0xE0000000) on the raw
+// address and then mask_addr() internally for normal RAM — so we must NOT
+// pre-mask here, or a VESA LFB address would wrap modulo mem_size to low RAM
+// and never reach the aperture. (mask_addr is idempotent, so for every
+// non-aperture address this is identical to masking up front.)
 emu88_uint8 emu88::fetch_byte(emu88_uint16 seg, emu88_uint32 off) {
   if (!check_segment_read(seg, off, 1)) return 0;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : linear;
   return mem->fetch_mem(phys);
 }
 
 void emu88::store_byte(emu88_uint16 seg, emu88_uint32 off, emu88_uint8 val) {
   if (!check_segment_write(seg, off, 1)) return;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : linear;
   mem->store_mem(phys, val);
 }
 
 emu88_uint16 emu88::fetch_word(emu88_uint16 seg, emu88_uint32 off) {
   if (!check_segment_read(seg, off, 2)) return 0;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : linear;
   return mem->fetch_mem16(phys);
 }
 
 void emu88::store_word(emu88_uint16 seg, emu88_uint32 off, emu88_uint16 val) {
   if (!check_segment_write(seg, off, 2)) return;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : linear;
   mem->store_mem16(phys, val);
 }
 
 emu88_uint32 emu88::fetch_dword(emu88_uint16 seg, emu88_uint32 off) {
   if (!check_segment_read(seg, off, 4)) return 0;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : linear;
   return mem->fetch_mem32(phys);
 }
 
 void emu88::store_dword(emu88_uint16 seg, emu88_uint32 off, emu88_uint32 val) {
   if (!check_segment_write(seg, off, 4)) return;
   emu88_uint32 linear = effective_address(seg, off);
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : linear;
   mem->store_mem32(phys, val);
 }
 
@@ -563,28 +570,28 @@ bool emu88::check_stack_access(emu88_uint32 off, emu88_uint8 width) {
 emu88_uint16 emu88::stack_peek_word(emu88_uint32 off) {
   if (!check_stack_access(off, 2)) return 0;
   emu88_uint32 linear = seg_cache[seg_SS].base + off;
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : linear;
   return mem->fetch_mem16(phys);
 }
 
 emu88_uint32 emu88::stack_peek_dword(emu88_uint32 off) {
   if (!check_stack_access(off, 4)) return 0;
   emu88_uint32 linear = seg_cache[seg_SS].base + off;
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, false) : linear;
   return mem->fetch_mem32(phys);
 }
 
 void emu88::stack_poke_word(emu88_uint32 off, emu88_uint16 val) {
   if (!check_stack_access(off, 2)) return;
   emu88_uint32 linear = seg_cache[seg_SS].base + off;
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : linear;
   mem->store_mem16(phys, val);
 }
 
 void emu88::stack_poke_dword(emu88_uint32 off, emu88_uint32 val) {
   if (!check_stack_access(off, 4)) return;
   emu88_uint32 linear = seg_cache[seg_SS].base + off;
-  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : mem->mask_addr(linear);
+  emu88_uint32 phys = paging_enabled() ? translate_linear(linear, true) : linear;
   mem->store_mem32(phys, val);
 }
 
