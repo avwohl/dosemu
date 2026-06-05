@@ -7063,6 +7063,334 @@ void build_psp(const std::string &program_path,
   mem_writeb(psp + 0x81 + tail.size(), 0x0D);
 }
 
+// ===========================================================================
+// INT 67h: LIM EMS 4.0 + VCPI provider.
+//
+// dosbox-staging's BIOS used to provide EMS/VCPI; the emu88 backend has
+// neither, so dosiz hosts INT 67h itself (analogous to its INT 2Fh XMS driver).
+//
+// EMS logical pages live in a host-side pool (s_ems_pool) that is NOT guest-
+// addressable: the guest reaches expanded memory only through the 64KB page
+// frame at 0xE0000 (segment 0xE000), four 16KB physical slots. Mapping a
+// handle's logical page into a physical slot is done by COPY-FLUSH -- the
+// slot's current 16KB is written back to its pool page, then the requested pool
+// page is copied into the slot. The frame is plain guest RAM, so this needs no
+// emu88 changes and is correct for normal EMS use (the guest only ever touches
+// a logical page through the frame window).
+//
+// VCPI shares the same pool for its 4K-page accounting. Only the detection /
+// informational subset (DE00/DE02/DE03/DE0A) is implemented: a full VCPI server
+// (DE01 get-PM-interface, DE0C V86->PM switch) is a heavy CPU/paging feature,
+// and dosiz already advertises DPMI -- a real extender that probes VCPI, gets
+// DE01=unsupported, falls back to DPMI. So the partial VCPI never misleads.
+// ===========================================================================
+constexpr uint16_t EMS_FRAME_SEG   = 0xE000;
+constexpr uint32_t EMS_FRAME_BASE  = 0xE0000u;
+constexpr uint32_t EMS_PAGE_SIZE   = 0x4000u;   // 16KB EMS logical/physical page
+constexpr uint16_t EMS_TOTAL_PAGES = 512;       // expose 512 x 16KB = 8MB
+constexpr uint8_t  EMS_VERSION     = 0x40;      // LIM EMS 4.0 (BCD)
+constexpr uint8_t  VCPI_VERSION    = 0x10;      // VCPI 1.0 (BCD)
+
+struct EmsHandle {
+  std::vector<uint16_t> pages;          // pool-page index for each logical page
+  char     name[8] = {0};
+  bool     map_saved = false;           // AH=47 saved the page map?
+  uint16_t saved_h[4] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+  uint16_t saved_p[4] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+};
+
+std::vector<uint8_t> s_ems_pool;          // EMS_TOTAL_PAGES * 16KB (lazily sized)
+std::vector<bool>    s_ems_pool_used;     // per pool-page allocated flag
+std::map<uint16_t, EmsHandle> s_ems_handles;
+uint16_t s_ems_next_handle = 1;
+// Per physical frame slot 0..3: the {handle, logical page} the guest mapped and
+// the pool page physically loaded into the slot (for flush). 0xFFFF = none.
+uint16_t s_ems_slot_h[4]    = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+uint16_t s_ems_slot_p[4]    = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+uint16_t s_ems_slot_pool[4] = {0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF};
+
+void ems_reset() {
+  if (s_ems_pool.empty()) {
+    s_ems_pool.assign(static_cast<size_t>(EMS_TOTAL_PAGES) * EMS_PAGE_SIZE, 0);
+    s_ems_pool_used.assign(EMS_TOTAL_PAGES, false);
+  } else {
+    std::fill(s_ems_pool_used.begin(), s_ems_pool_used.end(), false);
+  }
+  s_ems_handles.clear();
+  s_ems_next_handle = 1;
+  for (int i = 0; i < 4; ++i)
+    s_ems_slot_h[i] = s_ems_slot_p[i] = s_ems_slot_pool[i] = 0xFFFF;
+}
+
+uint16_t ems_pages_allocated() {
+  uint16_t n = 0;
+  for (bool b : s_ems_pool_used) if (b) ++n;
+  return n;
+}
+
+// Allocate one free pool page, zero it, return its index (0xFFFF if none).
+uint16_t ems_alloc_pool_page() {
+  for (uint16_t j = 0; j < EMS_TOTAL_PAGES; ++j) {
+    if (!s_ems_pool_used[j]) {
+      s_ems_pool_used[j] = true;
+      std::fill_n(&s_ems_pool[static_cast<uint32_t>(j) * EMS_PAGE_SIZE], EMS_PAGE_SIZE, 0u);
+      return j;
+    }
+  }
+  return 0xFFFF;
+}
+
+// Copy-flush: write the slot's current pool page back, then load `pool_page`
+// (0xFFFF = just flush + leave unmapped) into the frame slot.
+void ems_load_slot(int slot, uint16_t pool_page) {
+  const PhysPt fa = EMS_FRAME_BASE + static_cast<uint32_t>(slot) * EMS_PAGE_SIZE;
+  if (s_ems_slot_pool[slot] != 0xFFFF) {
+    const uint32_t off = static_cast<uint32_t>(s_ems_slot_pool[slot]) * EMS_PAGE_SIZE;
+    for (uint32_t i = 0; i < EMS_PAGE_SIZE; ++i) s_ems_pool[off + i] = mem_readb(fa + i);
+  }
+  if (pool_page != 0xFFFF) {
+    const uint32_t off = static_cast<uint32_t>(pool_page) * EMS_PAGE_SIZE;
+    for (uint32_t i = 0; i < EMS_PAGE_SIZE; ++i) mem_writeb(fa + i, s_ems_pool[off + i]);
+  }
+  s_ems_slot_pool[slot] = pool_page;
+}
+
+// Map handle:logical_page into physical slot (lp==0xFFFF unmaps). Returns the
+// EMS status byte (0 = ok).
+uint8_t ems_map(uint8_t slot, uint16_t handle, uint16_t lp) {
+  if (slot > 3) return 0x8B;                       // illegal physical page
+  auto it = s_ems_handles.find(handle);
+  if (it == s_ems_handles.end()) return 0x83;      // invalid handle
+  if (lp == 0xFFFF) {
+    ems_load_slot(slot, 0xFFFF);
+    s_ems_slot_h[slot] = s_ems_slot_p[slot] = 0xFFFF;
+    return 0;
+  }
+  if (lp >= it->second.pages.size()) return 0x8A;  // logical page out of range
+  ems_load_slot(slot, it->second.pages[lp]);
+  s_ems_slot_h[slot] = handle;
+  s_ems_slot_p[slot] = lp;
+  return 0;
+}
+
+// Allocate a handle owning `pages` logical pages (zero allowed when allow_zero).
+// Returns status; on success sets *out_handle.
+uint8_t ems_alloc_handle(uint16_t pages, bool allow_zero, uint16_t *out_handle) {
+  if (pages == 0 && !allow_zero) return 0x89;                 // zero pages
+  if (pages > EMS_TOTAL_PAGES - ems_pages_allocated()) return 0x88;  // not enough pages
+  if (s_ems_handles.size() >= 254) return 0x85;              // out of handles
+  EmsHandle h;
+  for (uint16_t i = 0; i < pages; ++i) h.pages.push_back(ems_alloc_pool_page());
+  const uint16_t id = s_ems_next_handle++;
+  s_ems_handles[id] = std::move(h);
+  *out_handle = id;
+  return 0;
+}
+
+Bitu dosiz_int67() {
+  // VCPI: AH=0xDE, sub-function in AL.
+  if (reg_ah == 0xDE) {
+    switch (reg_al) {
+      case 0x00:  // installation check
+        // Match dosbox: only answer "present" to the JEMM/QEMM probe
+        // convention (CX=0, DI=0x0012) or from V86 mode. Plain probes get
+        // "not present" so extenders use dosiz's DPMI instead.
+        if (reg_cx == 0 && reg_di == 0x0012) {
+          reg_ah = 0x00;
+          reg_bh = VCPI_VERSION;          // BH = version (BCD)
+        } else {
+          reg_ah = 0x8F;                  // not present
+        }
+        return CBRET_NONE;
+      case 0x02:  // get max physical 4K-page number
+        reg_ah  = 0x00;
+        reg_edx = MEM_TotalPages() ? static_cast<uint32_t>(MEM_TotalPages() - 1) : 0;
+        return CBRET_NONE;
+      case 0x03:  // get number of free 4K pages (EMS pool, 16KB->4 x 4KB)
+        reg_ah  = 0x00;
+        reg_edx = static_cast<uint32_t>(EMS_TOTAL_PAGES - ems_pages_allocated()) * 4u;
+        return CBRET_NONE;
+      case 0x0A:  // get 8259A interrupt vector mappings
+        reg_ah = 0x00;
+        reg_bx = 0x08;                    // master PIC base vector
+        reg_cx = 0x70;                    // slave PIC base vector
+        return CBRET_NONE;
+      default:
+        // DE01 (get PM interface), DE0C (switch to PM), etc. -- unsupported,
+        // so a real extender falls back to DPMI.
+        reg_ah = 0x84;
+        return CBRET_NONE;
+    }
+  }
+
+  // EMS: function in AH.
+  switch (reg_ah) {
+    case 0x40:  // get manager status
+      reg_ah = 0;
+      return CBRET_NONE;
+    case 0x41:  // get page-frame segment
+      reg_ah = 0;
+      reg_bx = EMS_FRAME_SEG;
+      return CBRET_NONE;
+    case 0x42:  // get unallocated / total page count
+      reg_ah = 0;
+      reg_bx = EMS_TOTAL_PAGES - ems_pages_allocated();   // free
+      reg_dx = EMS_TOTAL_PAGES;                           // total
+      return CBRET_NONE;
+    case 0x43: { // allocate pages (BX) -> handle in DX
+      uint16_t h = 0;
+      reg_ah = ems_alloc_handle(reg_bx, /*allow_zero=*/false, &h);
+      if (reg_ah == 0) reg_dx = h;
+      return CBRET_NONE;
+    }
+    case 0x44:  // map handle page: AL=phys slot, BX=logical page, DX=handle
+      reg_ah = ems_map(reg_al, reg_dx, reg_bx);
+      return CBRET_NONE;
+    case 0x45: { // deallocate handle (DX)
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      if (it->second.map_saved)      { reg_ah = 0x86; return CBRET_NONE; }
+      for (int s = 0; s < 4; ++s)
+        if (s_ems_slot_h[s] == reg_dx) {
+          ems_load_slot(s, 0xFFFF);
+          s_ems_slot_h[s] = s_ems_slot_p[s] = 0xFFFF;
+        }
+      for (uint16_t pp : it->second.pages) s_ems_pool_used[pp] = false;
+      s_ems_handles.erase(it);
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x46:  // get EMM version
+      reg_ah = 0;
+      reg_al = EMS_VERSION;
+      return CBRET_NONE;
+    case 0x47: { // save page map for handle (DX)
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      if (it->second.map_saved)      { reg_ah = 0x8D; return CBRET_NONE; }
+      for (int s = 0; s < 4; ++s) {
+        it->second.saved_h[s] = s_ems_slot_h[s];
+        it->second.saved_p[s] = s_ems_slot_p[s];
+      }
+      it->second.map_saved = true;
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x48: { // restore page map for handle (DX)
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      if (!it->second.map_saved)     { reg_ah = 0x8E; return CBRET_NONE; }
+      for (int s = 0; s < 4; ++s)
+        ems_map(s, it->second.saved_h[s], it->second.saved_p[s]);
+      it->second.map_saved = false;
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x4B:  // get handle count
+      reg_ah = 0;
+      reg_bx = static_cast<uint16_t>(s_ems_handles.size());
+      return CBRET_NONE;
+    case 0x4C: { // get pages owned by handle (DX)
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      reg_bx = static_cast<uint16_t>(it->second.pages.size());
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x4D: { // get pages owned by all handles -> ES:DI table, BX=count
+      PhysPt buf = SegPhys(es) + reg_di;
+      uint16_t n = 0;
+      for (auto &kv : s_ems_handles) {
+        mem_writew(buf + n * 4 + 0, kv.first);
+        mem_writew(buf + n * 4 + 2, static_cast<uint16_t>(kv.second.pages.size()));
+        ++n;
+      }
+      reg_bx = n;
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x50: { // map/unmap multiple pages: DX=handle, CX=count, DS:SI=array
+      // AL=0: array entries are (logical page, physical page#); AL=1: (logical
+      // page, page-frame segment). lp==0xFFFF unmaps.
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      if (reg_al > 1)                { reg_ah = 0x8F; return CBRET_NONE; }
+      PhysPt arr = SegPhys(ds) + reg_si;
+      for (uint16_t i = 0; i < reg_cx; ++i) {
+        uint16_t lp  = mem_readw(arr + i * 4 + 0);
+        uint16_t sec = mem_readw(arr + i * 4 + 2);
+        uint16_t slot = (reg_al == 1)
+                          ? static_cast<uint16_t>((sec - EMS_FRAME_SEG) / 0x400)
+                          : sec;
+        uint8_t st = ems_map(static_cast<uint8_t>(slot), reg_dx, lp);
+        if (st) { reg_ah = st; return CBRET_NONE; }
+      }
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x51: { // reallocate handle (DX) to BX pages
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      const uint16_t want = reg_bx;
+      const uint16_t have = static_cast<uint16_t>(it->second.pages.size());
+      if (want > have) {
+        const uint16_t need = want - have;
+        if (need > EMS_TOTAL_PAGES - ems_pages_allocated()) { reg_ah = 0x88; return CBRET_NONE; }
+        for (uint16_t i = 0; i < need; ++i) it->second.pages.push_back(ems_alloc_pool_page());
+      } else if (want < have) {
+        for (uint16_t i = want; i < have; ++i) s_ems_pool_used[it->second.pages[i]] = false;
+        it->second.pages.resize(want);
+      }
+      reg_bx = want;
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x53: { // get (AL=0, ES:DI) / set (AL=1, DS:SI) handle name
+      auto it = s_ems_handles.find(reg_dx);
+      if (it == s_ems_handles.end()) { reg_ah = 0x83; return CBRET_NONE; }
+      if (reg_al == 0) {
+        PhysPt b = SegPhys(es) + reg_di;
+        for (int i = 0; i < 8; ++i) mem_writeb(b + i, static_cast<uint8_t>(it->second.name[i]));
+      } else if (reg_al == 1) {
+        PhysPt b = SegPhys(ds) + reg_si;
+        for (int i = 0; i < 8; ++i) it->second.name[i] = static_cast<char>(mem_readb(b + i));
+      } else {
+        reg_ah = 0x8F;
+        return CBRET_NONE;
+      }
+      reg_ah = 0;
+      return CBRET_NONE;
+    }
+    case 0x58:  // get mappable physical-address array (AL=0 fill ES:DI) / count
+      if (reg_al == 0) {
+        PhysPt b = SegPhys(es) + reg_di;
+        for (int i = 0; i < 4; ++i) {
+          mem_writew(b + i * 4 + 0, static_cast<uint16_t>(EMS_FRAME_SEG + i * 0x400)); // seg
+          mem_writew(b + i * 4 + 2, static_cast<uint16_t>(i));                          // phys page#
+        }
+      }
+      reg_cx = 4;
+      reg_ah = 0;
+      return CBRET_NONE;
+    case 0x59:  // get hardware config (AL=0) / get raw page counts (AL=1)
+      if (reg_al == 1) {
+        reg_bx = EMS_TOTAL_PAGES - ems_pages_allocated();
+        reg_dx = EMS_TOTAL_PAGES;
+      }
+      reg_ah = 0;
+      return CBRET_NONE;
+    case 0x5A: { // allocate standard (AL=0) / raw (AL=1) pages (BX) -> DX handle
+      uint16_t h = 0;
+      reg_ah = ems_alloc_handle(reg_bx, /*allow_zero=*/true, &h);
+      if (reg_ah == 0) reg_dx = h;
+      return CBRET_NONE;
+    }
+    default:
+      reg_ah = 0x84;  // function not supported
+      return CBRET_NONE;
+  }
+}
+
 void dosiz_startup() {
   // Override dosbox's INT 21h callback.  The CALLBACK_HandlerObject is a
   // local: its destructor runs when this function returns, which is still
@@ -7305,6 +7633,12 @@ void dosiz_startup() {
   CALLBACK_HandlerObject int2f_cb;
   int2f_cb.Install(&dosiz_int2f, CB_IRET, "dosiz Int 2F (DPMI detect)");
   int2f_cb.Set_RealVec(0x2F);
+
+  // INT 67h -- LIM EMS 4.0 + VCPI provider (dosbox's BIOS used to own this).
+  ems_reset();
+  CALLBACK_HandlerObject int67_cb;
+  int67_cb.Install(&dosiz_int67, CB_IRET, "dosiz Int 67 (EMS/VCPI)");
+  int67_cb.Set_RealVec(0x67);
 
   // XMS driver entry point -- returned to clients via INT 2F/4310h.
   // Uses CB_RETF (far-call entry, ends with RETF) since XMS clients
