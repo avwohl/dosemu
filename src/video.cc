@@ -224,7 +224,8 @@ bool vesa_set_mode(uint16_t modenum) {
   mem->svga_window_off = 0;
   mem->svga_lfb_phys = SVGA_LFB_PHYS;
   mem->vga_planar = false;
-  g.mode = m->num;
+  // Leave g.mode at the prior legacy mode: render() checks vs.active first, and
+  // AH=0F (legacy get-mode) shouldn't return a truncated VESA mode number.
   if (m->bpp == 8) init_default_palette(g.dac);
   return true;
 }

@@ -1789,6 +1789,7 @@ bool g_display_open = false;         // a real SDL window is open (keys + presen
 bool kbd_ring_pop(uint16_t *key);
 bool kbd_ring_peek(uint16_t *key);
 void dosiz_window_present();
+void dosiz_window_pump();            // pump host events only (no render/present)
 void screen_putchar(uint8_t c);      // mirror a char to the 0xB8000 text screen
 
 Bitu dosiz_int16() {
@@ -1809,7 +1810,7 @@ Bitu dosiz_int16() {
       case 0x01: case 0x11: {       // check for a key
         uint16_t key;
         if (kbd_ring_peek(&key)) { reg_ax = key; CALLBACK_SZF(false); }
-        else { dosiz_window_present(); CALLBACK_SZF(true); }
+        else { dosiz_window_pump(); CALLBACK_SZF(true); }  // present is on the tick
         return CBRET_NONE;
       }
       case 0x02: reg_al = 0; return CBRET_NONE;   // shift state: none
@@ -7614,6 +7615,16 @@ void screen_putchar(uint8_t c) {
 
 // Render the current frame and present it; pump host events. No-op unless a
 // window is open (and SDL2 was built in).
+// Pump host events only (keyboard, window close) without rendering/presenting —
+// for the INT 16h poll path, where the ~60Hz tick already handles presenting.
+void dosiz_window_pump() {
+#ifdef HAVE_SDL2
+  if (!g_display_open) return;
+  dosiz::display::pump_events();
+  if (dosiz::display::quit_requested()) { shutdown_requested = true; s_exit_code = 0; }
+#endif
+}
+
 void dosiz_window_present() {
 #ifdef HAVE_SDL2
   if (!g_display_open) return;
@@ -7711,10 +7722,14 @@ uint16_t dosiz_int10_vesa() {
       mem_writeb(p + 0x1E, 1);
       auto mask = [&](uint8_t rs, uint8_t rp, uint8_t gs, uint8_t gp,
                       uint8_t bs, uint8_t bp, uint8_t xs, uint8_t xp) {
-        mem_writeb(p + 0x1F, rs); mem_writeb(p + 0x20, rp);
+        mem_writeb(p + 0x1F, rs); mem_writeb(p + 0x20, rp);   // window (VBE 1.2) masks
         mem_writeb(p + 0x21, gs); mem_writeb(p + 0x22, gp);
         mem_writeb(p + 0x23, bs); mem_writeb(p + 0x24, bp);
         mem_writeb(p + 0x25, xs); mem_writeb(p + 0x26, xp);
+        mem_writeb(p + 0x36, rs); mem_writeb(p + 0x37, rp);   // linear (LFB/VBE3) masks
+        mem_writeb(p + 0x38, gs); mem_writeb(p + 0x39, gp);
+        mem_writeb(p + 0x3A, bs); mem_writeb(p + 0x3B, bp);
+        mem_writeb(p + 0x3C, xs); mem_writeb(p + 0x3D, xp);
       };
       switch (m->bpp) {
         case 15: mask(5, 10, 5, 5, 5, 0, 1, 15); break;
@@ -7809,16 +7824,34 @@ Bitu dosiz_int10() {
       return CBRET_NONE;
     case 0x05:  // set active display page (page 0 only)
       return CBRET_NONE;
-    case 0x06:  // scroll up
-    case 0x07:  // scroll down
-      { uint8_t attr = reg_bh;
-        int top = reg_ch, left = reg_cl, bot = reg_dh, right = reg_dl;
-        for (int r = top; r <= bot && r < 25; r++)
-          for (int cc = left; cc <= right && cc < 80; cc++) {
-            const uint32_t cell = 0xB8000u + (uint32_t)(r * 80 + cc) * 2u;
-            mem_writeb(cell, ' '); mem_writeb(cell + 1, attr);
-          } }
+    case 0x06:    // scroll window up   (AL lines, 0 = blank whole window)
+    case 0x07: {  // scroll window down
+      const uint8_t attr = reg_bh;
+      int top = reg_ch, left = reg_cl, bot = reg_dh, right = reg_dl;
+      if (bot > 24) bot = 24;
+      if (right > 79) right = 79;
+      if (top > bot || left > right) return CBRET_NONE;
+      auto cell = [](int r, int c) { return 0xB8000u + (uint32_t)(r * 80 + c) * 2u; };
+      const int lines = reg_al;
+      const int height = bot - top + 1;
+      if (lines <= 0 || lines >= height) {            // blank the whole window
+        for (int r = top; r <= bot; r++)
+          for (int c = left; c <= right; c++) { mem_writeb(cell(r, c), ' '); mem_writeb(cell(r, c) + 1, attr); }
+        return CBRET_NONE;
+      }
+      if (reg_ah == 0x06) {                           // up: copy rows up, blank bottom
+        for (int r = top; r <= bot - lines; r++)
+          for (int c = left; c <= right; c++) mem_writew(cell(r, c), mem_readw(cell(r + lines, c)));
+        for (int r = bot - lines + 1; r <= bot; r++)
+          for (int c = left; c <= right; c++) { mem_writeb(cell(r, c), ' '); mem_writeb(cell(r, c) + 1, attr); }
+      } else {                                        // down: copy rows down, blank top
+        for (int r = bot; r >= top + lines; r--)
+          for (int c = left; c <= right; c++) mem_writew(cell(r, c), mem_readw(cell(r - lines, c)));
+        for (int r = top; r < top + lines; r++)
+          for (int c = left; c <= right; c++) { mem_writeb(cell(r, c), ' '); mem_writeb(cell(r, c) + 1, attr); }
+      }
       return CBRET_NONE;
+    }
     case 0x08:  // read char + attr at cursor
       { uint16_t p = mem_readw(0x450u); int row = (p >> 8) & 0xFF, col = p & 0xFF;
         const uint32_t cell = 0xB8000u + (uint32_t)(row * 80 + col) * 2u;
