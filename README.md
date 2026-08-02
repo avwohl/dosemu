@@ -198,7 +198,5 @@ Third-party attributions in `docs/CREDITS.md`.
 
 ## Related Projects
 
-- [cpmemu](https://github.com/avwohl/cpmemu) — CP/M 2.2 emulator; the
-  translation-layer template and the origin of the `.cfg` format
-- [qxDOS](https://github.com/avwohl/qxDOS) — iOS/Mac DOS emulator; source of
-  the vendored emu88 CPU core
+- [cpmemu](https://github.com/avwohl/cpmemu) — Z80/CP/M emulator that translates the BDOS and BIOS calls of CP/M 2.2 programs to the host file system. It is the template for the translation layer and the origin of the `.cfg` format.
+- [qxDOS](https://github.com/avwohl/qxDOS) — DOS emulator app for iOS and macOS. It supplies the emu88 CPU core that dosiz includes.
