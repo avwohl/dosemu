@@ -6820,9 +6820,43 @@ bool load_exe_at(const std::string &path, uint16_t psp_seg, InitialRegs &out) {
       // Synth stack ESP = top of the stack object (grow-down).
       uint32_t effective_stack_esp = stack_esp;
       if (synth_stack) {
-        effective_stack_esp = so.virt_size > 16 ? (so.virt_size - 16) : 0;
-        std::fprintf(stderr, "dosiz: synth stack: obj#%u esp=0x%x\n",
-                     stack_obj_1, effective_stack_esp);
+        // stack_obj == 0 means "extender, provide the stack" — it does
+        // NOT mean "reuse a data object". PMODE/W honours the header's
+        // stack_size and hands the client a dedicated block.
+        //
+        // Pointing ESP at the top of the auto-data object instead made
+        // the client's stack grow down through its own BSS. Anything
+        // living there gets overwritten as the program recurses, which
+        // is silent and looks like data corruption rather than a stack
+        // problem. In freedos_micro_python's MP.EXE, BSS holds the
+        // MicroPython heap, and `2 in [1,2,3]` failed with
+        // "TypeError: 'int' object isn't an iterator" — the iterator
+        // buffer that runtime.c allocates on the stack came back
+        // holding garbage that decoded as a tagged small int. The same
+        // binary is correct under DOSBox-X.
+        const uint32_t hdr_stack_size = rdd(f, le_off + 0xAC);
+        const uint32_t stack_bytes =
+            hdr_stack_size ? hdr_stack_size : 0x10000u;   // 64K default
+        const uint32_t stack_base = pm_alloc(stack_bytes);
+        if (stack_base != 0) {
+          // Flat SS (base 0), so ESP is the flat top of the block.
+          // Leave 16 bytes of slack so a push at entry cannot touch
+          // the very last byte.
+          effective_stack_esp = stack_base + stack_bytes - 16u;
+          std::fprintf(stderr,
+              "dosiz: synth stack: dedicated %u bytes at 0x%08x, esp=0x%08x\n",
+              stack_bytes, stack_base, effective_stack_esp);
+        } else {
+          // Out of PM arena — fall back to the old behaviour rather
+          // than refusing to run, but say so, because it can corrupt
+          // the client's own data.
+          effective_stack_esp = so.virt_size > 16 ? (so.virt_size - 16) : 0;
+          std::fprintf(stderr,
+              "dosiz: synth stack: pm_alloc(%u) failed; falling back to "
+              "obj#%u top esp=0x%x (stack will grow into that object's "
+              "data)\n",
+              stack_bytes, stack_obj_1, effective_stack_esp);
+        }
       }
 
       // Allocate flat (base=0, limit=4G) selectors for both CS and

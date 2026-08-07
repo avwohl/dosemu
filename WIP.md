@@ -1676,45 +1676,28 @@ bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 58 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
 
-## Open: two LE/PM client defects found 2026-08-07
+## Fixed 2026-08-07: LE/PM client defects
 
-Found while getting freedos_micro_python's MP.EXE running here. Both
-reproduce with files now in `tests/`.
+All found bringing up freedos_micro_python's MP.EXE; fixtures in
+`tests/`.
 
-### 1. `in` fails on a MicroPython list/tuple/str
-
-`tests/mp_in_operator.py`, run under MP.EXE:
-
-    2 in [1, 2, 3]
-    -> TypeError: 'int' object isn't an iterator
-
-The SAME MP.EXE binary under DOSBox-X returns True for the int, str,
-tuple and substring cases, so this is our CPU emulation, not the
-client.
-
-Narrowed as far as:
-
-  - `for x in a`, `iter(a)`, `next(it)`, `len(a)`, `a[1]` all work.
-    Only containment fails.
-  - py/runtime.c converts MP_BINARY_OP_IN (5) to MP_BINARY_OP_CONTAINS
-    by swapping lhs/rhs. The observed error is exactly what happens if
-    that swap does not run: the int stays in lhs and the CONTAINS
-    fallback tries to iterate it.
-  - A minimal C reproduction of that guarded three-assignment swap
-    (`tests/`-style, compiled with uc386) runs CORRECTLY here, so the
-    plain pattern is not the issue. Something in the larger
-    `mp_binary_op` dispatch is.
-
-Next step is instruction-level: trace the entry to `_mp_binary_op` and
-compare the branch taken against DOSBox-X.
-
-### 2. `le_load_objects failed` on a small LE image
-
-`tests/le_small_jt.c`, built with uc386's exe.py harness into a ~16 KB
-LE (2 pages, 3 objects), is rejected at load:
-
-    dosiz: JT.EXE is LE/LX but le_load_objects failed
-
-A larger LE from the same toolchain (~17 KB, same three-object layout)
-loads and runs, so it is not the toolchain. Worth a look because it
-blocks using small purpose-built binaries as regression fixtures.
+- **`CPU_JMP` discarded `use32`** so every LE entry EIP was truncated to
+  16 bits. We could not run our own `tests/LE_MIN.EXE`.
+- **LE entry put the flat data selector in ES** instead of a PSP alias,
+  so clients reading `[es:0x80]` for their command tail read the IVT.
+- **`AH=0x1A` Set-DTA truncated the DTA pointer to 16 bits**, so
+  find-first results went where the client never looked. Three sibling
+  `DS:DX` sites had the same defect.
+- **`le_load_objects` rejected `virt_size == 0` objects**, i.e. any
+  binary whose data is entirely initialised (`tests/le_small_jt.c`).
+- **A `stack_obj == 0` client got its stack carved out of the auto-data
+  object.** That header value means "extender, provide the stack", not
+  "reuse a data object". The client stack grew down through its own
+  BSS and quietly overwrote whatever lived there. In MP.EXE that is the
+  MicroPython heap, and the visible symptom was
+  `2 in [1, 2, 3]` raising `TypeError: 'int' object isn't an iterator`
+  — the iterator buffer runtime.c allocates on the stack came back
+  holding garbage that decoded as a tagged small int, which is also why
+  the message named a type neither operand had.
+  (`tests/mp_in_operator.py`.) We now honour the header's stack_size at
+  offset 0xAC and allocate a dedicated block.
