@@ -1675,3 +1675,46 @@ bfe1c76  DPMI stage 5 (32-bit): end-to-end fixture + IRETD callback stub
 
 58 commits from the session's start (`1222c44` "WIP.txt: handoff notes").
 All on main, all pushed.
+
+## Open: two LE/PM client defects found 2026-08-07
+
+Found while getting freedos_micro_python's MP.EXE running here. Both
+reproduce with files now in `tests/`.
+
+### 1. `in` fails on a MicroPython list/tuple/str
+
+`tests/mp_in_operator.py`, run under MP.EXE:
+
+    2 in [1, 2, 3]
+    -> TypeError: 'int' object isn't an iterator
+
+The SAME MP.EXE binary under DOSBox-X returns True for the int, str,
+tuple and substring cases, so this is our CPU emulation, not the
+client.
+
+Narrowed as far as:
+
+  - `for x in a`, `iter(a)`, `next(it)`, `len(a)`, `a[1]` all work.
+    Only containment fails.
+  - py/runtime.c converts MP_BINARY_OP_IN (5) to MP_BINARY_OP_CONTAINS
+    by swapping lhs/rhs. The observed error is exactly what happens if
+    that swap does not run: the int stays in lhs and the CONTAINS
+    fallback tries to iterate it.
+  - A minimal C reproduction of that guarded three-assignment swap
+    (`tests/`-style, compiled with uc386) runs CORRECTLY here, so the
+    plain pattern is not the issue. Something in the larger
+    `mp_binary_op` dispatch is.
+
+Next step is instruction-level: trace the entry to `_mp_binary_op` and
+compare the branch taken against DOSBox-X.
+
+### 2. `le_load_objects failed` on a small LE image
+
+`tests/le_small_jt.c`, built with uc386's exe.py harness into a ~16 KB
+LE (2 pages, 3 objects), is rejected at load:
+
+    dosiz: JT.EXE is LE/LX but le_load_objects failed
+
+A larger LE from the same toolchain (~17 KB, same three-object layout)
+loads and runs, so it is not the toolchain. Worth a look because it
+blocks using small purpose-built binaries as regression fixtures.
