@@ -3586,9 +3586,10 @@ Bitu dosiz_int31() {
       CPU_LIDT(0x3FF, 0);
 
       CPU_SET_CRX(0, saved_cr0 & ~1u);
-      std::fprintf(stderr, "[simrm-postcr0 0301] s_eax=%08x cr0=%08x\n",
-          (unsigned)s_eax, (unsigned)cpu.cr0);
-
+      if (dosiz::g_debug.simrm_trace) {
+        std::fprintf(stderr, "[simrm-postcr0 0301] s_eax=%08x cr0=%08x\n",
+            (unsigned)s_eax, (unsigned)cpu.cr0);
+      }
       reg_eax = s_eax; reg_ebx = s_ebx; reg_ecx = s_ecx; reg_edx = s_edx;
       reg_esi = s_esi; reg_edi = s_edi; reg_ebp = s_ebp;
       SegSet16(ds, s_ds); SegSet16(es, s_es);
@@ -8395,13 +8396,43 @@ void dosiz_startup() {
     CPU_SET_CRX(0, 0x00000001);   // PE=1
     CPU_LLDT(PM_LDT_SEL);
     CPU_SetSegGeneral(ds, ir.pm_ds);
-    CPU_SetSegGeneral(es, ir.pm_ds);
+
+    // ES must alias the PSP at entry, not repeat the flat data
+    // selector. That is the DOS-extender convention an LE client is
+    // built against (PMODE/W, DOS/4GW and CauseWay all enter with
+    // DS = data, ES = PSP), and clients rely on it: uc386's PMODE/W
+    // bridge reads its command tail with `movzx ecx, byte [es:0x80]`
+    // and deliberately does NOT reload ES, precisely because the
+    // extender is supposed to have put the PSP there.
+    //
+    // Handing it the flat selector instead made [es:0x80] read linear
+    // 0x80 — the real-mode interrupt vector table — so the client saw
+    // a garbage command-tail length and garbage argument text. The
+    // visible symptom was a phantom argument: freedos_micro_python's
+    // MP.EXE took its "run a script named on the command line" path
+    // even when invoked with no arguments, then tried to open a
+    // one-character filename built from IVT bytes.
+    uint16_t psp_sel = ir.pm_ds;
+    {
+      const uint16_t psp_idx = ldt_find_run(1);
+      if (psp_idx != 0) {
+        ldt_set(psp_idx, true);
+        // base = PSP paragraph, limit 64K-1, present data r/w (0x92).
+        write_ldt_descriptor(psp_idx, PSP_SEG * 16u, 0xFFFFu, 0x92, false);
+        psp_sel = static_cast<uint16_t>((psp_idx << 3) | 0x04);
+      } else {
+        std::fprintf(stderr,
+            "dosiz: LE: no LDT room for a PSP selector; ES stays flat "
+            "(clients reading [es:0x80] will see wrong data)\n");
+      }
+    }
+    CPU_SetSegGeneral(es, psp_sel);
     CPU_SetSegGeneral(ss, ir.ss);
     reg_esp = ir.pm_esp;
     std::fprintf(stderr,
         "dosiz: LE entering PM: CS=%04x:EIP=%08x SS=%04x:ESP=%08x "
         "DS=%04x ES=%04x D=%u\n",
-        ir.cs, ir.pm_eip, ir.ss, ir.pm_esp, ir.pm_ds, ir.pm_ds,
+        ir.cs, ir.pm_eip, ir.ss, ir.pm_esp, ir.pm_ds, psp_sel,
         ir.is_32bit ? 1 : 0);
     CPU_JMP(ir.is_32bit, ir.cs, ir.pm_eip, 0);
     DOSBOX_RunMachine();
