@@ -267,11 +267,31 @@ bool CPU_LTR(Bitu selector) {
 
 void CPU_JMP(bool use32, Bitu selector, Bitu offset, Bitu /*oldeip*/) {
     if (!g_cpu) return;
+    // `use32` is the width of the OFFSET the caller is handing us, and it
+    // must be honoured. far_call_or_jmp finishes a plain code-segment
+    // transfer with
+    //     ip = op_size_32 ? offset : (offset & 0xFFFF);
+    // where op_size_32 is the operand size of the *currently executing*
+    // code. That is right for a real JMP FAR instruction, but this entry
+    // point is synthetic: the host calls it to enter a client, and the
+    // current CS is still whatever we were running before — real mode
+    // (16-bit) when entering an LE/PM client for the first time.
+    //
+    // Discarding use32 therefore truncated a 32-bit entry EIP to 16 bits.
+    // An LE client entered at, say, 0x00020010 began executing at 0x0010
+    // and died on garbage: dosiz could not run its own tests/LE_MIN.EXE,
+    // and MP.EXE #GP'd before its first instruction.
+    //
+    // Drive op_size_32 across the transfer instead of patching ip
+    // afterwards, so call/task gates — which take their offset from the
+    // gate, not from `offset` — keep deciding their own width.
+    const bool saved_op_size_32 = g_cpu->op_size_32;
+    g_cpu->op_size_32 = use32;
     g_cpu->far_call_or_jmp((emu88_uint16)selector, (emu88_uint32)offset, /*is_call=*/false);
+    g_cpu->op_size_32 = saved_op_size_32;
     mirror_seg(emu88::seg_CS);
     cpu_regs.ip.dword[0] = g_cpu->ip;
     cpu.code.big = g_cpu->code_32();
-    (void)use32;
 }
 
 void CPU_LoadCSCache(Bitu selector) {
