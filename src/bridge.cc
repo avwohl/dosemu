@@ -6334,24 +6334,30 @@ bool le_load_objects(const std::vector<uint8_t> &f, size_t le_off,
     // that fit in a paragraph-count fit the MCB arena (keeps them
     // below 1MB, handy for future mixed 16-bit/32-bit object use).
     // Anything bigger goes to pm_arena above 1MB.
+    // A zero-size object is legal and common: a linker emits an empty
+    // BSS object when the program has no uninitialised data. Rejecting
+    // it meant we refused to load perfectly good LE binaries — any
+    // program whose data is entirely initialised. Give it a
+    // one-paragraph home so its descriptor still has a valid non-zero
+    // base (the limit is already special-cased to 0 where the LDT
+    // entry is written), and let the page-copy and zero-fill loops
+    // below run zero iterations, which they already do because its
+    // page range is empty.
     const uint32_t paras = (o.virt_size + 15u) / 16u;
-    if (paras == 0) {
-      std::fprintf(stderr, "dosiz: LE obj %u paras=0\n", i + 1);
-      return false;
-    }
+    const uint32_t alloc_paras = (paras == 0) ? 1u : paras;
     o.host_seg  = 0;
     o.host_base = 0;
-    if (paras <= 0xFFFFu) {
+    if (alloc_paras <= 0xFFFFu) {
       uint16_t largest = 0;
       const uint16_t seg = mcb_allocate(
-          static_cast<uint16_t>(paras), largest);
+          static_cast<uint16_t>(alloc_paras), largest);
       if (seg != 0) {
         o.host_seg  = seg;
         o.host_base = static_cast<uint32_t>(seg) * 16u;
       }
     }
     if (o.host_base == 0) {
-      const uint32_t base = pm_alloc(o.virt_size);
+      const uint32_t base = pm_alloc(o.virt_size ? o.virt_size : 16u);
       if (base == 0) {
         std::fprintf(stderr, "dosiz: LE obj %u: pm_alloc %u bytes failed\n",
                      i + 1, o.virt_size);
