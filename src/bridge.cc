@@ -4413,7 +4413,7 @@ Bitu dosiz_int21() {
     }
 
     case 0x0A: {  // Buffered input.  DS:DX -> [max_len][actual_len][data...]
-      const PhysPt buf = SegPhys(ds) + reg_dx;
+      const PhysPt buf = dos_arg_addr(ds, reg_dx, reg_edx);
       const uint8_t max = mem_readb(buf);
       if (max == 0) {
         mem_writeb(buf + 1, 0);
@@ -4767,7 +4767,14 @@ Bitu dosiz_int21() {
     }
 
     case 0x1A: {  // Set DTA to DS:DX
-      s_dta_linear = SegPhys(ds) + reg_dx;
+      // Use the same 32-bit-aware addressing as every other DS:DX
+      // argument. A 32-bit PM client passes the full pointer in EDX,
+      // whose low 16 bits are usually meaningless — taking reg_dx
+      // alone parked the DTA at a truncated address, so DOS wrote the
+      // find-first results somewhere the client never read. Symptom:
+      // os.listdir() returning the right NUMBER of entries with every
+      // filename empty.
+      s_dta_linear = dos_arg_addr(ds, reg_dx, reg_edx);
       return CBRET_NONE;
     }
 
@@ -5210,7 +5217,7 @@ Bitu dosiz_int21() {
                   // Report US defaults; real programs use this for date,
                   // currency, and list-separator formatting.
       if (reg_al != 0) { return_error(0x01); break; }
-      const PhysPt buf = SegPhys(ds) + reg_dx;
+      const PhysPt buf = dos_arg_addr(ds, reg_dx, reg_edx);
       for (int i = 0; i < 32; ++i) mem_writeb(buf + i, 0);
       mem_writew(buf + 0, 0);       // date format MM/DD/YY
       mem_writeb(buf + 2, '$');     // currency symbol "$"
@@ -6051,7 +6058,7 @@ Bitu dosiz_int21() {
       // log noise goes away; the specific name is cosmetic for our
       // purposes and no real network is involved.
       if (reg_al == 0x00) {
-        const PhysPt buf = SegPhys(ds) + reg_dx;
+        const PhysPt buf = dos_arg_addr(ds, reg_dx, reg_edx);
         static const char kName[17] = "DOSIZ          ";
         for (int i = 0; i < 16; ++i) mem_writeb(buf + i, kName[i]);
         reg_cx = 0;    // CL=0: no network
