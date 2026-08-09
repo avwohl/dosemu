@@ -2,8 +2,9 @@
 
 An MS-DOS emulator that runs DOS programs by emulating the DOS API itself —
 trapping INT 21h / INT 31h (DPMI) / INT 67h (EMS) and translating them to C++
-implementations on the host — on top of the in-tree
-[emu88](https://github.com/avwohl/qxDOS) 386 CPU core. Same design as
+implementations on the host — on top of the
+[emu88](https://github.com/avwohl/qxDOS) 386 CPU core, which lives in the qxDOS
+repo and is built from a sibling checkout. Same design as
 [cpmemu](https://github.com/avwohl/cpmemu), which does the equivalent for
 CP/M BDOS.
 
@@ -104,10 +105,18 @@ files beyond the optional `.cfg`.
 
 ## Building
 
-dosiz has **no required dependencies** beyond a C++20 compiler, CMake, and
-libm — no glib, meson, or DOSBox. The emu88 backend is vendored in-tree. SDL2
-is the one **optional** dependency: when present at build time it enables the
-`--window` VGA display; without it the build is dependency-free and headless.
+dosiz needs a C++20 compiler, CMake, libm, and a checkout of
+[qxDOS](https://github.com/avwohl/qxDOS) beside this one — that repo owns the
+emu88 386 core dosiz builds against, so there is only ever one copy of it. No
+glib, meson, or DOSBox. SDL2 is the one **optional** dependency: when present at
+build time it enables the `--window` VGA display; without it the build is
+otherwise dependency-free and headless.
+
+	git clone https://github.com/avwohl/qxDOS.git   # next to dosiz/
+
+If qxDOS lives somewhere else, point dosiz at it:
+
+	cmake -S src -B build -DEMU88_DIR=/path/to/qxDOS/emu88
 
 	# Debian/Ubuntu  (libsdl2-dev is optional, for --window)
 	sudo apt install build-essential cmake libsdl2-dev
@@ -141,7 +150,7 @@ platform set cpmemu already covers.
 ## Architecture
 
 	dosiz binary
-		emu88 386 CPU + memory + PC hardware (vendored, in-tree)
+		emu88 386 CPU + memory + PC hardware (owned by qxDOS, ../qxDOS/emu88)
 		DOSBox→emu88 compatibility shim (src/compat/)
 		host-side DOS: INT 21h/31h/67h handlers → C++ file / memory / process calls
 		.cfg parser (cpmemu-style)

@@ -1,9 +1,13 @@
 #
 # Top-level Makefile — convenience wrapper around CMake.
 #
-# dosiz runs on the in-tree emu88 backend (../emu88, vendored). There is no
-# longer a DOSBox dependency: emu88 is self-contained, so the build is just
-# CMake over emu88 + dosiz's CLI. Real build rules live in src/CMakeLists.txt.
+# dosiz runs on the emu88 backend, which is OWNED BY THE qxDOS REPO and read
+# from a sibling checkout (../qxDOS/emu88) rather than copied in-tree. There is
+# no DOSBox dependency: emu88 is self-contained, so the build is just CMake over
+# emu88 + dosiz's CLI. Real build rules live in src/CMakeLists.txt.
+#
+# Requires github.com/avwohl/qxDOS checked out next to this repo. If it lives
+# elsewhere: cmake -S src -B build -DEMU88_DIR=/path/to/qxDOS/emu88
 #
 
 BUILD_DIR ?= build

@@ -8,14 +8,14 @@
 //
 #include "video.h"
 #include "compat/dosbox_compat.h"
-#include "../emu88/emu88_mem.h"
+#include "emu88_mem.h"
 
 #include <cstdio>
 #include <cstring>
 #include <vector>
 
 // emu88's text-mode font: vga_font_8x16[codepoint][row], MSB = leftmost pixel.
-#include "../emu88/vga_font_8x16.h"
+#include "vga_font_8x16.h"
 
 namespace dosiz {
 namespace video {

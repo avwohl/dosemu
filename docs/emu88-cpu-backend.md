@@ -5,8 +5,10 @@ memory + PC hardware. (Historically dosiz linked **dosbox-staging**; the
 migration to emu88 is complete and DOSBox is no longer a build dependency.
 dosiz drives emu88 through a thin DOSBox→emu88 compatibility shim in
 `src/compat/`, so the DOS host in `src/bridge.cc` runs unchanged.) emu88 is
-vendored in-tree under `emu88/` and shared with the sibling
-**[qxDOS](https://github.com/avwohl/qxDOS)** project, which originated it.
+owned by the **[qxDOS](https://github.com/avwohl/qxDOS)** project, which
+originated it; dosiz compiles it straight out of a sibling checkout at
+`../qxDOS/emu88` rather than keeping a copy. Fix emu88 bugs there, where its
+386 validation suites live.
 
 This note records why emu88 is a good fit for dosiz and the CPU behaviors dosiz
 depends on. emu88 validation (qxDOS commit `f2392f0`, 2026-06-04):

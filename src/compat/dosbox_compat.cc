@@ -9,8 +9,8 @@
 // IRET/RETF bytes the callback stub carries.
 //
 #include "dosbox_compat.h"
-#include "../../emu88/emu88.h"
-#include "../../emu88/emu88_mem.h"
+#include "emu88.h"
+#include "emu88_mem.h"
 #include "../video.h"
 #include "../hardware.h"
 

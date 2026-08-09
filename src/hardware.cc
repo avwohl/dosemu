@@ -7,10 +7,10 @@
 // IRQ onto the PIC, which the CPU run loop drains (take_pending_irq_vector()).
 //
 #include "hardware.h"
-#include "../emu88/opl.h"
-#include "../emu88/pc_speaker.h"
-#include "../emu88/sound_blaster.h"
-#include "../emu88/emu88_mem.h"
+#include "opl.h"
+#include "pc_speaker.h"
+#include "sound_blaster.h"
+#include "emu88_mem.h"
 #include "compat/dosbox_compat.h"   // dosiz_compat::machine_mem()
 
 #include <algorithm>

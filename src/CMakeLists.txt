@@ -25,11 +25,30 @@ add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 add_compile_definitions(_FILE_OFFSET_BITS=64)
 
 # ---------------------------------------------------------------------------
-# emu88 backend: CPU core + protected mode + FPU + memory. (The vendored tree
-# also carries a FreeDOS-boot machine and PC hardware; only the CPU/memory core
-# is needed by the shim, so we compile that subset.)
+# emu88 backend: CPU core + protected mode + FPU + memory. (The emu88 tree also
+# carries a FreeDOS-boot machine and PC hardware; only the CPU/memory core is
+# needed by the shim, so we compile that subset.)
+#
+# emu88 is OWNED BY THE qxDOS REPO (https://github.com/avwohl/qxDOS, emu88/),
+# which is where it was written and where its 386 validation suites live. dosiz
+# consumes it from a sibling checkout rather than keeping a second copy — the
+# two copies had silently drifted 129 lines before this was consolidated. Fix
+# emu88 bugs in qxDOS, not here.
+#
+# Override with -DEMU88_DIR=/path/to/qxDOS/emu88 if your checkout is elsewhere.
 # ---------------------------------------------------------------------------
-set(EMU88_DIR ${CMAKE_SOURCE_DIR}/../emu88)
+set(EMU88_DIR "${CMAKE_SOURCE_DIR}/../../qxDOS/emu88"
+    CACHE PATH "Path to the emu88 CPU core (owned by the qxDOS repo)")
+if(NOT EXISTS "${EMU88_DIR}/emu88.cc")
+  message(FATAL_ERROR
+    "emu88 sources not found at ${EMU88_DIR}\n"
+    "dosiz builds against the emu88 core owned by the qxDOS repo. Clone it\n"
+    "next to dosiz:\n"
+    "    git clone https://github.com/avwohl/qxDOS.git\n"
+    "or point dosiz at an existing checkout:\n"
+    "    cmake -S src -B build -DEMU88_DIR=/path/to/qxDOS/emu88")
+endif()
+message(STATUS "Using emu88 from: ${EMU88_DIR}")
 set(EMU88_SRC
   ${EMU88_DIR}/emu88.cc
   ${EMU88_DIR}/emu88_pmode.cc
