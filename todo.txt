@@ -9,27 +9,12 @@ Everything below was measured on 2026-08-26 on one linux box (gcc 15.2.0,
 C++20, RelWithDebInfo) against qxDOS at 7352fc5.  Where something could not be
 measured here the entry says so.
 
-- CI cannot build dosiz at all, and has not been able to since 8e507aa
-(2026-08-09).  The build now compiles six emu88 files straight out of a sibling
-qxDOS checkout (src/CMakeLists.txt, the EMU88_DIR cache variable and the
-EMU88_SRC list), and .github/workflows/ci.yml checks out this repository only -
-`submodules: recursive` on the actions/checkout step finds nothing, because
-there is no .gitmodules.  Reproduced: `git clone --no-hardlinks . <tmp> &&
-cmake -S src -B <tmp>/bld` in the clone stops at the FATAL_ERROR that begins
-"emu88 sources not found at", which is exactly what ci.yml's `make -j$(nproc)`
-step runs.  So the job dies before its first smoke test, and the 55 `run:`
-blocks after it are unreachable.  Nothing has noticed because ci.yml only fires
-on `v*`/`ci-*` tags, pull requests and workflow_dispatch (the reasoning for
-that is in the file's own `on:` comment and is a deliberate choice, not a
-defect), and the newest of the six tags is ci-djgpp-signal, also from
-2026-04-22.  Fixing it
-needs a decision about how CI gets qxDOS - a second actions/checkout step
-against avwohl/qxDOS at a named ref, or a submodule - and that decision is the
-same one as the next item, so make it once.
-
-- Nothing anywhere records which qxDOS commit dosiz is known to work against.
-EMU88_DIR is a plain `CACHE PATH` with no version check, there is no submodule
-and no pinned SHA; the only qxDOS SHA in the tree is docs/emu88-cpu-backend.md
+- The local build still records no qxDOS commit, though CI now does.
+.github/workflows/ci.yml pins QXDOS_REF and checks that commit out, so a CI run
+says exactly which emu88 it compiled - but a developer's `make` still reads
+whatever is in the sibling checkout at that moment.  EMU88_DIR is a plain
+`CACHE PATH` with no version check and there is no submodule; the only qxDOS
+SHA in the tree is docs/emu88-cpu-backend.md
 citing f2392f0, and that is a 2026-06-04 validation note, not a pin.  qxDOS
 does not test dosiz from its side either: its only workflow is release.yml,
 which never mentions dosiz, and the only references to this project anywhere in
@@ -54,20 +39,6 @@ tests/djgpp/run.sh, 42 checks, named in neither the Makefile nor README.md;
 somebody has to already know it exists.  The smallest honest fix is to point
 `make test` at run.sh; wiring the 42 checks into ctest individually is a bigger
 change and buys parallelism nobody has asked for.
-
-- a CI step asserts a behaviour the code deliberately removed 131 commits ago,
-so that step fails whenever CI is repaired.  ci.yml's step named "Smoke
-(CAT.COM read path, auto mode expands LF to CRLF)" builds a .cfg with
-`default_mode = auto` and expects CR in the output.  7463708 "AH=3F: disk reads
-are binary; add DIFF regression gate" (2026-04-22) made every non-stdin handle
-binary on the read side - the site is the `text_mode = false;` under the
-comment "Real DOS does NOT do CR/LF translation on disk-file reads" in the
-AH=3F handler in src/bridge.cc, a few lines below where text_mode is taken from
-s_default_mode only when reg_bx == 0.  Measured here with that exact .cfg under
-all three modes: auto, text and binary each give `l i n e 1 \n l i n e 2 \n`
-under od -c, no CR anywhere.  `git rev-list --count 7463708..HEAD` is 131.  The
-code is right and the step is wrong; the step should assert bare LF.  README.md
-carries the same false claim - see the README item below.
 
 - a Crynwr packet driver installs itself on every single run, over a backend
 hardcoded to return nothing, and prints two lines to stderr each time.
@@ -132,11 +103,12 @@ gates in run.sh and all four pass on the headless build; MOUSETEST.COM renders
 a cursor into a DOSIZ_FRAME_DUMP PPM, though no harness runs it (see the
 uncovered-fixtures item below).  The sentence entered README.md in 2564908
 (2026-06-05) and 7bb9cf9 (mouse), 1a28945 (AdLib and PC speaker), 4a2062b
-(Sound Blaster) and a0f222b (joystick) all landed after it.  (2) "Text mode
-strips CR on write and expands LF to CRLF on read" - the write half is still
-true (the AH=40 handler still filters CR out of the buffer when text_mode is
-set); the read half has been false for every disk file since 7463708, see the
-CI item above.  (3) the status table cites `dosiz mTCP-FTP.EXE -> prints usage
+(Sound Blaster) and a0f222b (joystick) all landed after it.  (2) is CLOSED:
+"Text mode strips CR on write and expands LF to CRLF on read" had a true write
+half and a read half that had been false for every disk file since 7463708;
+the sentence now says disk reads are binary and only stdin is cooked, and the
+CI step that asserted the opposite was corrected in the same commit.  (3) the
+status table cites `dosiz mTCP-FTP.EXE -> prints usage
 banner`, and `find . -iname '*mtcp*'` outside .git returns nothing - that
 result cannot be reproduced from a clean checkout by anybody. (4) the same
 table cites `echo F | dosiz xcopy.exe src dst`; ci.yml sources xcopy.exe from
@@ -219,9 +191,9 @@ exits rc=0 printing the string ci.yml greps for - 21 of them a plain `=ok`, the
 other four `dpmi=present`, `dpmi-stage5=hello-from-pm`,
 `dpmi-stage5-32=hello-from-pm32` and `int31=denied`.  But it means the whole
 DPMI and LE surface, which is the part of dosiz least covered by anything else,
-is gated behind a job that dies at configure.  Whichever way the CI item above
-is settled, these belong in run.sh as well, because run.sh is what a person
-runs.
+runs only in CI - and until 2026-08-26 that job could not build at all, so this
+surface went untested for months without anyone seeing a red tick.  These
+belong in run.sh as well, because run.sh is what a person runs.
 
 - five fixtures are covered by no harness at all, and they are every graphics
 fixture in the tree.  EMS_MAP.COM, GRAF13.COM, MOUSETEST.COM, SCROLL.COM and

@@ -12,13 +12,18 @@
 
 BUILD_DIR ?= build
 JOBS      ?= $(shell nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+# Where the emu88 core lives. Empty means "let CMake use its default", which is
+# the sibling checkout ../qxDOS/emu88. Set it when qxDOS is somewhere else -
+# CI does, because a GitHub runner cannot check a second repository out beside
+# the workspace, only inside it.
+EMU88_DIR ?=
 
 .PHONY: all build configure clean distclean test
 
 all: build
 
 configure:
-	cmake -S src -B $(BUILD_DIR)
+	cmake -S src -B $(BUILD_DIR) $(if $(EMU88_DIR),-DEMU88_DIR=$(EMU88_DIR))
 
 build: configure
 	cmake --build $(BUILD_DIR) -j$(JOBS)

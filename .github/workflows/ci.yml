@@ -2,9 +2,13 @@ name: CI
 
 on:
   # Run CI only on tagged releases + manual triggers.  Day-to-day
-  # commits to main are fast enough to self-test locally; running the
-  # full dosbox-staging build + dosiz suite on every push burns a lot
-  # of GitHub Actions minutes for little marginal value.
+  # commits to main are fast enough to self-test locally.
+  #
+  # Note what that trigger costs: this job could not build AT ALL between
+  # 8e507aa (2026-08-09), which moved emu88 out to qxDOS, and the commit that
+  # added the checkout below - and nothing noticed, because the newest tag
+  # predates the break by four months.  A release would have been the first
+  # thing to find out.
   push:
     tags: ['v*', 'ci-*']
   pull_request:
@@ -14,29 +18,37 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # The qxDOS commit this build compiles emu88 from.  See the checkout step.
+      QXDOS_REF: 64d8e7d
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # emu88 is owned by qxDOS and read from a separate checkout; there is no
+      # submodule and no in-tree copy (see src/CMakeLists.txt).  CMake's default
+      # is a SIBLING of this directory, which a runner cannot produce -
+      # actions/checkout will only write inside the workspace - so it goes in
+      # here and EMU88_DIR is passed explicitly below.
+      #
+      # Pinned, not floating: a commit in qxDOS reaches this build with no
+      # version gate at all, which is the hazard todo.txt records.  Bump it
+      # deliberately.
+      - name: Check out qxDOS, which owns emu88
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
+          repository: avwohl/qxDOS
+          ref: ${{ env.QXDOS_REF }}
+          path: qxDOS
 
       - name: Install build deps
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build meson pkg-config ccache \
-            libsdl2-dev libsdl2-net-dev libpng-dev libopusfile-dev \
-            libspeexdsp-dev libfluidsynth-dev libslirp-dev libasound2-dev \
-            libxi-dev libglib2.0-dev
+            build-essential cmake pkg-config ccache libsdl2-dev
 
-      - name: Cache dosbox-staging build
-        uses: actions/cache@v4
-        with:
-          path: dosbox-staging/build
-          key: dosbox-staging-${{ hashFiles('dosbox-staging/meson.build', 'dosbox-staging/meson_options.txt', 'patches/*.patch') }}
-
-      - name: Build (applies submodule patch, meson+ninja, then dosiz)
-        run: make -j$(nproc)
+      - name: Build
+        run: make -j$(nproc) EMU88_DIR="$GITHUB_WORKSPACE/qxDOS/emu88"
 
       - name: Smoke (--version)
         run: build/dosiz --version
@@ -613,7 +625,16 @@ jobs:
           printf '%s' "$out" | grep -q 'line1'
           printf '%s' "$out" | grep -q 'line2'
 
-      - name: Smoke (CAT.COM read path, auto mode expands LF to CRLF)
+      # Disk reads are BINARY whatever default_mode says - only device reads
+      # (stdin) do text-mode cooking, because expanding \n -> \r\n inflates the
+      # byte count the caller sees and breaks anything seeking relative to EOF
+      # (DJGPP diff does lseek(-filesize, SEEK_CUR) and gets EINVAL).  See
+      # src/bridge.cc, `text_mode = false` on the non-stdin path.
+      #
+      # This step asserted the opposite until 2026-08-26 and had been failing
+      # since 7463708 removed the expansion, 131 commits earlier - unnoticed
+      # because the job died at configure long before reaching it.
+      - name: Smoke (CAT.COM read path, disk reads stay binary)
         run: |
           workdir=$(mktemp -d)
           printf 'line1\nline2\n' > "$workdir/input.txt"
@@ -625,7 +646,9 @@ jobs:
           EOF
           out=$(build/dosiz "$workdir/txt.cfg" 2>/dev/null)
           echo "out: $(printf '%q' "$out")"
-          printf '%s' "$out" | grep -qU $'line1\r' || { echo "FAIL"; exit 1; }
+          printf '%s' "$out" | grep -q 'line1' || { echo "FAIL: no output"; exit 1; }
+          printf '%s' "$out" | grep -qU $'\r' && { echo "FAIL: CR reappeared on a disk read"; exit 1; }
+          echo "ok: no CR, byte count matches the file on disk"
 
       - name: "Smoke (env block at PSP:2Ch)"
         run: |

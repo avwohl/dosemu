@@ -42,6 +42,47 @@ Everything else — DJGPP, DPMI ring 3, LE binaries, EMS, graphics, sound, the
 at the time, and most of it was built on the DOSBox one and then had to be made
 to work again on emu88.
 
+## 2026-08-26: CI can build again
+
+`.github/workflows/ci.yml` had been unable to build this repository since
+`8e507aa` (2026-08-09) moved emu88 out to qxDOS. The job checked out this
+repository only, with `submodules: recursive` against a tree that has no
+`.gitmodules`, so `make` stopped at CMake's `emu88 sources not found`
+FATAL_ERROR and the 55 `run:` blocks after it never executed. Nothing noticed:
+the workflow fires on `v*`/`ci-*` tags and pull requests, and the newest of the
+six tags predates the break by four months. A release would have been the first
+thing to find out.
+
+The job now checks qxDOS out into the workspace and passes
+`EMU88_DIR="$GITHUB_WORKSPACE/qxDOS/emu88"`. CMake's default is a *sibling* of
+the source directory, which a runner cannot produce — `actions/checkout` writes
+only inside the workspace — so the path is given explicitly rather than left to
+a fallback. The ref is **pinned** (`QXDOS_REF`), not floating: a commit in
+qxDOS reaches this build with no version gate at all, and a CI run should say
+which emu88 it compiled. The top-level `Makefile` forwards `EMU88_DIR` now, so
+`make EMU88_DIR=...` works and CI needs no special-case CMake invocation.
+
+Two things fell out of repairing it:
+
+- The dead DOSBox dependency set is gone. The install step pulled meson, ninja,
+  fluidsynth, opusfile, speexdsp, slirp, libpng, ALSA, Xi and glib, and cached
+  `dosbox-staging/build`, none of which the emu88 build touches — `dosbox-staging/`
+  has zero tracked files and `src/CMakeLists.txt` looks for exactly one optional
+  package, SDL2.
+- The step named "Smoke (CAT.COM read path, auto mode expands LF to CRLF)"
+  asserted behaviour `7463708` deliberately removed 131 commits earlier, so it
+  had been failing on its own terms the whole time — invisibly, because the job
+  died at configure long before reaching it. Disk reads are binary whatever
+  `default_mode` says; only stdin is cooked, because expanding `\n` to `\r\n`
+  inflates the byte count and breaks anything seeking relative to EOF (DJGPP
+  `diff` does `lseek(-filesize, SEEK_CUR)`). The step now asserts that, and
+  `README.md`'s matching sentence — which said the same false thing — says it
+  too.
+
+Measured, not assumed: a fresh `git clone` plus a qxDOS checkout inside it
+builds with `make EMU88_DIR=$PWD/qxDOS/emu88`, produces `dosiz 0.1.0-dev
+(backend: emu88)`, and the corrected smoke assertion passes against it.
+
 ## 2026-08: one copy of emu88, and five LE/PM client fixes
 
 - **dosiz builds against qxDOS's emu88 instead of keeping its own copy**

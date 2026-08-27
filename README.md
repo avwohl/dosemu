@@ -99,8 +99,10 @@ per-file / per-pattern mappings come from a `.cfg` file:
 	HELLO.TXT      = /real/path/hello_long_name.txt text
 	*.BAS          = text           # mode-only wildcard override
 
-Text mode strips CR on write and expands LF to CRLF on read so files
-live on the host in Unix format. No subprocess, no DOS shell, no config
+Text mode strips CR on write, so files land on the host in Unix format.
+It does NOT expand LF to CRLF on read: disk reads are binary whatever the
+mode says, because inflating the byte count breaks anything that seeks
+relative to EOF. Only stdin is cooked. No subprocess, no DOS shell, no config
 files beyond the optional `.cfg`.
 
 ## Building
