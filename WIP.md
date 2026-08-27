@@ -1,8 +1,28 @@
-> **Note:** this is a historical session journal. Entries below the DOSBox→emu88
-> migration describe the old DOSBox-backed build (SDL2/glib/meson deps, the
-> `patches/` set, the submodule). For the current architecture see `README.md`,
-> `CLAUDE.md`, and `docs/emu88-cpu-backend.md`: dosiz now runs on the in-tree
-> emu88 386 core with no DOSBox/SDL2 dependency.
+> **This file is history. It is not a backlog and it is not maintained.**
+>
+> It is the session journal, written as the work happened, and it is not in
+> chronological order — it opens at 2026-05-19, walks back through 2026-04-23,
+> 2026-04-22 and 2026-04-21, and ends with its newest material, the 2026-08-07
+> LE/PM section. Read it for how a fault was narrowed, not for what is true
+> today.
+>
+> **Open work lives in `todo.txt`**; finished work is summarised in
+> `CHANGELOG.md` and detailed in the commit messages. On 2026-08-26 the claims
+> in this file were checked against the source, and the three that are still
+> genuinely open — the `AH=3F` stale-ECX sizing question logged UNCONFIRMED on
+> 2026-05-19, the 35/37 Windows result from the DOSBox-backed build, and the
+> keyboard-injection feature marked NEXT and never built — were moved into
+> `todo.txt` with what could and could not be re-measured. Nothing was deleted
+> from here.
+>
+> Two things in the text below are known to have been overtaken. Entries
+> written before the DOSBox→emu88 migration describe the old DOSBox-backed
+> build (SDL2/glib/meson deps, the `patches/` set, the submodule), all of
+> which is gone. And emu88 is no longer "in-tree": since `8e507aa` it is read
+> from a sibling **qxDOS** checkout and is owned by that repository. For the
+> current architecture see `README.md`, `CLAUDE.md` and
+> `docs/emu88-cpu-backend.md` — and see `todo.txt` first, because several
+> statements in those files are themselves wrong and are listed there.
 
 # Windows status (2026-05-19) — Smalltalk-80 bring-up
 

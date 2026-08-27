@@ -1,29 +1,358 @@
-STATUS (achieved): dosiz runs DOS programs by emulating the DOS API itself
-(INT 21h/31h/67h) on top of the in-tree emu88 386 CPU core. Real-mode DOS,
-the full DPMI 0.9 host, 32-bit DJGPP programs, EMS 4.0 + VCPI, and the .cfg
-file-mapping layer all work. The original goals below are met; emu88 replaced
-dosbox as the CPU/hardware backend (see docs/emu88-cpu-backend.md).
+Todo list.  Open items only - finished work is in CHANGELOG.md and in the
+commit messages that made the changes, not kept here.  WIP.md is the historical
+session journal and is not a backlog; the items it still had open were moved
+into this file.  The original brief that used to sit at the bottom of this file
+is now docs/original-brief.md.  There is no issue tracker; this file and github
+issues on avwohl/dosiz are the only two mechanisms.
 
---- original brief ---
+Everything below was measured on 2026-08-26 on one linux box (gcc 15.2.0,
+C++20, RelWithDebInfo) against qxDOS at 7352fc5.  Where something could not be
+measured here the entry says so.
 
-create public repo avwohl/dosiz
-create an msdos emulator
-for a template of how it should work see ../cpmemu
- that provides a z80 emulator and translates CP/M system
- calls to linux.  Here use dosbox for the 80386 emulator
- and provide fake msdos calls that translate to linux.
-Most emulators use native disks (dos, cp/m) when doing
- development this involves a lot moving files in and out
- of native disks.  By translating system calls this is avoided
-Note the .cfg section of cpmemu for specifying options and
- end of line translations
-This emulator should provide DPMI emulation as well as msdos.
-For a refrence of what msdos does I suggest https://freedos.org/
- It is free open source. Feel free to use code , however be sure to
- credit it and keep the copyright and provide a copy of its source code if you do.
-write as much as possible in c++
-for command line dos tools like compilers there should be a way to run this
- emulator as a command line linux tool. For example if a dos c compiler is run
- it need not create a window.
-It will probably be nessary to povide video card emulation like ../qxDOS
+- CI cannot build dosiz at all, and has not been able to since 8e507aa
+(2026-08-09).  The build now compiles six emu88 files straight out of a sibling
+qxDOS checkout (src/CMakeLists.txt, the EMU88_DIR cache variable and the
+EMU88_SRC list), and .github/workflows/ci.yml checks out this repository only -
+`submodules: recursive` on the actions/checkout step finds nothing, because
+there is no .gitmodules.  Reproduced: `git clone --no-hardlinks . <tmp> &&
+cmake -S src -B <tmp>/bld` in the clone stops at the FATAL_ERROR that begins
+"emu88 sources not found at", which is exactly what ci.yml's `make -j$(nproc)`
+step runs.  So the job dies before its first smoke test, and the 55 `run:`
+blocks after it are unreachable.  Nothing has noticed because ci.yml only fires
+on `v*`/`ci-*` tags, pull requests and workflow_dispatch (the reasoning for
+that is in the file's own `on:` comment and is a deliberate choice, not a
+defect), and the newest of the six tags is ci-djgpp-signal, also from
+2026-04-22.  Fixing it
+needs a decision about how CI gets qxDOS - a second actions/checkout step
+against avwohl/qxDOS at a named ref, or a submodule - and that decision is the
+same one as the next item, so make it once.
 
+- Nothing anywhere records which qxDOS commit dosiz is known to work against.
+EMU88_DIR is a plain `CACHE PATH` with no version check, there is no submodule
+and no pinned SHA; the only qxDOS SHA in the tree is docs/emu88-cpu-backend.md
+citing f2392f0, and that is a 2026-06-04 validation note, not a pin.  qxDOS
+does not test dosiz from its side either: its only workflow is release.yml,
+which never mentions dosiz, and the only references to this project anywhere in
+that tree are three descriptive comments - docs/hardware-roadmap.md:19,
+emu88/audio_device.h:10 and emu88/dos_machine.h:86 - none of them a dependency
+either side could act on.  So an emu88 change in qxDOS can break dosiz with
+nothing on either side to catch it.
+What is known today, and is written down nowhere else: with qxDOS clean at
+7352fc5 ("IDIV: the non-faulting divider band is 8-bit only"), a full build and
+`./tests/djgpp/run.sh` gives 42 passed, 0 failed, exit 0.  That is the whole of
+the evidence that the pair is in sync.  Sibling precedent for the mechanism is
+romwbw_emu, whose two workflows pin `CPMEMU_REF` to a SHA and check out cpmemu
+beside themselves.
+
+- `make test` runs zero tests and exits 0.  The Makefile's `test` target is `cd
+$(BUILD_DIR) && ctest --output-on-failure`, and src/CMakeLists.txt contains no
+add_test, no enable_testing and no include(CTest) - `grep -cE
+'add_test|enable_testing|include\(CTest\)' src/CMakeLists.txt` is 0.  In a
+fresh build directory ctest prints "No tests were found!!!" and returns 0, so
+the target is a green no-op that reads as a passing suite.  The real suite is
+tests/djgpp/run.sh, 42 checks, named in neither the Makefile nor README.md;
+somebody has to already know it exists.  The smallest honest fix is to point
+`make test` at run.sh; wiring the 42 checks into ctest individually is a bigger
+change and buys parallelism nobody has asked for.
+
+- a CI step asserts a behaviour the code deliberately removed 131 commits ago,
+so that step fails whenever CI is repaired.  ci.yml's step named "Smoke
+(CAT.COM read path, auto mode expands LF to CRLF)" builds a .cfg with
+`default_mode = auto` and expects CR in the output.  7463708 "AH=3F: disk reads
+are binary; add DIFF regression gate" (2026-04-22) made every non-stdin handle
+binary on the read side - the site is the `text_mode = false;` under the
+comment "Real DOS does NOT do CR/LF translation on disk-file reads" in the
+AH=3F handler in src/bridge.cc, a few lines below where text_mode is taken from
+s_default_mode only when reg_bx == 0.  Measured here with that exact .cfg under
+all three modes: auto, text and binary each give `l i n e 1 \n l i n e 2 \n`
+under od -c, no CR anywhere.  `git rev-list --count 7463708..HEAD` is 131.  The
+code is right and the step is wrong; the step should assert bare LF.  README.md
+carries the same false claim - see the README item below.
+
+- a Crynwr packet driver installs itself on every single run, over a backend
+hardcoded to return nothing, and prints two lines to stderr each time.
+`./build/dosiz tests/HELLO.COM` emits "dosiz: ethernet/slirp backend
+unavailable; INT 0x60 packet driver will accept guest calls but RX/TX will
+no-op." and "dosiz: Crynwr pktdrv installed at INT 60h, stub at 0060:0000"
+before the program's own output.  The install is unconditional - there is no
+env gate anywhere (`grep -rn 'DOSIZ_PKTDRV\|DOSIZ_NET' src/` finds nothing) -
+and the open it warns about is `ETHERNET_OpenConnection("slirp")`, whose only
+definition is `{ return nullptr; }` in src/compat/dosbox_compat.cc.  So every
+non-networking run pays two stderr lines and an INT 60h vector for a driver
+that cannot move a packet.  56 lines of bridge.cc mention pktdrv.  It was not
+always dead: a102726 "bridge: native virtual Crynwr packet driver at INT 0x60"
+(2026-05-12, with follow-ups 5f10459 and 91eed4a) forwarded send and recv to
+dosbox-staging's SLIRP backend, and the stub that returns nullptr is one of the
+things 2691106 wrote when the DOSBox CPU went away - `git log -S
+'ETHERNET_OpenConnection' -- src/` names exactly those two commits.  The
+feature is documented nowhere: README.md, docs/ and CLAUDE.md have no hit for
+"packet driver", "pktdrv" or "slirp", and WIP.md still lists networking under
+"No plan".  Three ways out and the choice is the owner's: gate the install
+behind an env var or a flag, silence the two messages and leave it installed,
+or take it out until there is a backend to put under it.
+
+- `--verbose` / `-v` traces nothing.  README.md and the program's own --help
+string both say "--verbose, -v      Trace DOS syscalls".  src/dosiz.cc sets
+cfg.verbose from the flag and reads it in exactly one place, to print that a
+sidecar .cfg was loaded; `grep -c 'verbose' src/bridge.cc` is 0, so no syscall
+path can see it.  Measured: `./build/dosiz -v tests/HELLO.COM` prints only
+`dosiz-hello-ok` (plus the two pktdrv lines above), while `DOSIZ_TRACE=1
+./build/dosiz tests/HELLO.COM` prints `[trace] AH=09` and `[trace] AH=4c`.  The
+tracing the flag promises already exists under a different name.  Either wire
+`-v` to set g_debug.trace, or delete the flag and the two lines of
+documentation - but it is in the --help output, so today it misleads at the
+terminal as well as on the page.
+
+- two DOSIZ_* flags are parsed, documented as working, and read by nothing.
+DOSIZ_CPU_TRACE is set into g_debug.cpu_trace in src/debug_settings.cpp and
+appears nowhere else but its own declaration in debug_settings.hpp; its only
+consumer was deleted by 2691106 "dosiz: run bridge.cc DOS host on emu88 via a
+DOSBox CPU compat shim" (2026-06-05), which is visible as the removed line `if
+(dosiz::g_debug.cpu_trace) {` in that diff.  It was a DOSBox facility (e62ac8a
+"DPMI trace: force core=normal when DOSEMU_CPU_TRACE is set"), and emu88 is a
+plain interpreter with no dynrec and no `core=` setting, so there is nothing
+left for it to force.  DEBUGGING.md still documents it as logging every
+instruction and forcing core=normal, cappable with DOSIZ_CPU_TRACE_LINES - a
+name that does not appear anywhere in src/ - and docs/c-toolchain-guide.md
+repeats the claim.  DOSIZ_DPMI_RING3 is the same shape: g_debug.dpmi_ring3 is
+set and never read, because 6371618 "DPMI: default to ring-3 entry; legacy
+ring-0 via DOSEMU_DPMI_RING0" (2026-04-23) inverted the switch and the live one
+is now `want_ring3 = bits32 && !dosiz::g_debug.dpmi_ring0` in bridge.cc.
+DEBUGGING.md still calls it "Required for DJGPP programs" and
+tests/djgpp/run.sh has a note about it; all 42 run.sh checks and all 25
+tests/DPMI_*.COM pass with no environment variables set at all.  Deleting both
+members is a two-line change and the documentation is the real work.  A cpu
+trace against emu88 would be a new feature rather than a repair, and it is
+worth wanting; say so if it is.
+
+- README.md carries four statements that are measurably false.  (1) "Audio
+(Sound Blaster/AdLib), the mouse, and the joystick are not yet wired on the
+emu88 backend" - all of them are wired.  ADLIB, SPEAKER, SBDMA and JOYTEST are
+gates in run.sh and all four pass on the headless build; MOUSETEST.COM renders
+a cursor into a DOSIZ_FRAME_DUMP PPM, though no harness runs it (see the
+uncovered-fixtures item below).  The sentence entered README.md in 2564908
+(2026-06-05) and 7bb9cf9 (mouse), 1a28945 (AdLib and PC speaker), 4a2062b
+(Sound Blaster) and a0f222b (joystick) all landed after it.  (2) "Text mode
+strips CR on write and expands LF to CRLF on read" - the write half is still
+true (the AH=40 handler still filters CR out of the buffer when text_mode is
+set); the read half has been false for every disk file since 7463708, see the
+CI item above.  (3) the status table cites `dosiz mTCP-FTP.EXE -> prints usage
+banner`, and `find . -iname '*mtcp*'` outside .git returns nothing - that
+result cannot be reproduced from a clean checkout by anybody. (4) the same
+table cites `echo F | dosiz xcopy.exe src dst`; ci.yml sources xcopy.exe from
+`dosbox-staging/build/resources/drives/y/dos/xcopy.exe` and prints "SKIP:
+xcopy.exe missing from dosbox-staging build tree" when it is absent, which is
+now permanent - b8c54f9 retired the submodule, `git ls-files dosbox-staging`
+returns 0 files, and only an empty untracked dosbox-staging/build/ survives on
+disk.  A status table is the wrong place for a result nobody else can get;
+either ship the binary or say where it came from and that it is not in the
+tree.
+
+- four files still describe emu88 as in-tree or vendored, and docs/CREDITS.md
+claims it as dosiz's own code.  (There were five; the fifth was this file, and
+this rewrite is what fixed it.)  The four: the header comment at the top of
+src/CMakeLists.txt ("the in-tree **emu88** backend (vendored under ../emu88)"),
+which its own body refutes 26 lines later, docs/CREDITS.md twice ("a
+from-scratch x86 interpreter vendored into dosiz" and "source of the vendored
+emu88 CPU core"), and patches/README.md ("dosiz runs on the in-tree emu88 386
+core and has no build-time dependencies").  All were falsified by 8e507aa:
+there is no emu88/ directory in this repository and the build fails to
+configure without a qxDOS checkout, so patches/README.md's "no build-time
+dependencies" is false twice over.  CREDITS.md is the worse of the two
+problems, because it lists "the emu88 CPU core" among "dosiz's own code - ...
+not derived from dosbox-staging", and CLAUDE.md says the opposite in as many
+words: "emu88 belongs to qxDOS. Do not fix emu88 bugs from this repo".
+qxDOS/RIGHTS.md records emu88 as written for qxDOS, GPLv3-or-later, author
+Aaron Wohl, source github.com/avwohl/qxDOS.  CLAUDE.md's instruction to keep
+attribution accurate names CREDITS.md specifically, which is why this is the
+one piece of doc drift that is worth fixing before the rest.
+
+- DEBUGGING.md's last section tells the reader to patch a submodule that no
+longer exists, using a JIT that never existed here.  It is headed
+"Submodule-level hooks", points at `dosbox-staging/include/paging.h` and
+`dosbox-staging/src/hardware/memory.cpp` for pinpoint memory watchpoints, and
+warns that "Writes via the dynrec JIT core bypass mem_write*_inline, so always
+combine with DOSIZ_CPU_TRACE=1 which forces core=normal".  The submodule was
+retired in b8c54f9, emu88 has no dynrec core, and DOSIZ_CPU_TRACE is inert (see
+above), so every clause of it is wrong.  Whether emu88 should grow an
+equivalent watchpoint hook is a real question and a separate one; the section
+as it stands should go.
+
+- five DOSIZ_* environment variables ship undocumented and DEBUGGING.md's table
+omits four more.  `grep -rhoE 'getenv\("DOSIZ[A-Z0-9_]*"' src/` yields
+DOSIZ_AUDIO_DUMP, DOSIZ_BYPASS_EXTENDER, DOSIZ_CB_TRACE, DOSIZ_FRAME_DUMP,
+DOSIZ_PATH, DOSIZ_SCREENSHOT_SECS and DOSIZ_VEC_TRACE.  Two of those seven are
+in README.md - DOSIZ_FRAME_DUMP and DOSIZ_PATH - and the other five are in no
+document at all.  DOSIZ_AUDIO_DUMP is not a debugging nicety - run.sh's
+run_audio helper is built on it, and it is the only reason the ADLIB, SPEAKER
+and SBDMA gates can assert anything without a sound card.  Separately,
+src/debug_settings.cpp also defines DOSIZ_STACKWATCH, DOSIZ_4B_TRACE,
+DOSIZ_4C_TRACE and DOSIZ_OPEN_TRACE, none of which appear in DEBUGGING.md's
+table either.
+
+- three smaller documentation facts, each checked against the source.
+examples/example.cfg heads its machine/cputype/core keys "Machine / CPU
+defaults (passed through to dosbox)"; there is no dosbox, the three land in
+src/config.h and nothing reads them - README.md is honest about the equivalent
+`--machine=`/`--cpu=` flags ("accepted but currently inert") and the example
+config is not.  docs/c-toolchain-guide.md says "The DOS env block is ENV_BYTES
+(currently 4 KB) total"; bridge.cc sets `constexpr uint32_t ENV_BYTES =
+0x0800`, which is 2 KB.  docs/emu88-cpu-backend.md leaves open "emu88 is the
+same author's code, so its license for dosiz is the author's to set; confirm
+the intended terms before relying on it" - qxDOS/RIGHTS.md has since answered
+that (GPL v3 or later, inherited from qxDOS) - and the same file says "re-run
+dosiz's own 23 DPMI fixtures" when `ls tests/DPMI_*.COM | wc -l` is 25, a
+number README.md already gets right.
+
+- 41 committed fixtures are exercised only by the workflow that cannot run.
+tests/ holds 80 .COM and .EXE fixtures; walking each basename through both
+harnesses gives 41 that ci.yml names and tests/djgpp/run.sh does not: all 25
+tests/DPMI_*.COM, plus LE_MIN.EXE, DOS4G_PROBE.COM, SYSCALLS.COM, MCB_TEST.COM,
+ENVDUMP.COM, ECHOIN.COM, LISTDIR.COM, GRAND.COM, MIDDLE.COM, CHILD.COM,
+SPAWN_AL1.COM, HELLO_W.EXE, HELLO_B.COM, EXE2BIN.EXE, SURVIVE.COM and SIZE.COM.
+(That is a substring match on the basename, so it is a floor rather than an
+exact figure - CAT.COM and WRITE.COM are excluded because "CAT" and "WRITE"
+occur in run.sh inside other names.  `grep -c 'DPMI_' tests/djgpp/run.sh` is 1
+and that one hit is a comment; ci.yml has 27.)  This is coverage risk rather
+than present breakage: all 25 DPMI fixtures were run by hand here and every one
+exits rc=0 printing the string ci.yml greps for - 21 of them a plain `=ok`, the
+other four `dpmi=present`, `dpmi-stage5=hello-from-pm`,
+`dpmi-stage5-32=hello-from-pm32` and `int31=denied`.  But it means the whole
+DPMI and LE surface, which is the part of dosiz least covered by anything else,
+is gated behind a job that dies at configure.  Whichever way the CI item above
+is settled, these belong in run.sh as well, because run.sh is what a person
+runs.
+
+- five fixtures are covered by no harness at all, and they are every graphics
+fixture in the tree.  EMS_MAP.COM, GRAF13.COM, MOUSETEST.COM, SCROLL.COM and
+VESA.COM appear in neither tests/djgpp/run.sh nor ci.yml (VESA and DPMI do
+occur in run.sh, but only inside comments).  A headless assertion path already
+exists and works: measured here, with DOSIZ_FRAME_DUMP set, GRAF13.COM writes a
+`P6 320 200`, VESA.COM a `P6 640 480`, SCROLL.COM a `P6 640 400` and
+MOUSETEST.COM a `P6 320 200`, all rc=0 with no display and no SDL2 in the
+binary, and EMS_MAP.COM just prints `ems-map=ok` on stdout and needs nothing
+special.  So four of the five can be gated on pixel values today: reading
+VESA.COM's own dump here gives the five banks as 000000 / 0000aa / 00aa00 /
+00aaaa / aa0000 at pixel offsets 0 / 65536 / 131072 / 200000 / 262144, which is
+exactly the five-bank fill tests/vesa.asm programs.  The fifth is a one-line
+run_one.  Nobody has written the gate.
+
+- `--window` is compiled here but exercised by nothing.  Note that the audit
+this file came from got this wrong in one direction: it reported SDL2 as absent
+and src/display.cc (260 lines) as excluded from the build.  SDL2 2.32.10 is
+installed on this box (/usr/include/SDL2/SDL.h, sdl2-config.cmake), and a fresh
+`cmake -S src -B <dir> -DEMU88_DIR=...` prints "dosiz: SDL2 found -- building
+--window support" and compiles display.cc with no warnings.  What misled the
+audit is the stale build/ directory - gitignored, zero tracked files, left over
+from an older configure - whose CMakeCache.txt still records
+`SDL2_DIR:PATH=SDL2_DIR-NOTFOUND`, so the binary at
+build/dosiz has no --window and the fresh one does.  Either way nothing tests
+it: no run.sh case names --window, ci.yml never passes it (though it does
+apt-install libsdl2-dev), and ci.yml cannot reach the build anyway.  All that
+is measured of the SDL2 build is that it links and that `--window
+tests/HELLO.COM` runs to `dosiz-hello-ok` and rc=0 with no DISPLAY set. Nothing
+has drawn a window and compared a pixel.
+
+- LE import-resolution fixups are unimplemented, and real LE clients that use
+them are rejected.  The comment in the LE loader in src/bridge.cc says
+"Unsupported (logged + skipped): imported-by-ordinal, by-name, and entry-table
+targets", and the code prints "dosiz: LE fixup: ref_type %u (imports)" and then
+skips the fixup.  This is the last live row of WIP.md's "Still missing for real
+LE binaries" table: the selector-bearing fixups 0x02/0x03/0x06 in the row above
+it have since landed (le_apply_fixups writes `objects[].ldt_sel` for all three,
+and a ci.yml step asserts the type-0x06 case resolves to obj2+0x8).  WIP.md's
+own note is that for Watcom utilities like wd.exe the imports are usually
+RTL-internal and live in the same image, so this may or may not be what is
+blocking them - see the Watcom item below, which cannot be measured here.
+
+- the LE/PM defects closed on 2026-08-07 have neither a fixture nor a
+regression gate, so the fix claim cannot be re-run.  47fa13b "WIP: record two
+open LE/PM client defects, with reproductions" opened the section and added
+tests/mp_in_operator.py and tests/le_small_jt.c; ae8f107, 1c3b543, f3c47dc,
+b047d18 and 570d5c4 then landed, and 570d5c4 rewrote that section into "##
+Fixed 2026-08-07", which lists five defects rather than two.  But the tests
+directory holds only the .py and the .c - there is no MP.EXE and no built
+JT.EXE anywhere on this machine (`find /home/wohl/src -maxdepth 4 \( -iname
+'MP.EXE' -o -iname 'JT.EXE' \)` finds nothing, the sibling freedos_micro_python
+checkout included) - and neither file is named by run.sh or ci.yml.  The bugs
+described are specific and the reasoning in the commit is detailed; what is
+missing is anything that would catch a regression.  Building JT.EXE from
+le_small_jt.c needs a DOS toolchain, and MP.EXE comes from another project
+entirely, so this needs a decision about what a committed fixture may weigh as
+much as it needs work.
+
+- real Watcom DOS4G binaries still stall at the extender's pre-entry
+convention, and none of the evidence for that is in the repository.  README.md
+says wd.exe and vi.exe "enter 32-bit PM, run ~0x135 bytes, GP-fault on DOS4G
+pre-entry selector setup we don't emulate", and WIP.md describes the same gap.
+Neither binary is in tests/, and ~/ow does not exist on this machine, which is
+also why run.sh's Open Watcom compile-link-run gate skips silently - it
+requires ~/ow/binw/wcc386.exe, wlink.exe, wstub.exe and dos4gw.exe.  So the
+WATCOM32 and WATCOM16 checks are not among the 42 that pass, and nothing here
+can confirm or refute the current state.  This needs an Open Watcom install
+(docs/watcom-setup.md) and a person to drive it.
+
+- the AH=3F stale-ECX over-read logged UNCONFIRMED on 2026-05-19 is still the
+code's behaviour and still unresolved.  WIP.md records that st80_run's 4-byte
+`read(fd,&otLen,4)` showed `ECX=000e0004` in the AH=3F trace, and asks whether
+picking reg_ecx over-reads a small DJGPP libc read; it was never closed either
+way.  The AH=3F handler in src/bridge.cc still reads `const uint32_t count =
+pm32 ? reg_ecx : reg_cx;` and the comment above it reasons about exactly this
+stale-high-half hazard, resolving it by trusting ECX whenever the caller came
+through a 32-bit gate; the AH=40 write handler eighty-odd lines below it has
+the identical line.  Nothing tests it.  Closing it means either producing a
+client that demonstrates the over-read or writing down why the comment's
+reasoning is sufficient and deleting the WIP entry.
+
+- the Windows suite result of 35/37 is from a build that no longer exists, and
+there is no Windows machine here.  WIP.md records "Suite now **35/37 PASS** on
+Windows" on 2026-05-19 with EMS_PROBE and DJ_SIGNAL failing rc=1, measured
+against the DOSBox-backed build.  Both of those pass in the Linux/emu88 run
+here (42/42), and the CPU backend has been replaced entirely since, so the
+Windows status is not "two known failures" - it is unknown.  Somebody with a
+Windows box should build (bcab44a added MSYS2/MinGW-w64 support) and run
+tests/djgpp/run.sh once and say what it prints.
+
+- tests/djgpp/run.sh's run_one can pick a .asm source instead of the .COM on a
+case-insensitive filesystem, and the sibling helper already guards against it.
+run_one resolves its program with `ls tests/${name}.* | head -1`; run_audio
+does the same glob and adds `| grep -iv '\.asm$'`, with a comment naming macOS
+as the reason.  On a case-insensitive filesystem `ls tests/ADLIB.*` also
+matches tests/adlib.asm, which is why that filter exists, and run_one lacks it
+for EMS_PROBE, VCPI_PROBE, HMA_PROBE, JOYTEST and LFBTEST, each of which has a
+lowercase .asm sibling.  This could not be tested here: this box is
+case-sensitive, and under the C locale `.COM` sorts before `.asm` anyway, so
+the ordering may well save it even on a Mac.  Flagged, not confirmed - it needs
+somebody on macOS to run the suite once, or it needs the one-line filter copied
+across on the grounds that it costs nothing.
+
+- the build is not warning-clean and there is no -Werror gate.
+src/CMakeLists.txt sets `-Wall -Wextra -Wno-unused-parameter` and nothing more.
+A fresh build with SDL2 present emits 7 warnings; the same tree configured with
+-DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON emits 9.  Both counts were measured here.
+The seven: five -Wmisleading-indentation, one -Wunused-result, one
+-Wclass-memaccess.  The extra two without SDL2 are -Wunused-function on
+dosiz_video_key and dosiz_mouse_event, the two static hooks in bridge.cc's
+anonymous namespace whose only callers sit behind #ifdef HAVE_SDL2 - genuinely
+dead in that configuration, and the compiler is right.  Every site was read
+here and every one is benign: the five indentation hits are all `if (a) x; if
+(b) y;` clamps written on one line (mouse_to_virtual in bridge.cc, vesa_get in
+video.cc, axis_count in hardware.cc); the fread reads two bytes into a `uint8_t
+magic[2] = {0, 0}` and then compares them, so a short read cannot read
+uninitialised memory; and the memset target VgaState is nothing but an int, a
+uint8_t[256][3] and five uint8_t, non-trivial only because every member has a
+default initialiser.  So this is hygiene, not a defect.  It is here because
+warning-clean is the precondition for -Werror, and -Werror is the only thing
+that stops the count growing.  qxDOS did the equivalent sweep for emu88 in
+ad01cd0 "emu88: clear all 20 warnings, and stop hiding unused parameters".
+
+- headless keyboard injection, the one thing WIP.md marked NEXT, was never
+built.  The note reads "NEXT: keyboard-input injection with no interactive
+session (scripted-keystroke dosiz feature?) to exercise st80's INT 16h path
+end-to-end".  No such mechanism exists: grep of src/ for key_inject, DOSIZ_KEYS
+and keystroke finds nothing, and no DOSIZ_* variable in debug_settings.cpp or
+bridge.cc supplies scripted input.  It is the missing half of DOSIZ_FRAME_DUMP:
+output can be asserted headlessly today and input cannot, which is what stops
+the graphics fixtures above from becoming interactive tests rather than
+one-shot renders.  It is a feature request, not a defect, and it is left here
+so it is decided rather than drifted past.
