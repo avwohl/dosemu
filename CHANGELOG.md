@@ -62,6 +62,13 @@ qxDOS reaches this build with no version gate at all, and a CI run should say
 which emu88 it compiled. The top-level `Makefile` forwards `EMU88_DIR` now, so
 `make EMU88_DIR=...` works and CI needs no special-case CMake invocation.
 
+`QXDOS_REF` is the **full 40-character SHA**, and has to be: `actions/checkout`
+treats `ref` as a commit only at full length, and takes a short SHA for a branch
+or tag name — the first dispatched run failed on exactly that, fetching
+`refs/heads/64d8e7d*` and `refs/tags/64d8e7d*` and matching nothing. Replaying
+the workflow locally could not have caught it, because that clones qxDOS
+directly rather than through the action.
+
 Two things fell out of repairing it:
 
 - The dead DOSBox dependency set is gone. The install step pulled meson, ninja,

@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The qxDOS commit this build compiles emu88 from.  See the checkout step.
-      QXDOS_REF: 64d8e7d
+      QXDOS_REF: 64d8e7d27633c6a3bdeb533323dd2e0a28a6ee63
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +34,11 @@ jobs:
       # Pinned, not floating: a commit in qxDOS reaches this build with no
       # version gate at all, which is the hazard todo.txt records.  Bump it
       # deliberately.
+      #
+      # QXDOS_REF must be the FULL 40-character SHA.  actions/checkout only
+      # treats `ref` as a commit when it is full length; a short SHA is taken
+      # for a branch or tag name and the fetch asks for refs/heads/<short>* and
+      # refs/tags/<short>*, which match nothing and fail the step.
       - name: Check out qxDOS, which owns emu88
         uses: actions/checkout@v4
         with:
